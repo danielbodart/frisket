@@ -41,36 +41,49 @@ func Normalize(name string) string {
 	return string(b)
 }
 
-// Pattern is one validated allowlist entry: an exact name, or "*." and a name,
-// which matches every name strictly below it.
+// Pattern is one validated allowlist entry: every name, an exact name, or
+// "*." and a name, which matches every name below it at any depth.
 type Pattern struct {
+	// Any is the bare "*": every name.
+	Any      bool
 	Wildcard bool
 	// Name is normalised: lowercase, no trailing dot, and for a wildcard the
-	// part after "*.".
+	// part after "*.". Empty for Any.
 	Name string
 }
 
 func (p Pattern) String() string {
-	if p.Wildcard {
+	switch {
+	case p.Any:
+		return "*"
+	case p.Wildcard:
 		return "*." + p.Name
 	}
 	return p.Name
 }
 
 var (
-	errEmpty        = errors.New("empty pattern")
-	errBareStar     = errors.New(`bare "*" would match every name; list the names instead`)
-	errInteriorStar = errors.New(`"*" is only allowed as the whole first label, as in "*.example.com"`)
+	errEmpty = errors.New("empty pattern")
+	errStar  = errors.New(`"*" is allowed only alone, meaning every name, or as a leading "*.", as in "*.example.com"`)
 )
 
 // ParsePattern validates and normalises one allowlist entry.
 //
-// The grammar is exactly two shapes: a name, or "*." followed by a name. A name
-// is labels of letters, digits, hyphen and underscore, 1 to 63 of them per
-// label, no hyphen at either end, 253 in all, and one optional trailing dot.
-// Everything else is refused AT LOAD, loudly -- ottergate validates only the
-// length, so "*" is accepted and matches everything, and "api.*.com" is
-// accepted and matches nothing, which for a blocklist is silently fail-open.
+// The grammar is exactly three shapes, the ones Cilium, Azure Firewall, Squid
+// and NO_PROXY agree on:
+//
+//   - "*", alone, is every name.
+//   - "*." followed by a name is every name below it, at any depth, and not
+//     the name itself.
+//   - A name: labels of letters, digits, hyphen and underscore, 1 to 63 of
+//     them per label, no hyphen at either end, 253 in all, and one optional
+//     trailing dot.
+//
+// A "*" ANYWHERE ELSE IS REFUSED AT LOAD, loudly: "**.example.com",
+// "*example.com", "api.*.com", "example.*", "*.". ottergate validates only the
+// length, so a "*" slips into a list silently -- and "api.*.com" loads and
+// matches nothing, which for a blocklist is fail-open. Here a "*" means one of
+// two things, and anything that looks like it might mean a third is an error.
 //
 // Non-ASCII is refused rather than converted: write the xn-- form. Converting
 // would put an IDNA implementation, and its disagreements with every other
@@ -79,16 +92,16 @@ func ParsePattern(s string) (Pattern, error) {
 	if s == "" {
 		return Pattern{}, errEmpty
 	}
-	if s == "*" || s == "*." {
-		return Pattern{}, errBareStar
+	if s == "*" {
+		return Pattern{Any: true}, nil
 	}
 	raw := strings.TrimSuffix(s, ".")
 	var p Pattern
 	if rest, ok := strings.CutPrefix(raw, "*."); ok {
 		p.Wildcard, raw = true, rest
 	}
-	if strings.Contains(raw, "*") {
-		return Pattern{}, fmt.Errorf("pattern %q: %w", s, errInteriorStar)
+	if strings.Contains(raw, "*") || p.Wildcard && raw == "" {
+		return Pattern{}, fmt.Errorf("pattern %q: %w", s, errStar)
 	}
 	if err := validHostname(raw); err != nil {
 		return Pattern{}, fmt.Errorf("pattern %q: %w", s, err)
@@ -167,6 +180,8 @@ func ValidQueryName(n string) bool {
 
 // Matcher is a set of patterns. The zero value and nil both match nothing.
 type Matcher struct {
+	// any is a bare "*" in the set.
+	any   bool
 	exact map[string]struct{}
 	// wild holds each wildcard's suffix. A name matches when some proper
 	// suffix of it that starts right after a dot is in this set -- which is
@@ -188,9 +203,12 @@ func NewMatcher(patterns ...string) (*Matcher, error) {
 		if err != nil {
 			return nil, err
 		}
-		if p.Wildcard {
+		switch {
+		case p.Any:
+			m.any = true
+		case p.Wildcard:
 			m.wild[p.Name] = struct{}{}
-		} else {
+		default:
 			m.exact[p.Name] = struct{}{}
 		}
 		m.patterns = append(m.patterns, p)
@@ -216,7 +234,8 @@ func (m *Matcher) Patterns() []Pattern {
 }
 
 // Match reports whether name, in any case and with or without a trailing dot,
-// is covered by the set.
+// is covered by the set. Even "*" matches only a valid name: every name is
+// every name, not every string.
 func (m *Matcher) Match(name string) bool {
 	if m == nil {
 		return false
@@ -229,6 +248,9 @@ func (m *Matcher) Match(name string) bool {
 	n := Normalize(name)
 	if !ValidQueryName(n) {
 		return false
+	}
+	if m.any {
+		return true
 	}
 	if _, ok := m.exact[n]; ok {
 		return true

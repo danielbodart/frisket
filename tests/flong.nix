@@ -87,6 +87,8 @@ in
           "/api.test/${upstream4}"
           "/api.test/${upstream6}"
           "/denied.test/${upstream4}"
+          # On no allowlist: only a policy that allows every name resolves it.
+          "/unlisted.test/${upstream4}"
         ];
       };
     };
@@ -140,6 +142,12 @@ in
           credentialFile = "/srv/secrets/token";
           paths = [{ methods = [ "GET" ]; prefix = "/v1"; }];
         };
+      };
+      # The trusted shape: every name, and the same route still intercepted.
+      policies.trusted = {
+        allow = [ "*" ];
+        intercept = [ "api.test" ];
+        routes.api = config.services.frisket.policies.test.routes.api;
       };
     };
 
@@ -268,6 +276,17 @@ in
       attach = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
     services.frisket.flong.networked = { policy = "test"; set = "service"; };
+
+    # The same, under the policy that allows every name.
+    flong.trusted = {
+      container = "strict";
+      user = "alice";
+      workspace = "realpath /srv/work";
+      command = ''set -- bash -c "$1"'';
+      network = { };
+      attach = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+    };
+    services.frisket.flong.trusted = { policy = "trusted"; set = "service"; };
   };
 
   testScript = { nodes, ... }:
@@ -276,6 +295,7 @@ in
       probed = lib.getExe nodes.machine.flong.probed.launcher;
       badpolicy = lib.getExe nodes.machine.flong.badpolicy.launcher;
       networked = lib.getExe nodes.machine.flong.networked.launcher;
+      trusted = lib.getExe nodes.machine.flong.trusted.launcher;
       frisket = lib.getExe nodes.machine.services.frisket.package;
       ca = nodes.machine.services.frisket.caCertificate;
     in
@@ -679,6 +699,22 @@ in
           out = machine.succeed(as_workload(leader, "dig +short +time=2 +tries=1 leaked.allowed.test @${upstream4}"))
           assert out.strip() == "${upstream4}", out
           upstream.succeed("journalctl -u dnsmasq -o cat | grep -q leaked.allowed.test")
+          release(name)
+
+      with subtest("a `service` policy allowing `*` resolves any name, and still intercepts its route's host"):
+          name, leader = hold("${trusted}", "ip route show default | grep -q .")
+          out = machine.succeed(as_workload(leader, "dig +short +time=2 +tries=1 unlisted.test @127.0.0.1"))
+          assert out.strip() == "${upstream4}", out
+          [d] = wait_log("dns", name, lambda m: m.get("name") == "unlisted.test", "the unlisted name")
+          assert d["decision"] == "resolved" and d["upstream"] == "${upstream4}:53", d
+          out = machine.succeed(as_workload(leader, "curl -sS -m 5 http://unlisted.test/"))
+          assert "upstream-body" in out, out
+          out = machine.succeed(as_workload(leader, "dig +short A api.test @127.0.0.1"))
+          assert out.strip() == "192.0.2.2", out
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt https://api.test/v1/models"))
+          assert out.strip() == "upstream-api-ok", out
+          [r] = wait_log("request", name, lambda m: m["path"] == "/v1/models", "the request")
+          assert r["decision"] == "allowed" and r["status"] == 200 and r["route"] == "api", r
           release(name)
 
       with subtest("the workload cannot list the ruleset, even after unshare -U"):

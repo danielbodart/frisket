@@ -42,15 +42,17 @@ type Config struct {
 
 // Policy is one policy, as data.
 type Policy struct {
-	// Allow is the name allowlist: exact names and "*.suffix" patterns. A name
-	// not on it is refused at DNS without an upstream lookup, and so has no
-	// address egress would accept.
+	// Allow is the name allowlist: exact names, "*.suffix" for every name
+	// below suffix, and "*" alone for every name. A name not on it is
+	// refused at DNS without an upstream lookup, and so has no address egress
+	// would accept.
 	Allow []string `json:"allow"`
 	// Intercept names are answered with the session's service address, so
 	// their connections reach interception. Each must also be allowed --
 	// interception is how an allowed host gets its credential, not a way round
 	// the allowlist -- and each must have a route, or its TLS is refused at
-	// the handshake and the name is a dead end.
+	// the handshake and the name is a dead end. Exact names only: a route
+	// serves one host.
 	Intercept []string `json:"intercept,omitempty"`
 	// Routes are the intercepted hosts' credentials and scopes.
 	Routes []Route `json:"routes,omitempty"`
@@ -189,9 +191,9 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 	}
 	for _, pat := range icpt.Patterns() {
 		// One name per route, so a wildcard could never be served: every name
-		// under it would resolve to the service address and fail at the
+		// it matched would resolve to the service address and fail at the
 		// handshake.
-		if pat.Wildcard {
+		if pat.Any || pat.Wildcard {
 			return nil, fmt.Errorf("intercept %s: a wildcard, and a route is for one host", pat)
 		}
 		if !allow.Match(pat.Name) {

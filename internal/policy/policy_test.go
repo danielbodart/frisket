@@ -17,6 +17,7 @@ import (
 	"github.com/danielbodart/frisket/internal/dns"
 	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/serve"
 	"github.com/danielbodart/frisket/internal/steer"
 )
 
@@ -87,11 +88,13 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"an intercepted name not on the allowlist": func(p *Policy) { p.Allow = []string{"allowed.test"} },
 		"an intercepted name with no route":        func(p *Policy) { p.Intercept = append(p.Intercept, "allowed.test") },
 		"a wildcard intercept":                     func(p *Policy) { p.Intercept = append(p.Intercept, "*.cdn.test") },
+		"a bare * intercept":                       func(p *Policy) { p.Allow = []string{"*"}; p.Intercept = append(p.Intercept, "*") },
 		"a route for a name not intercepted":       func(p *Policy) { p.Intercept = nil },
 		"a route with no scope":                    func(p *Policy) { p.Routes[0].Paths = nil },
 		"a route with no credential":               func(p *Policy) { p.Routes[0].CredentialFile = "" },
 		"a plain-HTTP upstream":                    func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
-		"a bad allowlist pattern":                  func(p *Policy) { p.Allow = append(p.Allow, "*") },
+		"a * inside an allowlist name":             func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
+		"a * glued to an allowlist name":           func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
 		"Authorization named as a bare header":     func(p *Policy) { p.Routes[0].Header = "authorization" },
 	} {
 		p := valid(t)
@@ -137,21 +140,7 @@ func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 		t.Fatalf("handlers = %+v", h)
 	}
 
-	ask := func(name string) *dnsmessage.Message {
-		t.Helper()
-		b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 7, RecursionDesired: true})
-		_ = b.StartQuestions()
-		_ = b.Question(dnsmessage.Question{Name: dnsmessage.MustNewName(name), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET})
-		q, _ := b.Finish()
-		got := make(chan []byte, 1)
-		h.DNS.ServePacket(context.Background(), steer.NewDatagram("s", netip.MustParseAddrPort("192.0.2.1:4000"), netip.MustParseAddrPort("127.0.0.1:53"), q,
-			func(b []byte) error { got <- append([]byte(nil), b...); return nil }))
-		var m dnsmessage.Message
-		if err := m.Unpack(<-got); err != nil {
-			t.Fatal(err)
-		}
-		return &m
-	}
+	ask := func(name string) *dnsmessage.Message { return ask(t, h, name) }
 	m := ask("api.test.")
 	if len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{192, 0, 2, 2} {
 		t.Errorf("the intercepted name answered %+v, want the session's service address", m.Answers)
@@ -177,6 +166,53 @@ func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 	}
 	if h2.Intercept != h.Intercept {
 		t.Error("two sessions of one policy have different interceptors; routes and their credentials are the policy's")
+	}
+}
+
+// ask sends one A query to a session's DNS and returns the reply.
+func ask(t *testing.T, h serve.Handlers, name string) *dnsmessage.Message {
+	t.Helper()
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 7, RecursionDesired: true})
+	_ = b.StartQuestions()
+	_ = b.Question(dnsmessage.Question{Name: dnsmessage.MustNewName(name), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET})
+	q, _ := b.Finish()
+	got := make(chan []byte, 1)
+	h.DNS.ServePacket(context.Background(), steer.NewDatagram("s", netip.MustParseAddrPort("192.0.2.1:4000"), netip.MustParseAddrPort("127.0.0.1:53"), q,
+		func(b []byte) error { got <- append([]byte(nil), b...); return nil }))
+	var m dnsmessage.Message
+	if err := m.Unpack(<-got); err != nil {
+		t.Fatal(err)
+	}
+	return &m
+}
+
+// A TRUSTED POLICY ALLOWS EVERY NAME AND STILL INTERCEPTS SOME: "*" sends any
+// name upstream, and the intercepted one is still answered with the service
+// address and never asked about.
+func TestEveryNameCanBeAllowedWhileSomeAreIntercepted(t *testing.T) {
+	up := &counting{}
+	p := valid(t)
+	p.Allow = []string{"*"}
+	set, err := Build(&Config{Policies: map[string]Policy{"p": p}}, deps(t, up))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2")}
+	h, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, slog.New(slog.NewJSONHandler(&journal{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := ask(t, h, "api.test."); len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{192, 0, 2, 2} {
+		t.Errorf("the intercepted name answered %+v, want the service address", m.Answers)
+	}
+	if m := ask(t, h, "anything.unlisted.example."); m.RCode != dnsmessage.RCodeSuccess {
+		t.Errorf("an unlisted name answered %v under *", m.RCode)
+	}
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	if len(up.asked) != 1 || up.asked[0] != "anything.unlisted.example." {
+		t.Errorf("upstream was asked %v, want the unlisted name alone", up.asked)
 	}
 }
 

@@ -80,7 +80,16 @@ flong.agent.command = ''
   is rejected, and frisket is the only way out.
 - `service` — the sandbox has its own network (flong's `network`). Only DNS and
   frisket's service address, `192.0.2.2` and `2001:db8::2`, are steered;
-  everything else goes direct.
+  everything else goes direct. DNS is still held to the policy, so a policy
+  that should resolve everything allows `*` and intercepts as usual:
+
+  ```nix
+  services.frisket.policies.trusted = {
+    allow = [ "*" ];
+    intercept = [ "api.example.com" ];
+    routes.example = { /* as above */ };
+  };
+  ```
 
 ## Other launchers
 
@@ -104,8 +113,8 @@ to run out of turn.
 | option | default | |
 |---|---|---|
 | `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
-| `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name` or `*.name` |
-| `services.frisket.policies.<name>.intercept` | `[ ]` | names answered with frisket's address; each must be allowed and have a route |
+| `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
+| `services.frisket.policies.<name>.intercept` | `[ ]` | exact names answered with frisket's address; each must be allowed and have a route |
 | `services.frisket.policies.<name>.routes.<route>` | `{ }` | `host`, `upstream`, `upstreamCA`, `credentialFile`, `header` (null: `Authorization: Bearer`), `strip`, `paths` |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
 | `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host |

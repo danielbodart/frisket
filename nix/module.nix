@@ -35,11 +35,14 @@ let
       cfg.policies;
   });
 
-  # A name is on the allowlist exactly, or under one of its wildcards. The
-  # daemon makes the same check with the real matcher; this one only says so
-  # at evaluation, where the mistake was made.
-  allowed = allow: n: lib.elem n allow
+  # A name is on the allowlist exactly, under one of its wildcards, or the
+  # list has "*". The daemon makes the same checks with the real matcher;
+  # these only say so at evaluation, where the mistake was made.
+  allowed = allow: n: lib.elem "*" allow || lib.elem n allow
     || lib.any (w: lib.hasPrefix "*." w && lib.hasSuffix (lib.removePrefix "*" w) n) allow;
+
+  # A "*" is the whole entry, or a leading "*.", and nowhere else.
+  starPlaced = w: w == "*" || ! lib.hasInfix "*" (lib.removePrefix "*." w);
 
   pathRule = types.submodule {
     options = {
@@ -195,10 +198,11 @@ in
             type = types.listOf types.str;
             default = [ ];
             description = ''
-              Names a session may resolve: `name` or `*.name`, which matches
-              every name below it and not the name itself. A name not here is
-              refused at DNS without an upstream lookup, and egress accepts only
-              addresses DNS resolved for a name that is.
+              Names a session may resolve: `name`; `*.name`, which matches
+              every name below it at any depth and not the name itself; or `*`
+              alone, every name. A `*` anywhere else is refused. A name not
+              here is refused at DNS without an upstream lookup, and egress
+              accepts only addresses DNS resolved for a name that is.
             '';
           };
           intercept = mkOption {
@@ -207,7 +211,8 @@ in
             description = ''
               Names answered with the session's service address, so their TLS
               is terminated by frisket and their requests carry a route's
-              credential. Each must be on `allow` and have a route.
+              credential. Exact names only; each must be on `allow` and have a
+              route.
             '';
           };
           routes = mkOption {
@@ -246,6 +251,12 @@ in
     assertions = lib.concatLists (lib.mapAttrsToList
       (name: p:
         map
+          (w: {
+            assertion = starPlaced w;
+            message = "services.frisket.policies.${name}.allow has ${w}: a `*` is allowed only alone, meaning every name, or as a leading `*.`.";
+          })
+          p.allow
+        ++ map
           (n: {
             assertion = allowed p.allow n;
             message = "services.frisket.policies.${name}.intercept names ${n}, which is not on its allowlist: interception is how an allowed host gets its credential, not a way round the allowlist.";

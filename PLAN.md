@@ -335,6 +335,9 @@ Recorded so they are not re-proposed without new information.
   response it is validating, proves nothing, and breaks resolution for unsigned
   zones on its own allowlist. If upstream integrity matters, use DoT or DoH to a
   validating resolver and keep 0x20 encoding for the local hop.
+- **Cilium's single-label `*.`, and a `**` for any depth.** `*.name` is any
+  depth, as in Azure Firewall, Squid and `NO_PROXY`, and there is no second
+  spelling.
 - **Zig and Bun.** Zig's std has, to our knowledge, no RSA signing and no
   use-after-free protection; Bun's HTTP servers cannot do CONNECT and it parses
   hostile input in younger native code.
@@ -502,6 +505,15 @@ frisket answers every query it is given. A name on the session's allowlist that
 is intercepted resolves to the service address; a name that is allowed but not
 intercepted is resolved upstream and returned; a name that is not allowed is
 refused without an upstream lookup, so it cannot leak through DNS.
+
+An allowlist entry has three shapes, with the meanings Cilium, Azure Firewall,
+Squid and `NO_PROXY` give them: a name; `*.name`, every name below it at any
+depth and not the name itself; and `*` alone, every name. A `*` anywhere else —
+`**.name`, `*name`, `a.*.name`, `name.*` — is refused when the configuration
+loads, because a `*` that loads silently into a restrictive list is the bug
+ottergate has. `*` is how a trusted policy leaves names unfiltered and still
+intercepts its credential hosts. Intercepted names are exact: a route serves one
+host.
 
 Upstream queries get 0x20 encoding, a fresh random transaction id and a
 connected socket per query, and a response is dropped unless its question
@@ -692,7 +704,8 @@ this is a parser or a classifier facing hostile input:
 - Property tests for the address classifier (a refusal is never turned into an
   acceptance by any allowlist; every spelling of an address classifies as the
   address), the allowlist matcher (`evil-google.com` never matches
-  `*.google.com`; case, trailing dots and punycode), and the splice (bytes are
+  `*.google.com`; case, trailing dots and punycode; a `*` is accepted only
+  alone or as a leading `*.`), and the splice (bytes are
   preserved in both directions, including after a half-close).
 - The splice waits for both directions. Closing one must not truncate the other,
   which is a bug ottergate has in both of its proxy paths.
@@ -792,8 +805,3 @@ inside, which the credential binds going away does not change.
    the CA is made. Undecided.
 8. **QUIC's policy.** Whether a relay's per-address allowlist is enough, or the
    Initial's SNI must be read (see "Build order").
-9. **Every name, for a `service` policy.** DNS is steered in both sets, so a
-   `service` sandbox's names are held to its policy's allowlist too, and the
-   matcher refuses a bare `*`. The trusted tier's "other egress: direct" needs
-   either a way to allow every name while still intercepting some, or its
-   allowlist written out.

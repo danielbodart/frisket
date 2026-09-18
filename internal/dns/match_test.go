@@ -56,14 +56,19 @@ func TestMatcherAdversarial(t *testing.T) {
 func TestParsePatternRefusesWhatIsNotAName(t *testing.T) {
 	for _, bad := range []string{
 		"",
-		"*",
 		"*.",
+		"*..",
+		"**",
 		"**.google.com",
 		"*google.com",
 		"api.*.com",
+		"a.*.com",
 		"google.*",
+		"google.com*",
 		"*.*.google.com",
-		"*.",
+		"*.google.*",
+		"*.*",
+		" *",
 		".google.com",
 		"google..com",
 		"google.com..",
@@ -86,14 +91,35 @@ func TestParsePatternRefusesWhatIsNotAName(t *testing.T) {
 		"_acme-challenge.x.test": {Name: "_acme-challenge.x.test"},
 		"*.com":                  {Wildcard: true, Name: "com"},
 		"xn--bcher-kva.example":  {Name: "xn--bcher-kva.example"},
+		"*":                      {Any: true},
 	} {
 		got, err := ParsePattern(in)
 		if err != nil || got != want {
 			t.Errorf("ParsePattern(%q) = %+v, %v; want %+v", in, got, err, want)
 		}
 	}
-	if _, err := NewMatcher("ok.example", "*"); err == nil {
-		t.Error("NewMatcher loaded a policy containing a bare *")
+	// The refusal says what a "*" may be, so the fix is in the error.
+	if _, err := NewMatcher("ok.example", "api.*.com"); err == nil || !strings.Contains(err.Error(), `"*" is allowed only alone`) {
+		t.Errorf("NewMatcher with api.*.com = %v, want the two shapes a * may take", err)
+	}
+}
+
+// A BARE "*" IS EVERY NAME -- and only names: a string no name could be is not
+// matched by it any more than by anything else.
+func TestABareStarMatchesEveryNameAndNothingElse(t *testing.T) {
+	m := MustMatcher("*")
+	for _, name := range []string{"example.com", "a.b.c.example.org.", "LOCALHOST", "_srv._tcp.x.test", "xn--bcher-kva.example", "com"} {
+		if !m.Match(name) {
+			t.Errorf("* did not match %q", name)
+		}
+	}
+	for _, name := range []string{"", ".", ".example.com", "a..b", "example.com..", "bücher.example", "api github.com", "api.github.com\x00", strings.Repeat("a.", 150) + "com"} {
+		if m.Match(name) {
+			t.Errorf("* matched %q, which is not a name", name)
+		}
+	}
+	if got := MustMatcher("api.github.com", "*", "*.cdn.test").Patterns(); len(got) != 3 || !got[1].Any || got[1].String() != "*" {
+		t.Errorf("Patterns() = %+v", got)
 	}
 }
 
@@ -152,6 +178,32 @@ func propWildcardBoundary(t *rapid.T) {
 	}
 }
 
+// A "*" IS ACCEPTED IN TWO PLACES ONLY, generalised: put one anywhere in a
+// valid name, or anywhere after a leading "*.", and the entry is refused; the
+// bare "*" matches every valid name there is.
+func TestAStarAnywhereElseIsRefused(t *testing.T) {
+	rapid.Check(t, propStarPlacement)
+}
+
+func FuzzAStarAnywhereElseIsRefused(f *testing.F) {
+	f.Fuzz(rapid.MakeFuzz(propStarPlacement))
+}
+
+func propStarPlacement(t *rapid.T) {
+	name := genName(t, "name")
+	i := rapid.IntRange(0, len(name)).Draw(t, "at")
+	starred := name[:i] + "*" + name[i:]
+	if rapid.Bool().Draw(t, "under-a-wildcard") {
+		starred = "*." + starred
+	}
+	if p, err := ParsePattern(starred); err == nil {
+		t.Fatalf("ParsePattern(%q) accepted it as %+v", starred, p)
+	}
+	if !MustMatcher("*").Match(name) {
+		t.Fatalf("* did not match %q", name)
+	}
+}
+
 // NORMALISATION IS IDEMPOTENT, for any string at all, and ParsePattern round
 // trips through its own String.
 func TestNormalizeIsIdempotent(t *testing.T) {
@@ -182,7 +234,7 @@ func propNormalizeIdempotent(t *rapid.T) {
 // Patterns come from configuration rather than the sandbox, but the grammar is
 // the whole guarantee that "*" and "api.*.com" never load, so it is fuzzed too.
 func FuzzParsePattern(f *testing.F) {
-	for _, s := range []string{"*.google.com", "*", "api.*.com", "google.com.", "..", "*..x"} {
+	for _, s := range []string{"*.google.com", "*", "*.", "**", "api.*.com", "google.com.", "..", "*..x"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
@@ -190,11 +242,19 @@ func FuzzParsePattern(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if strings.Contains(p.Name, "*") || p.Name == "" {
+		if strings.Contains(p.Name, "*") || (p.Name == "") != p.Any {
 			t.Fatalf("ParsePattern(%q) = %+v", s, p)
 		}
+		// A "*" that loaded is the whole entry or its leading "*.".
+		if star := strings.Index(s, "*"); star >= 0 && s != "*" && (star != 0 || !strings.HasPrefix(s, "*.") || strings.Contains(s[1:], "*")) {
+			t.Fatalf("ParsePattern(%q) accepted a * in position %d", s, star)
+		}
 		m := MustMatcher(s)
-		if p.Wildcard && len(p.Name) <= maxName-2 {
+		if p.Any {
+			if !m.Match("x.example") {
+				t.Fatalf("%q does not match x.example", s)
+			}
+		} else if p.Wildcard && len(p.Name) <= maxName-2 {
 			if m.Match(p.Name) || !m.Match("x."+p.Name) {
 				t.Fatalf("wildcard %q: matches itself %v, matches x.%s %v", s, m.Match(p.Name), p.Name, m.Match("x."+p.Name))
 			}
