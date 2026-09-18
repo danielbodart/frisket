@@ -5,14 +5,14 @@
 #
 #   services.frisket.flong.<launcher> = { policy = "..."; set = "all"; };
 #
-# flong's contract is an ordering: whatever `attach` installs is in place
+# flong's contract is an ordering: whatever `postStart` installs is in place
 # before anything gives the namespace egress, and flong attaches its own
-# network after `attach` returns. frisket's is the same ordering one level
+# network after `postStart` returns. frisket's is the same ordering one level
 # down -- listeners, then rules, then connectivity -- so the hook is laid out
 # around the consumer's own:
 #
 #   mkBefore  frisket steer    listeners inside, handed to the daemon; rules
-#   (default) your attach      more rules, if you have any: still no egress
+#   (default) your postStart   more rules, if you have any: still no egress
 #   mkAfter   frisket connect  the service address, and for "all" the dummy
 #   (flong)   network          pasta, for "service"
 #
@@ -20,16 +20,15 @@
 # wrong fails the launch rather than leaving a session unsteered.
 #
 # And the machine's CA certificate is bound into every session at
-# /etc/frisket/ca.crt, read-only to the workload. Which runtimes are told to
-# trust it, and how, is the consumer's business.
+# /etc/frisket/ca.crt, read-only. Which runtimes are told to trust it, and
+# how, is the consumer's business.
 self:
 { config, lib, pkgs, ... }:
 
 let
   cfg = config.services.frisket;
   inherit (lib) mkOption types;
-  exe = lib.getExe cfg.package;
-  root = "-control ${cfg.controlSocket} -nft ${pkgs.nftables}/bin/nft -ip ${pkgs.iproute2}/bin/ip";
+  control = "-control ${cfg.controlSocket}";
 
   steeringFile = name: s: pkgs.writeText "frisket-steering-${name}.json"
     (self.lib.steering ({ inherit (s) set; } // s.steering)).json;
@@ -37,11 +36,6 @@ let
   paramFlags = s: lib.concatMapStringsSep " "
     (k: "-param ${lib.escapeShellArg "${k}=${s.params.${k}}"}")
     (lib.attrNames s.params);
-
-  # Where the CA certificate appears inside every session.
-  caPath = "/etc/frisket/ca.crt";
-  # Per-session copies of it, on the host.
-  caCopies = "/run/frisket-ca";
 in
 {
   imports = [ (import ./module.nix self) ];
@@ -94,11 +88,20 @@ in
     flong = lib.mapAttrs
       (name: s:
         let file = steeringFile name s; in {
+          # frisket itself, and the nft and ip it runs inside the namespace,
+          # resolved on the host before it enters.
+          path = [ cfg.package pkgs.nftables pkgs.iproute2 ];
+          # The daemon's own file, read-only: the workload cannot write it
+          # through the bind, and a read-only bind cannot be made writable
+          # from inside.
+          preStart = ''
+            flong-bind ${cfg.caCertificate} /etc/frisket/ca.crt
+          '';
           # Listeners, handed over, and the rules. A failure here ends the
           # session: flong kills the scope of a hook that exits non-zero.
-          attach = lib.mkMerge [
+          postStart = lib.mkMerge [
             (lib.mkBefore ''
-              ${exe} steer ${root} -netns "$netns" -steering ${file} \
+              frisket steer ${control} -netns "$netns" -steering ${file} \
                 -name "$machine" -policy ${lib.escapeShellArg s.policy} \
                 -param workspace="$workspace" ${paramFlags s}
             '')
@@ -106,24 +109,13 @@ in
             # namespace's session and its table is loaded before touching
             # anything.
             (lib.mkAfter ''
-              ${exe} connect ${root} -netns "$netns" -steering ${file} -name "$machine"
+              frisket connect ${control} -netns "$netns" -steering ${file} -name "$machine"
             '')
           ];
-          # A COPY, ROOT-OWNED AND 0444, not the daemon's own file. flong binds
-          # read-write, and the daemon's file belongs to the user whose
-          # credentials it holds -- usually the workload's own uid, which
-          # could then rewrite what every later session trusts. A copy per
-          # session, so one session's teardown never pulls another's.
-          attachBinds = ''
-            ${pkgs.coreutils}/bin/install -D -m 0444 -o root -g root \
-              ${cfg.caCertificate} ${caCopies}/"$machine".crt
-            printf '%s\n' "${caCopies}/$machine.crt:${caPath}"
-          '';
           # Keyed on $machine alone, because on the sweep's path that is all
           # there is; and safe for a session that is already gone.
-          detach = ''
-            ${exe} close -control ${cfg.controlSocket} -name "$machine"
-            rm -f ${caCopies}/"$machine".crt
+          postStop = ''
+            frisket close ${control} -name "$machine"
           '';
         })
       cfg.flong;

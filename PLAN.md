@@ -133,10 +133,10 @@ endpoints a tool hard-codes.
   of its intercepted hosts until it is relaunched — accepted, because sessions
   are short-lived and the set changes only when a policy does. The key is
   `0600`, created exclusively, and never leaves the state directory. The NixOS
-  module exposes the certificate's path, and the flong adapter binds
-  a root-owned `0444` copy into every session at `/etc/frisket/ca.crt` — a copy,
-  because flong's binds are read-write and the daemon's file belongs to the
-  user whose uid the workload usually shares. Telling each runtime to trust it
+  module exposes the certificate's path, and the flong adapter binds the
+  daemon's own file into every session at `/etc/frisket/ca.crt`, read-only —
+  the file belongs to the user whose uid the workload usually shares, and a
+  read-only bind is what stops that uid rewriting it. Telling each runtime to trust it
   (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, a system
   bundle) is the consumer's policy, not frisket's.
 - Which hosts are intercepted is decided by frisket's DNS: an intercepted name
@@ -772,12 +772,12 @@ node's address can be used.
 ## Required changes elsewhere
 
 **flong** — generic, agent-agnostic, with a plan of its own in that
-repository. What frisket uses from it: a root hook that runs after the
-namespace exists with the ordering contract above, a teardown hook called from
-both the clean and the killed path, per-session binds with source ≠
-destination (the CA), the capability flags as defence in depth, and `network`
-— pasta for a private session. flong's binds are read-write, which is why the
-CA bound in is a root-owned copy.
+repository. What frisket uses from it: `postStart`, a root hook that runs
+after the namespace exists with the ordering contract above; `postStop`, called
+from both the clean and the killed path; `preStart`'s `flong-bind`, a
+read-only per-session bind with source ≠ destination (the CA); `path`, for
+the tools the hooks run; the capability flags as defence in depth; and
+`network` — pasta for a private session.
 
 Two properties frisket depends on that are flong's to keep: the namespace is
 owned by the initial user namespace, and egress is provisioned last.

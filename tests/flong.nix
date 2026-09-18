@@ -179,6 +179,14 @@ in
       while [ ! -e release ]; do sleep 0.1; done
     '';
 
+    # The same machine with the test policy's allowlist changed: allowed.test
+    # taken off it, unlisted.test put on. Switched to while a session runs,
+    # which restarts the daemon, to show which policy a restored session is
+    # served under.
+    specialisation.narrowed.configuration = {
+      services.frisket.policies.test.allow = lib.mkForce [ "api.test" "unlisted.test" ];
+    };
+
     containers.strict = {
       autoStart = false;
       privateNetwork = true;
@@ -196,7 +204,7 @@ in
       workspace = "realpath /srv/work";
       command = ''set -- bash -c "$1"'';
       # Ahead of frisket's own steps, so the test can find the session.
-      attach = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+      postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
     services.frisket.flong.strict.policy = "test";
 
@@ -209,7 +217,7 @@ in
       user = "alice";
       workspace = "realpath /srv/work";
       command = ''set -- bash -c "$1"'';
-      attach = lib.mkMerge [
+      postStart = lib.mkMerge [
         (lib.mkOrder 100 ''
           echo "$machine" > /tmp/last-session
           # In the session's own mount namespace as well as its network one,
@@ -249,7 +257,7 @@ in
           date +%s.%N > "/tmp/connect-at-$machine"
         ''
       ];
-      detach = lib.mkAfter ''
+      postStop = lib.mkAfter ''
         [ -e "/tmp/probe-pid-$machine" ] && kill "$(cat "/tmp/probe-pid-$machine")" 2>/dev/null || true
       '';
     };
@@ -261,7 +269,7 @@ in
       user = "alice";
       workspace = "realpath /srv/work";
       command = ''set -- bash -c "$1"'';
-      attach = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+      postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
     services.frisket.flong.badpolicy.policy = "nonesuch";
 
@@ -273,7 +281,7 @@ in
       workspace = "realpath /srv/work";
       command = ''set -- bash -c "$1"'';
       network = { };
-      attach = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+      postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
     services.frisket.flong.networked = { policy = "test"; set = "service"; };
 
@@ -284,7 +292,7 @@ in
       workspace = "realpath /srv/work";
       command = ''set -- bash -c "$1"'';
       network = { };
-      attach = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+      postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
     services.frisket.flong.trusted = { policy = "trusted"; set = "service"; };
   };
@@ -433,7 +441,7 @@ in
           # only for what it refuses.
           assert len(lines_of("egress", name)) == 2, lines_of("egress", name)
           assert lines_of("connection", name) == [], lines_of("connection", name)
-          # And the session is gone with the launcher: flong's detach closed it.
+          # And the session is gone with the launcher: flong's postStop closed it.
           assert [s for s in sessions() if s["name"] == name] == []
           [closed] = wait_log("session closed", name, lambda m: True, "close")
           assert closed["descriptors"] == 5, closed
@@ -579,8 +587,13 @@ in
 
       with subtest("the machine's CA is bound into the session, and the workload cannot change it"):
           machine.succeed(f"cmp /proc/{leader}/root/etc/frisket/ca.crt ${ca}")
-          machine.fail(as_workload(leader, "echo forged >> /etc/frisket/ca.crt"))
-          machine.fail(as_workload(leader, "chmod u+w /etc/frisket/ca.crt"))
+          # The daemon's own file, owned by the workload's uid: only the bind
+          # being read-only stops it, so that is what each attempt must hit.
+          assert machine.succeed("stat -c %u ${ca}").strip() == "1000"
+          for cmd in ["echo forged >> /etc/frisket/ca.crt", "chmod u+w /etc/frisket/ca.crt",
+                      "touch /etc/frisket/ca.crt"]:
+              status, out = machine.execute(as_workload(leader, f"{{ {cmd}; }} 2>&1"))
+              assert status != 0 and "Read-only file system" in out, (cmd, status, out)
           machine.succeed(f"cmp /proc/{leader}/root/etc/frisket/ca.crt ${ca}")
 
       with subtest("the intercepted name resolves to the service address, and only that name does"):
@@ -785,5 +798,38 @@ in
           assert daemon_fds(pid) == held - 5, (held, daemon_fds(pid))
           [closed] = wait_log("session closed", name, lambda m: True, "close")
           assert closed["descriptors"] == 5, closed
+
+      with subtest("a session restored after a switch is served under the policy as now configured"):
+          name, leader = hold("${strict}", "ip link show frisket0")
+          out = machine.succeed(as_workload(leader, "dig +short +time=2 +tries=1 A allowed.test @127.0.0.1"))
+          assert out.strip() == "${upstream4}", out
+          out = machine.succeed(as_workload(leader, "dig +time=2 +tries=1 unlisted.test @127.0.0.1"))
+          assert "status: NXDOMAIN" in out, out
+          first = main_pid()
+          # What nixos-rebuild switch does: the daemon's unit changed, so it
+          # is restarted, and the session comes back from the fd store.
+          machine.succeed("${nodes.machine.system.build.toplevel}/specialisation/narrowed/bin/switch-to-configuration test")
+          machine.wait_for_unit("frisket.service")
+          assert main_pid() != first
+          wait_log("session restored", name, lambda m: m["policy"] == "test", "restore")
+          [s] = [s for s in sessions() if s["name"] == name]
+          assert s["restored"] and s["descriptors"] == 5, s
+          # The name taken off the allowlist is refused now, and the one put
+          # on it resolves: the policy is the one the daemon has, looked up
+          # by name, and not the one the session was opened under.
+          out = machine.succeed(as_workload(leader, "dig +time=2 +tries=1 allowed.test @127.0.0.1"))
+          assert "status: NXDOMAIN" in out, out
+          [d] = wait_log("dns", name, lambda m: m.get("name") == "allowed.test" and m["decision"] == "refused",
+                         "the name taken off")
+          assert d["reason"] == "not allowed", d
+          machine.fail(as_workload(leader, "curl -sS -m 5 http://allowed.test/"))
+          out = machine.succeed(as_workload(leader, "dig +short +time=2 +tries=1 A unlisted.test @127.0.0.1"))
+          assert out.strip() == "${upstream4}", out
+          out = machine.succeed(as_workload(leader, "curl -sS -m 5 http://unlisted.test/"))
+          assert "upstream-body" in out, out
+          # And the route, unchanged, still adds the credential.
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt https://api.test/v1/models"))
+          assert out.strip() == "upstream-api-ok", out
+          release(name)
     '';
 }
