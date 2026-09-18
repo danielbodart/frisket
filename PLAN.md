@@ -69,8 +69,9 @@ forge. A workload that connects to a listener directly instead of being
 redirected is identifiable — the lookup either fails or returns the listener's
 own address — and is refused.
 
-Two listeners per session is the whole surface: one TCP, one DNS. The kernel
-says which is which.
+Two listeners per session is the whole surface: one TCP, one DNS — four
+sockets, since each exists per family, and the ruleset and the listener
+specification have to agree on that count. The kernel says which is which.
 
 The one unix socket that remains is on the host, between the adapter and
 frisket, for creating a session. It is never bound into a sandbox.
@@ -211,6 +212,15 @@ the design wrong that was found by running it, and each gets a test:
   only handle. Leak it and the namespace is pinned for the daemon's lifetime.
 - **Cap concurrent connections per session.** Each one now costs a host
   descriptor.
+- **`setns(CLONE_NEWNET)` needs `CAP_SYS_ADMIN` in two user namespaces** — the
+  one owning the target, and the caller's own. So the listeners are made by
+  root, in `frisket steer`, and never by the daemon: a non-root `serve` could
+  not make them even for a namespace it owns. Nor could it acquire the second,
+  since `setns(CLONE_NEWUSER)` refuses a multi-threaded caller and every Go
+  program is multi-threaded before `main` runs.
+- **The descriptors therefore cross two boundaries**, not one: root's helper
+  makes them, and hands them to the daemon over the control socket. "Fork the
+  helper and receive" is only the launcher-side half.
 - **If `setns` is ever done in-process, lock the thread and never unlock it.**
   Measured: unlocking let the Go runtime schedule ordinary goroutines onto a
   thread still inside the sandbox, and 13 of 200 of frisket's own upstream
