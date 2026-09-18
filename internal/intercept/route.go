@@ -59,6 +59,9 @@ func Bearer() Injector { return bearer{} }
 
 // BasicUser is `Authorization: Basic base64(user:<token>)`: git over HTTPS,
 // which GitHub accepts as x-access-token and an installation token.
+//
+// PROVISIONAL: shaped around git before git's route was designed, and used by
+// no policy.
 func BasicUser(user string) Injector { return basic{user: user} }
 
 // HeaderNamed puts the token, bare, in a header of its own: `x-api-key`.

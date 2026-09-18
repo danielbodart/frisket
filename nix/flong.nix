@@ -18,6 +18,10 @@
 #
 # Each frisket step refuses to run out of turn, so a snippet that gets this
 # wrong fails the launch rather than leaving a session unsteered.
+#
+# And the machine's CA certificate is bound into every session at
+# /etc/frisket/ca.crt, read-only to the workload. Which runtimes are told to
+# trust it, and how, is the consumer's business.
 self:
 { config, lib, pkgs, ... }:
 
@@ -33,6 +37,11 @@ let
   paramFlags = s: lib.concatMapStringsSep " "
     (k: "-param ${lib.escapeShellArg "${k}=${s.params.${k}}"}")
     (lib.attrNames s.params);
+
+  # Where the CA certificate appears inside every session.
+  caPath = "/etc/frisket/ca.crt";
+  # Per-session copies of it, on the host.
+  caCopies = "/run/frisket-ca";
 in
 {
   imports = [ (import ./module.nix self) ];
@@ -100,13 +109,31 @@ in
               ${exe} connect ${root} -netns "$netns" -steering ${file} -name "$machine"
             '')
           ];
+          # A COPY, ROOT-OWNED AND 0444, not the daemon's own file. flong binds
+          # read-write, and the daemon's file belongs to the user whose
+          # credentials it holds -- usually the workload's own uid, which
+          # could then rewrite what every later session trusts. A copy per
+          # session, so one session's teardown never pulls another's.
+          attachBinds = ''
+            ${pkgs.coreutils}/bin/install -D -m 0444 -o root -g root \
+              ${cfg.caCertificate} ${caCopies}/"$machine".crt
+            printf '%s\n' "${caCopies}/$machine.crt:${caPath}"
+          '';
           # Keyed on $machine alone, because on the sweep's path that is all
           # there is; and safe for a session that is already gone.
           detach = ''
             ${exe} close -control ${cfg.controlSocket} -name "$machine"
+            rm -f ${caCopies}/"$machine".crt
           '';
         })
       cfg.flong;
+
+    # A warning and not an assertion: the daemon refuses such a session at
+    # launch in any case, and that refusal is worth being able to test.
+    warnings = lib.concatLists (lib.mapAttrsToList
+      (name: s: lib.optional (! cfg.policies ? ${s.policy})
+        "services.frisket.flong.${name}.policy is \"${s.policy}\", which services.frisket.policies does not define: every session it starts will be refused.")
+      cfg.flong);
 
     assertions = lib.concatLists (lib.mapAttrsToList
       (name: s:

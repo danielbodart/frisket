@@ -588,6 +588,18 @@ func TestServePacketAnswersOverUDP(t *testing.T) {
 // DNS over TCP, RFC 7766: two queries pipelined in one write are both
 // answered, in order, one line each; then a frame that stops halfway is a
 // query that will never be answered, and gets a line of its own.
+// A TCP connection that closes without asking anything still gets its line:
+// every connection frisket accepts is in the log, not only the talkative ones.
+func TestATCPConnectionThatAsksNothingIsLogged(t *testing.T) {
+	f := newFixture(t, nil)
+	f.s.serveStream(context.Background(), &streamRW{r: bytes.NewReader(nil), w: &bytes.Buffer{}}, 7, testPeer, testDst)
+	lines := f.j.lines(t)
+	if len(lines) != 1 {
+		t.Fatalf("%d lines for a connection that asked nothing, want 1: %v", len(lines), lines)
+	}
+	expect(t, lines[0], map[string]any{"transport": "tcp", "conn": float64(7), "decision": DecisionDropped, "reason": "no query"})
+}
+
 func TestServeConnAnswersPipelinedTCP(t *testing.T) {
 	f := newFixture(t, nil)
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")

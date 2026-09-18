@@ -7,21 +7,21 @@
 > the plate; frisket decides what the sheet is allowed to take.
 
 frisket keeps credentials out of sandboxes. It runs on the host, holds the
-tokens, and is where a sandbox's credentials come from — added to requests on
-the wire, where the sandbox cannot reach them. For a sandbox with no network of
-its own it is also the only way out, and every connection it sees is logged.
+tokens, and adds them to requests on the wire, where the sandbox cannot reach
+them. For a sandbox with no network of its own it is also the only way out,
+and every connection and DNS query it sees is logged, one JSON line each.
 
 Nothing in a sandbox is configured to use it. The kernel steers connections to
-it: no proxy variables, no hosts file, no per-tool settings for egress. The one
-thing a sandbox is told is which certificate authority to trust.
+it with TPROXY: no proxy variables, no hosts file, no per-tool settings. The one
+thing a sandbox is told is which CA to trust.
 
-**[PLAN.md](PLAN.md) is the design**, including what was measured, what was
-rejected and why, and the build order. Read it first.
+The design, what was measured and what was rejected are in
+[PLAN.md](PLAN.md).
 
-## Usage
+## Example
 
-With [flong](https://github.com/danielbodart/flong), steering a launcher's
-sessions is one line beside it:
+With [flong](https://github.com/danielbodart/flong), a policy and one line per
+launcher:
 
 ```nix
 {
@@ -30,73 +30,110 @@ sessions is one line beside it:
     inputs.frisket.nixosModules.flong   # the daemon comes with it
   ];
 
-  services.frisket.user = "alice";      # whose credentials it holds
+  services.frisket = {
+    user = "alice";                     # whose credentials it holds
+    policies.research = {
+      allow = [ "api.example.com" "*.pkg.example.org" ];
+      intercept = [ "api.example.com" ];
+      routes.example = {
+        host = "api.example.com";
+        upstream = "https://api.example.com";
+        credentialFile = "/run/secrets/example-token";
+        paths = [ { methods = [ "GET" "POST" ]; prefix = "/v1"; } ];
+      };
+    };
+  };
 
   containers.agent.privateNetwork = true;
   flong.agent = { user = "alice"; command = ''set -- "$@"''; };
 
   services.frisket.flong.agent = {
-    policy = "standin";
+    policy = "research";
     set = "all";                        # or "service", with flong's `network`
   };
 }
 ```
 
-Every session `flong.agent` starts is steered before it has any egress: root's
-hook creates frisket's listeners inside the session's namespace and hands them
-to the daemon, installs the policy routing and the ruleset that steer to them
-(TPROXY), and only then gives the namespace connectivity. The session is closed when it ends, by its own
-trap or by the next launch's sweep.
+A session `flong.agent` starts resolves `api.example.com` to frisket, which
+terminates its TLS with the machine's CA, checks each request against the
+route's paths, replaces whatever `Authorization` the sandbox sent with
+`Bearer <token>` from the file, and forwards it upstream. `*.pkg.example.org`
+resolves as usual and is spliced through untouched. Every other name is
+refused at DNS, and every address frisket did not resolve for the session is
+refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
+and the host's own addresses, whatever resolved to them.
 
-Any other launcher uses the same three commands, run as root, in this order:
+The CA is at `/etc/frisket/ca.crt` in every session, read-only. Telling each
+runtime to trust it is yours to do, and each has its own way — Node's, for
+one, adds it to the roots it already has:
+
+```nix
+flong.agent.command = ''
+  export NODE_EXTRA_CA_CERTS=/etc/frisket/ca.crt
+  set -- "$@"
+'';
+```
+
+## Sets
+
+- `all` — the sandbox has no network. All TCP and DNS go to frisket, other UDP
+  is rejected, and frisket is the only way out.
+- `service` — the sandbox has its own network (flong's `network`). Only DNS and
+  frisket's service address, `192.0.2.2` and `2001:db8::2`, are steered;
+  everything else goes direct.
+
+## Other launchers
+
+Run as root, in this order, from a hook that has the sandbox's network
+namespace before anything gives it egress:
 
 ```console
-# frisket steer   -netns /proc/$leader/ns/net -steering $file -name $session -policy standin
+# frisket steer   -netns /proc/$leader/ns/net -steering $file -name $session -policy research
 # frisket connect -netns /proc/$leader/ns/net -steering $file -name $session
 # frisket close   -name $session
 ```
 
-`$file` is `(frisket.lib.steering { set = "all"; }).json`, written to the
-store: the ruleset and the listener specification from one attrset, so their
-ports cannot drift apart. `frisket steering $file` says what it will do. Each
-step refuses to run out of turn.
+`$file` is `(frisket.lib.steering { set = "all"; }).json`: the ruleset and the
+listener specification from one attrset. `frisket steering $file` prints what
+it will do. `steer` creates the listeners inside the namespace and installs the
+routing and the ruleset; `connect` gives the namespace its egress. Each refuses
+to run out of turn.
 
-### Options
+## Options
 
 | option | default | |
 |---|---|---|
-| `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credentials, never a DynamicUser |
+| `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
+| `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name` or `*.name` |
+| `services.frisket.policies.<name>.intercept` | `[ ]` | names answered with frisket's address; each must be allowed and have a route |
+| `services.frisket.policies.<name>.routes.<route>` | `{ }` | `host`, `upstream`, `upstreamCA`, `credentialFile`, `header` (null: `Authorization: Bearer`), `strip`, `paths` |
+| `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
+| `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
 | `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
-| `services.frisket.flong.<launcher>.policy` | *required* | what the daemon does with the session's connections |
-| `services.frisket.flong.<launcher>.set` | `all` | `all`: everything steered, no network of its own; `service`: DNS and frisket's service address, with flong's `network` |
-| `services.frisket.flong.<launcher>.params` | `{ }` | the policy's parameters; `workspace` is always passed |
+| `services.frisket.maxConnections` | built in | concurrent connections per session |
+| `services.frisket.flong.<launcher>.policy` | *required* | the policy for the launcher's sessions |
+| `services.frisket.flong.<launcher>.set` | `all` | `all` or `service` |
+| `services.frisket.flong.<launcher>.params` | `{ }` | recorded with each session, for a policy that reads them; `workspace` always is |
 
-## Status
+A credential file is read by the daemon, as `user`, and re-read when replaced,
+by rename too. The option is a string, so the file is never copied into the
+store. Keep it out of `/tmp`, which the daemon cannot see.
 
-Build step 0 of [PLAN.md](PLAN.md), with the integration it needs: steering,
-the daemon, sessions that survive a restart, and the flong adapter, tested end
-to end in a VM. There is no egress policy, no DNS, no interception and no
-credential yet. The one policy, `standin`, splices every connection to where it
-was going and logs it, and refuses interception and DNS.
-
-## Working on it
+## Development
 
 ```console
-$ nix develop                       # go, gopls, golangci-lint
+$ nix develop                        # go, gopls, golangci-lint
 $ go test ./...
-$ CGO_ENABLED=1 go test -race ./... # the shell builds static, as the flake does
-$ nix flake check                   # the build, the tests with and without -race,
-                                    # gofmt, go vet, shellcheck, both rulesets
-                                    # through nft, and the flong VM test
-$ nix run . -- version
+$ CGO_ENABLED=1 go test -race ./...  # the shell builds static, as the flake does
+$ nix flake check                    # the build, the tests with and without -race,
+                                     # gofmt, go vet, shellcheck, both rulesets
+                                     # through nft, and the flong VM test
 ```
 
-The tests create user and network namespaces with clone flags rather than the
-`unshare` binary, and skip where the kernel refuses, so `nix flake check` passes
-inside the Nix sandbox. They assert on log output through an injected writer: a
-logger that silences itself under test cannot be tested, and then "exactly one
-line per connection" is a hope.
+The tests make user and network namespaces with clone flags and skip where the
+kernel refuses, so `nix flake check` runs inside the Nix sandbox. Logs are
+asserted through an injected writer.
 
 ## Licence
 

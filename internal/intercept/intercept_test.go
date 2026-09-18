@@ -849,12 +849,22 @@ func TestHandshakeRefusesNoSNIAndUnknownNames(t *testing.T) {
 	}
 	c.Close()
 
-	lines := f.journal.waitLines(t, "tls", 2)
+	// Three connections, three lines: two refusals, and the one that shook
+	// hands and asked nothing -- which has no request line to be its line.
+	lines := f.journal.waitLines(t, "tls", 3)
 	want := []struct{ sni, reason string }{{"", ReasonNoSNI}, {"evil.example.test", ReasonUnknownName}}
 	for i, l := range lines[:2] {
 		if l["decision"] != DecisionRefused || l["reason"] != want[i].reason || l["sni"] != want[i].sni {
 			t.Errorf("tls line %d: %v", i, l)
 		}
+	}
+	for _, l := range lines {
+		if l["dst"] != serviceAddr443.String() {
+			t.Errorf("a tls line without the destination the sandbox dialled: %v", l)
+		}
+	}
+	if l := lines[2]; l["decision"] != DecisionAllowed || l["requests"] != float64(0) || l["sni"] != apiHost {
+		t.Errorf("the connection that asked nothing: %v", l)
 	}
 	if len(up.requests()) != 0 {
 		t.Fatal("a refused handshake reached the upstream")

@@ -19,13 +19,17 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/danielbodart/frisket/internal/control"
+	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/internal/nsnet"
+	"github.com/danielbodart/frisket/internal/policy"
 	"github.com/danielbodart/frisket/internal/sdnotify"
 	"github.com/danielbodart/frisket/internal/serve"
 	"github.com/danielbodart/frisket/internal/steering"
@@ -37,9 +41,12 @@ var version = "dev"
 
 const usage = `frisket -- credentials on the wire, never in the sandbox
 
-  frisket serve [-control PATH]
-        The daemon. Holds every session's listeners from the host and decides
-        what happens to each connection steered to them. Under systemd it is
+  frisket serve -config FILE -state DIR [-control PATH]
+        The daemon. Holds every session's listeners from the host and serves
+        each connection and query steered to them under the session's policy:
+        DNS against the allowlist, egress to what that DNS resolved, and
+        interception for the routes' hosts. FILE holds the policies; DIR holds
+        the machine's CA, made on first start. Under systemd it is
         socket-activated, and keeps its sessions across a restart in the
         service's file-descriptor store.
 
@@ -127,9 +134,37 @@ func runServe(argv []string) error {
 	path := fs.String("control", control.DefaultPath, "control socket to create when systemd has not passed one")
 	uid := fs.Int("control-uid", 0, "the only uid the control socket answers")
 	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
+	configPath := fs.String("config", "", "the policies, as the NixOS module writes them")
+	state := fs.String("state", "", "the daemon's state directory; the CA is made in ca/ inside it")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
+	if *configPath == "" || *state == "" {
+		return errors.New("-config and -state are both required")
+	}
+	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, nil))
+
+	// Everything the policies need is built before the control socket is
+	// touched, so a configuration that does not hold stops the daemon at
+	// start -- loudly, in the journal -- rather than refusing every session
+	// later for a reason nobody sees.
+	cfg, err := policy.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	ca, err := intercept.LoadOrCreateCA(filepath.Join(*state, "ca"))
+	if err != nil {
+		return err
+	}
+	classifier, dialer, err := policy.Dialer()
+	if err != nil {
+		return err
+	}
+	policies, err := policy.Build(cfg, policy.Deps{CA: ca, Classifier: classifier, Dialer: dialer, Log: log})
+	if err != nil {
+		return err
+	}
+	defer policies.Close()
 
 	inherited, err := sdnotify.Listen()
 	if err != nil {
@@ -159,10 +194,9 @@ func runServe(argv []string) error {
 		}
 	}
 
-	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, nil))
 	d := &serve.Daemon{
 		Log:        log,
-		Policies:   map[string]serve.Policy{serve.StandInPolicy: serve.StandIn()},
+		Policies:   policies.Policies,
 		ControlUID: *uid,
 		MaxConns:   *maxConns,
 	}
@@ -171,7 +205,13 @@ func runServe(argv []string) error {
 	if n := sdnotify.FromEnv(); n != nil {
 		d.Notify = n
 	}
-	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored))
+	names := make([]string, 0, len(policies.Policies))
+	for n := range policies.Policies {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored),
+		"policies", names, "ca", filepath.Join(*state, "ca", intercept.CACertFile))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

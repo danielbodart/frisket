@@ -13,6 +13,100 @@ let
 
   # A session stores its four listeners and its record: one sealed memfd.
   perSession = 5;
+
+  stateDir = "/var/lib/frisket";
+
+  # THE POLICIES ARE DATA, read by the daemon at start and checked there in
+  # full: a configuration that does not hold stops the daemon, loudly, rather
+  # than refusing every session later.
+  configFile = pkgs.writeText "frisket.json" (builtins.toJSON {
+    inherit (cfg) dns;
+    policies = lib.mapAttrs
+      (_: p: {
+        inherit (p) allow intercept;
+        routes = lib.mapAttrsToList
+          (name: r: {
+            inherit name;
+            inherit (r) host upstream credentialFile strip paths;
+          } // lib.optionalAttrs (r.upstreamCA != null) { upstreamCA = "${r.upstreamCA}"; }
+          // lib.optionalAttrs (r.header != null) { inherit (r) header; })
+          p.routes;
+      })
+      cfg.policies;
+  });
+
+  # A name is on the allowlist exactly, or under one of its wildcards. The
+  # daemon makes the same check with the real matcher; this one only says so
+  # at evaluation, where the mistake was made.
+  allowed = allow: n: lib.elem n allow
+    || lib.any (w: lib.hasPrefix "*." w && lib.hasSuffix (lib.removePrefix "*" w) n) allow;
+
+  pathRule = types.submodule {
+    options = {
+      methods = mkOption {
+        type = types.nonEmptyListOf types.str;
+        example = [ "GET" "POST" ];
+        description = "The methods admitted, compared exactly.";
+      };
+      prefix = mkOption {
+        type = types.strMatching "/.*";
+        example = "/v1";
+        description = ''
+          The path admitted, and everything under it, matched by segment:
+          `/v1` admits `/v1/models` and not `/v1-evil`.
+        '';
+      };
+    };
+  };
+
+  route = types.submodule {
+    options = {
+      host = mkOption {
+        type = types.str;
+        example = "api.example.com";
+        description = "The name the sandbox connects to. It must be in the policy's `intercept`.";
+      };
+      upstream = mkOption {
+        type = types.strMatching "https://.*";
+        example = "https://api.example.com";
+        description = "Where its requests go. Never plain HTTP: the credential crosses this hop.";
+      };
+      upstreamCA = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = "A PEM bundle to verify the upstream with, instead of the host's roots.";
+      };
+      credentialFile = mkOption {
+        type = types.strMatching "/.*";
+        example = "/run/secrets/example-token";
+        description = ''
+          The token, alone in a file on the host, read by the daemon as
+          `services.frisket.user` and re-read when it is replaced -- by rename
+          too. A string and not a path, so it is never copied into the store.
+          Not under /tmp, which the daemon's PrivateTmp hides.
+        '';
+      };
+      header = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "X-Api-Key";
+        description = "The header the token goes in, bare. Null is `Authorization: Bearer <token>`.";
+      };
+      strip = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Further request headers removed before the credential is added.
+          `Authorization`, `Proxy-Authorization` and the credential's own header
+          always are.
+        '';
+      };
+      paths = mkOption {
+        type = types.nonEmptyListOf pathRule;
+        description = "The route's scope. A request no rule admits is refused with a 403.";
+      };
+    };
+  };
 in
 {
   options.services.frisket = {
@@ -65,6 +159,79 @@ in
       '';
     };
 
+    dns = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "192.0.2.53" "[2001:db8::53]:53" ];
+      description = ''
+        Where frisket resolves the names a session is allowed. Empty is the
+        host's own /etc/resolv.conf, read once at start.
+      '';
+    };
+
+    policies = mkOption {
+      default = { };
+      description = ''
+        The policies a session can name. A session naming one that is not here
+        is refused before it has any rules, so it never runs.
+      '';
+      example = lib.literalExpression ''
+        {
+          research = {
+            allow = [ "api.example.com" "*.pkg.example.org" ];
+            intercept = [ "api.example.com" ];
+            routes.example = {
+              host = "api.example.com";
+              upstream = "https://api.example.com";
+              credentialFile = "/run/secrets/example-token";
+              paths = [ { methods = [ "GET" "POST" ]; prefix = "/v1"; } ];
+            };
+          };
+        }
+      '';
+      type = types.attrsOf (types.submodule {
+        options = {
+          allow = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            description = ''
+              Names a session may resolve: `name` or `*.name`, which matches
+              every name below it and not the name itself. A name not here is
+              refused at DNS without an upstream lookup, and egress accepts only
+              addresses DNS resolved for a name that is.
+            '';
+          };
+          intercept = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            description = ''
+              Names answered with the session's service address, so their TLS
+              is terminated by frisket and their requests carry a route's
+              credential. Each must be on `allow` and have a route.
+            '';
+          };
+          routes = mkOption {
+            type = types.attrsOf route;
+            default = { };
+            description = "The intercepted hosts' credentials and scopes, by a name for the log.";
+          };
+        };
+      });
+    };
+
+    caCertificate = mkOption {
+      type = types.path;
+      readOnly = true;
+      default = "${stateDir}/ca/ca.crt";
+      description = ''
+        The machine's CA certificate, made by the daemon on its first start:
+        what a sandbox must trust for interception. The key beside it never
+        leaves the state directory. How each runtime inside is told to trust it
+        -- NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, REQUESTS_CA_BUNDLE, a system
+        bundle -- is the consumer's to decide.
+      '';
+    };
+
     maxConnections = mkOption {
       type = types.ints.unsigned;
       default = 0;
@@ -76,6 +243,28 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = lib.concatLists (lib.mapAttrsToList
+      (name: p:
+        map
+          (n: {
+            assertion = allowed p.allow n;
+            message = "services.frisket.policies.${name}.intercept names ${n}, which is not on its allowlist: interception is how an allowed host gets its credential, not a way round the allowlist.";
+          })
+          p.intercept
+        ++ lib.mapAttrsToList
+          (rname: r: {
+            assertion = lib.elem r.host p.intercept;
+            message = "services.frisket.policies.${name}.routes.${rname} is for ${r.host}, which is not in the policy's intercept list, so no connection would ever reach it.";
+          })
+          p.routes
+        ++ lib.mapAttrsToList
+          (rname: r: {
+            assertion = ! lib.hasPrefix builtins.storeDir r.credentialFile;
+            message = "services.frisket.policies.${name}.routes.${rname}.credentialFile is in the Nix store, which every user can read.";
+          })
+          p.routes)
+      cfg.policies);
+
     users.users = lib.mkIf (cfg.user == "frisket") {
       frisket = { isSystemUser = true; inherit (cfg) group; };
     };
@@ -111,7 +300,11 @@ in
 
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve -control ${cfg.controlSocket}"
+          + " -config ${configFile} -state ${stateDir}"
           + lib.optionalString (cfg.maxConnections > 0) " -max-conns ${toString cfg.maxConnections}";
+        # The CA key lives here, 0600 inside a 0700 directory.
+        StateDirectory = "frisket";
+        StateDirectoryMode = "0700";
         User = cfg.user;
         Group = cfg.group;
         Restart = "on-failure";

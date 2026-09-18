@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -260,7 +261,7 @@ func (i *Interceptor) CACertPEM() []byte { return i.ca.CertPEM() }
 // server, returning when the connection is finished. The session's slot is
 // held for exactly that long.
 func (i *Interceptor) ServeConn(ctx context.Context, c *steer.Conn) {
-	ic := &interceptedConn{Conn: c, session: c.Session, id: c.ID, done: make(chan struct{})}
+	ic := &interceptedConn{Conn: c, session: c.Session, id: c.ID, dst: c.Orig, done: make(chan struct{})}
 	defer ic.Close()
 
 	tc := tls.Server(ic, i.tlsConfig)
@@ -284,6 +285,13 @@ func (i *Interceptor) ServeConn(ctx context.Context, c *steer.Conn) {
 	case <-ic.done:
 	case <-ctx.Done():
 	case <-i.closing:
+	}
+	// ONE LINE PER CONNECTION AT LEAST. Each request writes its own, since a
+	// request is what a route authorises; a connection that finished its
+	// handshake and asked nothing would otherwise leave no line at all.
+	if ic.requests.Load() == 0 {
+		i.log.Info("tls", "session", ic.session, "conn", ic.id, "dst", ic.dst.String(),
+			"sni", ic.route.host, "decision", DecisionAllowed, "requests", 0)
 	}
 }
 
@@ -313,7 +321,7 @@ func (r *refusal) Error() string {
 }
 
 func (i *Interceptor) logHandshake(c *steer.Conn, err error) {
-	attrs := []any{"session", c.Session, "conn", c.ID}
+	attrs := []any{"session", c.Session, "conn", c.ID, "dst", c.Orig.String()}
 	var ref *refusal
 	if errors.As(err, &ref) {
 		attrs = append(attrs, "sni", ref.name, "decision", DecisionRefused, "reason", ref.reason)
@@ -338,6 +346,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt := ic.route
+	ic.requests.Add(1)
 
 	rec := &record{decision: DecisionAllowed}
 	lw := &logWriter{ResponseWriter: w, rec: rec}
@@ -452,6 +461,7 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 	attrs := []any{
 		"session", ic.session,
 		"conn", ic.id,
+		"dst", ic.dst.String(),
 		"route", ic.route.Name,
 		"host", ic.route.host,
 		"proto", r.Proto,
@@ -585,11 +595,13 @@ func (b *countingBody) Read(p []byte) (int, error) {
 // upgraded stream finishing, or by the session going away.
 type interceptedConn struct {
 	net.Conn
-	session string
-	id      uint64
-	route   *route
-	done    chan struct{}
-	once    sync.Once
+	session  string
+	id       uint64
+	dst      netip.AddrPort
+	route    *route
+	requests atomic.Int64
+	done     chan struct{}
+	once     sync.Once
 }
 
 func (c *interceptedConn) Close() error {

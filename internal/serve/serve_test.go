@@ -215,7 +215,7 @@ func startDaemonWith(t *testing.T, configure func(*Daemon), sd Notifier, rec *re
 	j := &journal{}
 	d := &Daemon{
 		Log:        slog.New(slog.NewJSONHandler(j, nil)),
-		Policies:   map[string]Policy{"recorder": rec.policy(), StandInPolicy: StandIn()},
+		Policies:   map[string]Policy{"recorder": rec.policy()},
 		Notify:     sd,
 		ControlUID: os.Getuid(),
 		own:        1,
@@ -579,98 +579,5 @@ func TestTheRecordIsSealed(t *testing.T) {
 	got, err := readRecord(f)
 	if err != nil || got.Name != "a" {
 		t.Errorf("read back %+v, %v", got, err)
-	}
-}
-
-// ---------------------------------------------------------------- the stand-in
-
-// The splice waits for both directions: the client half-closes, and the reply
-// that follows still arrives.
-func TestTheStandInSpliceSurvivesAHalfClose(t *testing.T) {
-	up, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skip(err)
-	}
-	defer up.Close()
-	go func() {
-		c, err := up.Accept()
-		if err != nil {
-			return
-		}
-		defer c.Close()
-		b, _ := io.ReadAll(c) // until the client's half-close arrives
-		fmt.Fprintf(c, "got %d bytes", len(b))
-	}()
-
-	j := &journal{}
-	log := slog.New(slog.NewJSONHandler(j, nil))
-	h, err := StandIn().Handlers(control.Session{Name: "s"}, log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	down, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skip(err)
-	}
-	defer down.Close()
-	go func() {
-		c, err := down.Accept()
-		if err != nil {
-			return
-		}
-		h.Egress.ServeConn(context.Background(), &steer.Conn{
-			TCPConn: c.(*net.TCPConn), Session: "s", ID: 1,
-			Orig: netip.MustParseAddrPort(up.Addr().String()),
-		})
-	}()
-	c, err := net.Dial("tcp4", down.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	_, _ = c.Write([]byte("hello"))
-	_ = c.(*net.TCPConn).CloseWrite()
-	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
-	b, _ := io.ReadAll(c)
-	if string(b) != "got 5 bytes" {
-		t.Errorf("reply after a half-close = %q", b)
-	}
-	waitFor(t, "the egress line", func() bool { return len(j.lines(t, "egress")) == 1 })
-	l := j.lines(t, "egress")[0]
-	if l["dst"] != up.Addr().String() || l["bytes_out"] != float64(5) || l["bytes_in"] != float64(11) {
-		t.Errorf("egress line = %v", l)
-	}
-}
-
-func TestTheStandInDNSAnswersRefused(t *testing.T) {
-	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Skip(err)
-	}
-	defer srv.Close()
-	j := &journal{}
-	h, _ := StandIn().Handlers(control.Session{Name: "s"}, slog.New(slog.NewJSONHandler(j, nil)))
-	cl, err := net.DialUDP("udp4", nil, srv.LocalAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cl.Close()
-	query := []byte{0xab, 0xcd, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 3, 'f', 'o', 'o', 0, 0, 1, 0, 1}
-	peer := netip.MustParseAddrPort(cl.LocalAddr().String())
-	h.DNS.ServePacket(context.Background(), steer.NewDatagram("s", peer, netip.MustParseAddrPort("192.0.2.2:53"), query, func(b []byte) error {
-		_, err := srv.WriteToUDPAddrPort(b, peer)
-		return err
-	}))
-	_ = cl.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 512)
-	n, err := cl.Read(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 12 || buf[0] != 0xab || buf[1] != 0xcd || buf[2]&0x80 == 0 || buf[3]&0x0f != 5 {
-		t.Errorf("answer = % x, want the query's id, QR set and RCODE REFUSED", buf[:n])
-	}
-	if len(j.lines(t, "dns")) != 1 {
-		t.Error("the refusal was not logged")
 	}
 }

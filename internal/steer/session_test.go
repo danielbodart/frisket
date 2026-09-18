@@ -165,7 +165,7 @@ func TestASteeredConnectionIsHandedOnWithoutALineOfItsOwn(t *testing.T) {
 }
 
 // A connection dialled straight at the listener is accepted on a socket bound
-// to the listener's own address: the real lookup, no stand-in. Refused, with a
+// to the listener's own address: the real lookup, nothing replaced. Refused, with a
 // line, and never handed on.
 func TestUnsteeredConnectionIsRefusedAndLogged(t *testing.T) {
 	f := newFixture(t, nil)

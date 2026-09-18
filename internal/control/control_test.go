@@ -166,7 +166,7 @@ func TestCallRefusesToSendTooMany(t *testing.T) {
 func validSession() Session {
 	return Session{
 		Name:      "netless-123-456",
-		Policy:    "standin",
+		Policy:    "research",
 		Set:       SetAll,
 		Service:   []netip.Addr{netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2")},
 		Mark:      1,

@@ -2,18 +2,66 @@
 # container with privateNetwork, steered by nixosModules.flong.
 #
 # Two machines on the test VLAN and nothing else, so no real network is
-# needed: `machine` runs frisket and the sessions, `upstream` runs a web server
-# and a DNS server on both families. The upstream's addresses are TEST-NET-3
-# and a documentation v6 prefix rather than the VLAN's 192.168.1.0/24, because
-# the egress policy refuses RFC 1918 structurally.
+# needed: `machine` runs frisket and the sessions, `upstream` runs web servers
+# -- HTTP, and HTTPS under a CA of its own -- and a DNS server, on both
+# families. The upstream's addresses are TEST-NET-3 and a documentation v6
+# prefix rather than the VLAN's 192.168.1.0/24, because the egress policy
+# refuses RFC 1918 structurally.
+#
+# The policy under test is generic: one allowed name spliced through, and one
+# intercepted name whose route adds a bearer token read from a file on the
+# host. No tool's route is here; each is designed on its own.
 { self, flong }:
-{ lib, ... }:
+{ lib, hostPkgs, ... }:
 
 let
+  pkgs = hostPkgs;
   upstream4 = "203.0.113.20";
   upstream6 = "2001:db8:113::20";
   url4 = "http://${upstream4}/";
   url6 = "http://[${upstream6}]/";
+
+  # The upstream's own CA and a certificate for both its names. In the store,
+  # key and all: they are a test's, and trusted by nothing but this test.
+  certs = pkgs.runCommand "frisket-test-upstream-certs" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+    mkdir $out && cd $out
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+      -keyout ca.key -out ca.crt -subj /CN=frisket-test-upstream-ca \
+      -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout server.key -out server.csr -subj /CN=api.test
+    printf '%s\n' 'subjectAltName=DNS:api.test,DNS:allowed.test' 'extendedKeyUsage=serverAuth' > ext
+    openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+      -days 3650 -extfile ext -out server.crt
+  '';
+
+  # Says what it was asked, and with which Authorization, in its own journal
+  # -- never in its answer, which goes back into the sandbox.
+  https = pkgs.writeText "https.py" ''
+    import http.server, socket, ssl
+    class H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def do_GET(self):
+            auth = self.headers.get("Authorization", "-")
+            print(f"upstream-request {self.command} {self.headers.get('Host')} {self.path} auth={auth}", flush=True)
+            body = b"upstream-api-ok\n"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *a):
+            pass
+    class S(http.server.ThreadingHTTPServer):
+        address_family = socket.AF_INET6
+        def server_bind(self):
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            super().server_bind()
+    srv = S(("::", 443), H)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain("${certs}/server.crt", "${certs}/server.key")
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    srv.serve_forever()
+  '';
 in
 {
   name = "frisket-flong";
@@ -33,8 +81,19 @@ in
         bind-dynamic = true;
         no-resolv = true;
         log-queries = true;
-        address = [ "/allowed.test/${upstream4}" "/allowed.test/${upstream6}" ];
+        address = [
+          "/allowed.test/${upstream4}"
+          "/allowed.test/${upstream6}"
+          "/api.test/${upstream4}"
+          "/api.test/${upstream6}"
+          "/denied.test/${upstream4}"
+        ];
       };
+    };
+    systemd.services.upstream-https = {
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ];
+      serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 ${https}";
     };
     systemd.services.upstream = {
       wantedBy = [ "multi-user.target" ];
@@ -59,12 +118,35 @@ in
     # and poke at a session from outside it.
     environment.systemPackages = [ pkgs.nftables pkgs.curl pkgs.dnsutils pkgs.netcat pkgs.iproute2 ];
 
-    # The daemon runs as the user whose credentials it would hold: a person,
-    # not a DynamicUser.
-    users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; };
-    services.frisket = { user = "alice"; group = "users"; };
+    # The host resolves through the upstream's DNS server: where the route's
+    # upstream, api.test, is found. Nothing names it in /etc/hosts, so a
+    # workload asking the same question is answered by frisket instead.
+    networking.nameservers = [ upstream4 ];
 
-    systemd.tmpfiles.rules = [ "d /srv/work 0777 root root -" ];
+    # The daemon runs as the user whose credentials it holds: a person, not a
+    # DynamicUser. The token is theirs, in a directory only they can read.
+    users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; };
+    services.frisket = {
+      user = "alice";
+      group = "users";
+      dns = [ upstream4 ];
+      policies.test = {
+        allow = [ "allowed.test" "api.test" ];
+        intercept = [ "api.test" ];
+        routes.api = {
+          host = "api.test";
+          upstream = "https://api.test";
+          upstreamCA = "${certs}/ca.crt";
+          credentialFile = "/srv/secrets/token";
+          paths = [{ methods = [ "GET" ]; prefix = "/v1"; }];
+        };
+      };
+    };
+
+    systemd.tmpfiles.rules = [
+      "d /srv/work 0777 root root -"
+      "d /srv/secrets 0700 alice users -"
+    ];
 
     # What a workload tries against what root installed. In the store, which
     # every session can read, rather than quoted through three shells.
@@ -75,16 +157,16 @@ in
       unshare -Ur nft list ruleset >/dev/null 2>&1 && echo listed-from-userns
       unshare -Ur nft flush ruleset >/dev/null 2>&1 && echo flushed-from-userns
       echo attempted
-      curl -sS -m 5 ${url4}
+      curl -sS -m 5 http://allowed.test/
     '';
 
     # A session that outlives a daemon restart. It talks to the workspace,
     # which is the one directory the test and the session share.
     environment.etc."frisket-long".source = pkgs.writeText "long.sh" ''
-      curl -sS -m 5 ${url4} > before-restart
+      curl -sS -m 5 http://allowed.test/ > before-restart
       touch started
       while [ ! -e go ]; do sleep 0.1; done
-      curl -sS -m 5 ${url4} > after-restart
+      curl -sS -m 5 http://allowed.test/ > after-restart
       touch done
       while [ ! -e release ]; do sleep 0.1; done
     '';
@@ -100,7 +182,7 @@ in
       };
     };
 
-    # The session under test: steered, in the `all` set, by the stand-in.
+    # The session under test: steered, in the `all` set, under the policy.
     flong.strict = {
       user = "alice";
       workspace = "realpath /srv/work";
@@ -108,7 +190,7 @@ in
       # Ahead of frisket's own steps, so the test can find the session.
       attach = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
-    services.frisket.flong.strict.policy = "standin";
+    services.frisket.flong.strict.policy = "test";
 
     # The same container, with a process in the session's namespace -- as
     # the session's uid, from before frisket's hook runs until after it is
@@ -122,13 +204,20 @@ in
       attach = lib.mkMerge [
         (lib.mkOrder 100 ''
           echo "$machine" > /tmp/last-session
-          ${pkgs.util-linux}/bin/nsenter --net="$netns" \
+          # In the session's own mount namespace as well as its network one,
+          # so names resolve as they do in there -- through frisket -- and
+          # not through the host's nscd, which resolves outside the sandbox.
+          ${pkgs.util-linux}/bin/nsenter --target="$leader" --mount --net \
             ${pkgs.util-linux}/bin/setpriv --reuid=1000 --regid=100 --clear-groups \
             ${pkgs.writeShellScript "probe" ''
               end=$(( $(${pkgs.coreutils}/bin/date +%s) + 4 ))
               while [ "$(${pkgs.coreutils}/bin/date +%s)" -lt "$end" ]; do
                 t=$(${pkgs.coreutils}/bin/date +%s.%N)
-                if ${pkgs.curl}/bin/curl -s -m 1 -o /dev/null ${url4}; then
+                # By name, so each attempt asks frisket's DNS first. Before
+                # the rules that query reaches the listener unmarked and is
+                # refused, unanswered, so a short timeout keeps the attempts
+                # coming.
+                if ${pkgs.curl}/bin/curl -s -m 0.3 -o /dev/null http://allowed.test/; then
                   echo "$t ok"
                 else
                   echo "$t fail"
@@ -156,7 +245,7 @@ in
         [ -e "/tmp/probe-pid-$machine" ] && kill "$(cat "/tmp/probe-pid-$machine")" 2>/dev/null || true
       '';
     };
-    services.frisket.flong.probed.policy = "standin";
+    services.frisket.flong.probed.policy = "test";
 
     # A policy the daemon does not have. The session must not run.
     flong.badpolicy = {
@@ -178,7 +267,7 @@ in
       network = { };
       attach = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
-    services.frisket.flong.networked = { policy = "standin"; set = "service"; };
+    services.frisket.flong.networked = { policy = "test"; set = "service"; };
   };
 
   testScript = { nodes, ... }:
@@ -188,15 +277,31 @@ in
       badpolicy = lib.getExe nodes.machine.flong.badpolicy.launcher;
       networked = lib.getExe nodes.machine.flong.networked.launcher;
       frisket = lib.getExe nodes.machine.services.frisket.package;
+      ca = nodes.machine.services.frisket.caCertificate;
     in
     ''
       import json
       import re
+      import secrets
       import shlex
       import time
+      from collections import Counter
+
+      # The real credential, made here so it exists nowhere before the test
+      # writes it to the host, and can be searched for everywhere after.
+      token = "real-" + secrets.token_hex(16)
+      sandbox_token = "sandbox-" + secrets.token_hex(8)
+
+      def write_token(t):
+          # By temp file and rename, as the tools that own credential files
+          # write them: the rename is what the daemon has to notice.
+          machine.succeed(f"echo {t} > /srv/secrets/token.new && chown alice:users /srv/secrets/token.new "
+                          "&& chmod 0600 /srv/secrets/token.new && mv -f /srv/secrets/token.new /srv/secrets/token")
 
       start_all()
+      write_token(token)
       upstream.wait_for_unit("upstream.service")
+      upstream.wait_for_unit("upstream-https.service")
       upstream.wait_for_unit("dnsmasq.service")
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("frisket.service")
@@ -246,9 +351,10 @@ in
       # or as the session's uid inside its network namespace, which for
       # networking is exactly what the workload is. Released by a file in the
       # workspace, which the session and the test share.
-      def hold(launcher, ready):
+      def hold(launcher, ready, script="true"):
           machine.succeed("rm -f /srv/work/release /tmp/last-session")
-          machine.succeed(f"{launcher} 'while [ ! -e release ]; do sleep 0.1; done' >/tmp/hold.out 2>&1 &")
+          payload = shlex.quote(f"{script}; while [ ! -e release ]; do sleep 0.1; done")
+          machine.succeed(f"{launcher} {payload} >/tmp/hold.out 2>&1 &")
           machine.wait_until_succeeds("test -s /tmp/last-session")
           name = last_session()
           machine.wait_until_succeeds(f"machinectl show {name} -P Leader")
@@ -263,8 +369,12 @@ in
       def as_root(leader, cmd):
           return f"nsenter --net=/proc/{leader}/ns/net sh -c {shlex.quote(cmd)}"
 
+      # As the workload: its uid, its network namespace AND its mount
+      # namespace -- its files, its resolv.conf, the CA bound in at
+      # /etc/frisket/ca.crt -- because a lookup made with the host's files
+      # goes through the host's nscd, which resolves outside the sandbox.
       def as_workload(leader, cmd):
-          return (f"nsenter --net=/proc/{leader}/ns/net setpriv --reuid=1000 --regid=100 "
+          return (f"nsenter --target={leader} --mount --net setpriv --reuid=1000 --regid=100 "
                   f"--clear-groups -- sh -c {shlex.quote(cmd)}")
 
       def handle(leader, chain, pattern):
@@ -293,12 +403,12 @@ in
           assert stored() == 0
 
       with subtest("a session is steered, and every connection logged once with where it was going"):
-          out = machine.succeed("${strict} 'curl -sS -m 5 ${url4}; curl -sS -m 5 -g \"${url6}\"'")
+          out = machine.succeed("${strict} 'curl -sS -m 5 -4 http://allowed.test/; curl -sS -m 5 -6 http://allowed.test/'")
           assert out.count("upstream-body") == 2, out
           name = last_session()
           for dst in ["${upstream4}:80", "[${upstream6}]:80"]:
               [e] = wait_log("egress", name, lambda m: m["dst"] == dst, dst)
-              assert e["action"] == "spliced" and e["bytes_in"] > 0, e
+              assert e["decision"] == "accepted" and e["name"] == "allowed.test" and e["bytes_in"] > 0, e
           # Exactly one line per connection: the handler's. steer writes one
           # only for what it refuses.
           assert len(lines_of("egress", name)) == 2, lines_of("egress", name)
@@ -324,13 +434,13 @@ in
           # Attempts were made before the rules existed and while the rules
           # existed but egress did not, and every one of them failed.
           assert len(before) > 0 and set(before) == {"fail"}, probes
-          assert len(waiting) > 10 and set(waiting) == {"fail"}, probes
+          assert len(waiting) >= 2 and set(waiting) == {"fail"}, probes
           # Egress arrived, and not one attempt got through before the rules.
           assert ok and min(ok) >= rules_at, (rules_at, probes)
           # And every one that got through, frisket saw.
           lines = lines_of("egress", name)
-          assert len([m for m in lines if m["action"] == "spliced"]) == len(ok), (lines, len(ok))
-          assert all(m["dst"] == "${upstream4}:80" for m in lines), lines
+          assert len([m for m in lines if m["decision"] == "accepted"]) >= len(ok), (lines, len(ok))
+          assert all(m["dst"] in ("${upstream4}:80", "[${upstream6}]:80") for m in lines), lines
 
       name, leader = hold("${strict}", "ip link show frisket0")
 
@@ -363,13 +473,16 @@ in
               assert "status: REFUSED" in out, (server, out)
           tcp = [m for m in lines_of("dns", name) if m["transport"] == "tcp"]
           assert {m["dst"] for m in tcp} >= {"${upstream4}:53", "127.0.0.1:53", "[::1]:53"}, tcp
-          assert all(m["queries"] == 1 for m in tcp), tcp
+          assert all(m["decision"] == "refused" and m["reason"] == "not allowed" for m in tcp), tcp
 
       with subtest("the service address on 443 reaches interception, both families"):
+          # By address, so with no SNI: interception refuses the handshake
+          # rather than choose a route -- and so a credential -- for it.
           for url in ["https://192.0.2.2/", "https://[2001:db8::2]/"]:
               machine.execute(as_workload(leader, f"curl -sk -m 5 -g {url}"))
-          dsts = {m["dst"] for m in lines_of("intercept", name)}
-          assert dsts == {"192.0.2.2:443", "[2001:db8::2]:443"}, dsts
+          tls = lines_of("tls", name)
+          assert {m["dst"] for m in tls} == {"192.0.2.2:443", "[2001:db8::2]:443"}, tls
+          assert all(m["decision"] == "refused" and m["reason"] == "no SNI" for m in tls), tls
 
       with subtest("without `socket transparent 1 return`, frisket's own replies are steered back to it"):
           # The proof that the line is load-bearing: frisket's SYN-ACK from
@@ -377,14 +490,15 @@ in
           # the listener, and the client never connects.
           h = handle(leader, "steer", r"socket transparent")
           machine.succeed(as_root(leader, f"nft delete rule inet frisket steer handle {h}"))
-          before = len(lines_of("intercept", name))
+          before = len(lines_of("tls", name))
           status, out, _ = timed(as_workload(leader, "curl -sk -m 3 https://192.0.2.2/"))
           assert status != 0, (status, out)
           time.sleep(1)
-          assert len(lines_of("intercept", name)) == before, lines_of("intercept", name)
+          assert len(lines_of("tls", name)) == before, lines_of("tls", name)
           machine.succeed(as_root(leader, "nft insert rule inet frisket steer socket transparent 1 return"))
           machine.execute(as_workload(leader, "curl -sk -m 5 https://192.0.2.2/"))
-          assert len(lines_of("intercept", name)) == before + 1
+          wait_log("tls", name, lambda m: True, "the handshake")
+          assert len(lines_of("tls", name)) == before + 1
 
       with subtest("a direct connection to a listener is refused, and logged"):
           machine.execute(as_workload(leader, "nc -w 2 127.0.0.1 15001 </dev/null; nc -w 2 ::1 15001 </dev/null"))
@@ -424,14 +538,131 @@ in
 
       release(name)
 
+      # Interception, end to end, in a session of its own. The first request
+      # is the payload's, inside the session, through the CA the adapter bound
+      # at /etc/frisket/ca.crt and a sandbox Authorization header that must
+      # not survive. The rest are made as the workload from outside.
+      api = ("curl -sS -m 10 --cacert /etc/frisket/ca.crt "
+             f"-H 'Authorization: Bearer {sandbox_token}' https://api.test/v1/models > api-out 2>&1")
+      name, leader = hold("${strict}", "ip link show frisket0", api)
+      machine.wait_until_succeeds("grep -q upstream-api-ok /srv/work/api-out")
+
+      def upstream_saw(pattern):
+          return upstream.execute(f"journalctl -u upstream-https -o cat | grep -E {shlex.quote(pattern)}")[1]
+
+      with subtest("the machine's CA is bound into the session, and the workload cannot change it"):
+          machine.succeed(f"cmp /proc/{leader}/root/etc/frisket/ca.crt ${ca}")
+          machine.fail(as_workload(leader, "echo forged >> /etc/frisket/ca.crt"))
+          machine.fail(as_workload(leader, "chmod u+w /etc/frisket/ca.crt"))
+          machine.succeed(f"cmp /proc/{leader}/root/etc/frisket/ca.crt ${ca}")
+
+      with subtest("the intercepted name resolves to the service address, and only that name does"):
+          for qtype, want in [("A", "192.0.2.2"), ("AAAA", "2001:db8::2")]:
+              out = machine.succeed(as_workload(leader, f"dig +short {qtype} api.test @127.0.0.1"))
+              assert out.strip() == want, (qtype, out)
+          out = machine.succeed(as_workload(leader, "dig +short A allowed.test @127.0.0.1"))
+          assert out.strip() == "${upstream4}", out
+          intercepted = [m for m in lines_of("dns", name) if m.get("name") == "api.test"]
+          assert intercepted and all(m["decision"] == "intercepted" and "upstream" not in m for m in intercepted), intercepted
+
+      with subtest("a request through it reaches the upstream with the real credential, and never the sandbox's"):
+          assert machine.succeed("cat /srv/work/api-out").strip() == "upstream-api-ok"
+          seen = upstream_saw("upstream-request GET api.test /v1/models")
+          assert f"auth=Bearer {token}" in seen, seen
+          assert sandbox_token not in upstream_saw("."), "the sandbox's own Authorization reached the upstream"
+          [r] = wait_log("request", name, lambda m: m["path"] == "/v1/models", "the request")
+          assert r["decision"] == "allowed" and r["status"] == 200 and r["route"] == "api", r
+          assert r["dst"] in ("192.0.2.2:443", "[2001:db8::2]:443"), r
+
+      with subtest("the credential is nowhere in the sandbox: not its files, not its processes' environments"):
+          # Its filesystem as the session sees it -- its root, and every bind
+          # in it, the workspace and the CA included -- less the store, which
+          # was built before the token existed, and the kernel's own trees.
+          # The same search finds what IS in there, so an empty answer means
+          # something.
+          def search(needle):
+              return (f"cd /proc/{leader}/root && find . \\( -path ./nix -o -path ./proc -o -path ./sys -o -path ./dev \\) "
+                      f"-prune -o -type f -print0 | xargs -0 grep -lsF -- {needle} | grep -q .")
+          machine.succeed(search("upstream-api-ok"))
+          machine.fail(search(token))
+          # Every process in its pid namespace, and what each was started with.
+          pids = machine.succeed(f"for p in /proc/[0-9]*; do [ \"$(readlink $p/ns/pid)\" = \"$(readlink /proc/{leader}/ns/pid)\" ] && echo $p; done; true").split()
+          assert len(pids) >= 2, pids
+          environs = " ".join(f"{p}/environ {p}/cmdline" for p in pids)
+          # A `sleep` in the payload's loop can be gone by the time it is read.
+          machine.succeed(f"{{ cat {environs} 2>/dev/null; true; }} | grep -aqF -- XDG_RUNTIME_DIR=")
+          machine.fail(f"{{ cat {environs} 2>/dev/null; true; }} | grep -aqF -- {token}")
+
+      with subtest("an out-of-scope request is refused, and never reaches the upstream"):
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' https://api.test/admin"))
+          assert out.strip() == "403", out
+          assert upstream_saw("/admin") == "", upstream_saw("/admin")
+          [r] = wait_log("request", name, lambda m: m["path"] == "/admin", "the refusal")
+          assert r["decision"] == "refused" and r["reason"] == "out of scope" and r["status"] == 403, r
+
+      with subtest("a credential file replaced by rename is picked up"):
+          new_token = "real-" + secrets.token_hex(16)
+          write_token(new_token)
+          for _ in range(50):
+              machine.succeed(as_workload(leader, "curl -sSf -m 10 --cacert /etc/frisket/ca.crt -o /dev/null https://api.test/v1/models"))
+              if f"auth=Bearer {new_token}" in upstream_saw("upstream-request"):
+                  break
+              time.sleep(0.2)
+          assert f"auth=Bearer {new_token}" in upstream_saw("upstream-request"), upstream_saw("upstream-request")
+          token = new_token
+
+      with subtest("an allowed name that is not intercepted is spliced, not terminated"):
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert ${certs}/ca.crt https://allowed.test/"))
+          assert out.strip() == "upstream-api-ok", out
+          # Its certificate is the upstream's own: frisket's CA cannot verify it.
+          status, out = machine.execute(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt https://allowed.test/"))
+          assert status == 60, (status, out)
+          spliced = [m for m in lines_of("egress", name) if m.get("name") == "allowed.test" and m["dst"].endswith(":443")]
+          assert len(spliced) == 2 and all(m["decision"] == "accepted" for m in spliced), spliced
+          assert [m for m in lines_of("request", name) if m.get("host") == "allowed.test"] == []
+
+      with subtest("a name not on the allowlist is refused without an upstream lookup"):
+          out = machine.succeed(as_workload(leader, "dig +time=2 +tries=1 denied.test @127.0.0.1"))
+          assert "status: REFUSED" in out, out
+          [d] = wait_log("dns", name, lambda m: m.get("name") == "denied.test", "the refusal")
+          assert d["decision"] == "refused" and d["reason"] == "not allowed" and "upstream" not in d, d
+          machine.fail(as_workload(leader, "curl -sS -m 5 http://denied.test/"))
+          upstream.fail("journalctl -u dnsmasq -o cat | grep -q denied.test")
+
+      with subtest("the host's own addresses are refused by structure"):
+          for url in ["http://203.0.113.10/", "http://[2001:db8:113::10]/"]:
+              machine.fail(as_workload(leader, f"curl -sS -m 5 -g {url}"))
+          refused = [m for m in lines_of("egress", name) if m["dst"] in ("203.0.113.10:80", "[2001:db8:113::10]:80")]
+          assert len(refused) == 2, refused
+          assert all(m["decision"] == "refused" and m["reason"] == "structural: host-owned" for m in refused), refused
+
+      with subtest("every connection and every query produced exactly one line"):
+          # Connections and refused datagrams share one sequence per session,
+          # so every number from 1 up must appear exactly once, whatever
+          # handled it; a number missing is a connection nobody logged.
+          conns = Counter(m["conn"] for msg in ["egress", "request", "tls", "connection", "datagram"]
+                          for m in lines_of(msg, name))
+          conns.update(m["conn"] for m in lines_of("dns", name) if "conn" in m)
+          assert conns and set(conns.values()) == {1}, conns
+          assert sorted(conns) == list(range(1, max(conns) + 1)), sorted(conns)
+          # And queries have a sequence of their own, over both transports.
+          queries = Counter(m["query"] for m in lines_of("dns", name))
+          assert queries and set(queries.values()) == {1}, queries
+          assert sorted(queries) == list(range(1, max(queries) + 1)), sorted(queries)
+          # None of it says the credential.
+          assert token not in machine.succeed("journalctl -u frisket.service -o cat --no-pager")
+
+      release(name)
+
       with subtest("the `service` set: DNS and the service address are steered, the rest goes direct"):
           name, leader = hold("${networked}", "ip route show default | grep -q .")
           out = machine.succeed(as_workload(leader, "curl -sS -m 5 ${url4}"))
           assert "upstream-body" in out, out
           assert lines_of("egress", name) == [], lines_of("egress", name)
-          out = machine.succeed(as_workload(leader, "dig +time=2 +tries=1 allowed.test @${upstream4}"))
-          assert "status: REFUSED" in out, out
-          wait_log("dns", name, lambda m: m["dst"] == "${upstream4}:53", "the steered query")
+          out = machine.succeed(as_workload(leader, "dig +short +time=2 +tries=1 allowed.test @${upstream4}"))
+          assert out.strip() == "${upstream4}", out
+          [d] = wait_log("dns", name, lambda m: m["dst"] == "${upstream4}:53", "the steered query")
+          assert d["decision"] == "resolved" and d["name"] == "allowed.test", d
           for fam in ["-4", "-6"]:
               assert re.search(r"fwmark 0x1 lookup 100", machine.succeed(as_root(leader, f"ip {fam} rule show")))
 

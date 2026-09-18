@@ -154,7 +154,7 @@ func (f *fakeRoot) steerer() *Steerer {
 
 func TestSteerInstallsRulesOnlyOnceTheDaemonHoldsTheListeners(t *testing.T) {
 	p, _ := allFile().Plan()
-	sess := Session{Name: "s", Policy: "standin"}
+	sess := Session{Name: "s", Policy: "research"}
 	for _, c := range []struct {
 		fail string
 		want []string

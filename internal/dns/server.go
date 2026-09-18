@@ -198,19 +198,27 @@ func (s *Server) serveStream(ctx context.Context, rw io.ReadWriter, conn uint64,
 		stop := context.AfterFunc(ctx, func() { _ = dl.SetReadDeadline(time.Unix(1, 0)) })
 		defer stop()
 	}
-	for {
+	for queries := 0; ; queries++ {
 		if dl != nil {
 			_ = dl.SetReadDeadline(s.cfg.Now().Add(s.cfg.TCPIdle))
 		}
 		msg, partial, err := readQueryFrame(rw)
 		if err != nil {
-			if partial {
+			switch {
+			case partial:
 				// A frame that started and did not finish is a query we will
 				// never answer, and that is worth a line.
 				l := s.newLine("tcp", peer, orig)
 				l.conn = conn
 				l.drop("truncated frame")
 				l.err = err
+				s.log(&l)
+			case queries == 0:
+				// And a connection that asked nothing still gets its one
+				// line: every connection frisket accepts is in the log.
+				l := s.newLine("tcp", peer, orig)
+				l.conn = conn
+				l.drop("no query")
 				s.log(&l)
 			}
 			return

@@ -21,12 +21,13 @@ import (
 // to add the credential.
 type Scope struct {
 	// Paths admit a request whose method is listed and whose path is at or
-	// under Prefix.
+	// under Prefix. The generic scope, and the only one any policy uses.
 	Paths []PathRule
 	// Git admits git's smart-HTTP protocol, GitHub-shaped, for a set of
-	// repositories.
+	// repositories. PROVISIONAL: see GitScope.
 	Git *GitScope
 	// GitHubAPI admits GitHub REST calls under /repos/{owner}/{repo}.
+	// PROVISIONAL: see GitHubAPIScope.
 	GitHubAPI *GitHubAPIScope
 }
 
@@ -44,6 +45,10 @@ type PathRule struct {
 // GitScope admits git over HTTPS as GitHub serves it: /{owner}/{repo}[.git]
 // followed by info/refs, git-upload-pack or git-receive-pack, and nothing
 // else -- no web UI, no LFS, no dumb protocol.
+//
+// PROVISIONAL. Shaped around one tool before that tool's route was designed;
+// git's route is an open question (PLAN.md, "Per-tool routes") and this is not
+// its answer until it is. No policy uses it.
 type GitScope struct {
 	Repos []Repo
 	// Push admits git-receive-pack. Without it, fetch and clone work and a
@@ -60,6 +65,9 @@ type GitScope struct {
 // Only that shape: /repositories/{id}, /graphql, /search and /user are not
 // repository-scoped by their path and are refused unless a PathRule admits
 // them deliberately.
+//
+// PROVISIONAL, like GitScope: gh's route is an open question, and no policy
+// uses this.
 type GitHubAPIScope struct {
 	Repos   []Repo
 	Methods []string
