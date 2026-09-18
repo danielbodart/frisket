@@ -23,6 +23,9 @@ type Helper struct {
 	Exe string
 	// Verb is the subcommand that dispatches to RunHelper. Empty means "helper".
 	Verb string
+	// ExecVerb is the subcommand that dispatches to RunExec. Empty means
+	// "nsexec".
+	ExecVerb string
 }
 
 func (h Helper) argv(args HelperArgs) ([]string, error) {

@@ -24,6 +24,8 @@ import (
 const (
 	roleHelper = "frisket-test-helper"
 	rolePark   = "frisket-test-park"
+	roleExec   = "frisket-test-nsexec"
+	roleWhere  = "frisket-test-whereami"
 )
 
 // inUserNS marks the re-executed self, so it does not re-execute again.
@@ -44,6 +46,18 @@ func TestMain(m *testing.M) {
 			os.Exit(0)
 		case rolePark:
 			park()
+			os.Exit(0)
+		case roleExec:
+			// Only returns on failure: success is becoming the program.
+			fmt.Fprintln(os.Stderr, RunExec(os.Args[2:], os.Stderr))
+			os.Exit(1)
+		case roleWhere:
+			ns, err := os.Readlink("/proc/self/ns/net")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Println(ns)
 			os.Exit(0)
 		}
 	}
@@ -250,7 +264,7 @@ func (s *sandbox) loUp(t *testing.T) {
 	}
 }
 
-func testHelper() Helper { return Helper{Verb: roleHelper} }
+func testHelper() Helper { return Helper{Verb: roleHelper, ExecVerb: roleExec} }
 
 func mustSpecs(t *testing.T, s string) []Spec {
 	t.Helper()
@@ -601,6 +615,87 @@ func TestOpenReportsTheHelpersOwnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "net-does-not-exist") {
 		t.Errorf("error = %v, want it to name the path it could not enter", err)
+	}
+}
+
+// ---------------------------------------------------------------- the ordering
+
+// The first half of "listeners, then rules, then connectivity", checked from
+// inside: a namespace that already has an interface besides lo has had egress
+// provisioned first, or is not a sandbox's at all.
+func TestRequireIsolatedRefusesAnythingButLoopback(t *testing.T) {
+	lo := net.Interface{Index: 1, Name: "lo", Flags: net.FlagLoopback | net.FlagUp}
+	if err := requireIsolated([]net.Interface{lo}); err != nil {
+		t.Errorf("lo alone was refused: %v", err)
+	}
+	for _, other := range []net.Interface{
+		{Index: 2, Name: "frisket0", Flags: net.FlagUp},
+		{Index: 2, Name: "eth0", Flags: 0}, // down still counts: it is one command from up
+	} {
+		err := requireIsolated([]net.Interface{lo, other})
+		if err == nil {
+			t.Errorf("%s was accepted beside lo", other.Name)
+			continue
+		}
+		if !strings.Contains(err.Error(), other.Name) {
+			t.Errorf("error = %v, want it to name %s", err, other.Name)
+		}
+	}
+}
+
+func TestOpenIsolatedAcceptsANamespaceWithOnlyLoopback(t *testing.T) {
+	sb := newSandbox(t)
+	sb.loUp(t)
+	set, err := Open(t.Context(), testHelper(), HelperArgs{
+		Netns:    sb.path,
+		Specs:    mustSpecs(t, "tcp4:127.0.0.1:15001"),
+		Isolated: true,
+	})
+	if err != nil {
+		t.Fatalf("a namespace holding only lo was refused: %v", err)
+	}
+	set.Close()
+}
+
+// nsexec becomes the program, inside the namespace, and nothing else changes
+// namespace: the test process asking the question is still where it was.
+func TestCommandRunsTheProgramInsideTheNamespace(t *testing.T) {
+	sb := newSandbox(t)
+	want, err := os.Readlink(sb.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	here, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := Command(t.Context(), testHelper(), sb.path, os.Args[0], roleWhere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("nsexec: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Errorf("the program ran in %s, want the sandbox's %s", got, want)
+	}
+	if after, _ := os.Readlink("/proc/self/ns/net"); after != here {
+		t.Errorf("this process moved from %s to %s", here, after)
+	}
+}
+
+func TestExecRefusesWhatWouldRunOnTheHost(t *testing.T) {
+	for name, argv := range map[string][]string{
+		// No namespace would load a sandbox's ruleset into the host.
+		"no namespace": {"--", "/bin/true"},
+		// A relative name is a PATH search, and the PATH is the caller's.
+		"relative program": {"-net", "/proc/self/ns/net", "--", "true"},
+		"no program":       {"-net", "/proc/self/ns/net"},
+	} {
+		if err := RunExec(argv, io.Discard); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }
 

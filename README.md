@@ -16,39 +16,74 @@ thing a sandbox is told is which certificate authority to trust.
 **[PLAN.md](PLAN.md) is the design**, including what was measured, what was
 rejected and why, and the build order. Read it first.
 
-## Status
+## Usage
 
-Build step 0 of that order, and only the half that needs nothing from flong:
-the namespace-socket core. There is no egress, no DNS, no interception, no
-credential and no NixOS module yet.
+With [flong](https://github.com/danielbodart/flong), steering a launcher's
+sessions is one line beside it:
 
-What works today:
+```nix
+{
+  imports = [
+    inputs.flong.nixosModules.default
+    inputs.frisket.nixosModules.flong   # the daemon comes with it
+  ];
 
-- **`frisket helper`** — the privileged half. It enters a network namespace,
-  waits for `lo`, creates the session's listeners *in there*, and passes the
-  descriptors back over `SCM_RIGHTS` with a manifest. It is a forked process
-  rather than a goroutine on purpose: measured, doing the `setns` in-process and
-  then unlocking the thread let the Go runtime schedule ordinary goroutines onto
-  a thread still inside the sandbox, and 13 of 200 of frisket's own upstream
-  connections left through the sandbox's network.
-- **`frisket hold`** — the holder. It runs the helper, adopts the descriptors,
-  accepts on them from the host, reads each connection's original destination
-  from the kernel's conntrack entry, and logs one line per connection. A
-  connection the kernel did not steer — the lookup failed, or the destination is
-  the listener's own address — is refused. This is the stand-in for
-  `frisket serve` until the control socket exists.
+  services.frisket.user = "alice";      # whose credentials it holds
+
+  containers.agent.privateNetwork = true;
+  flong.agent = { user = "alice"; command = ''set -- "$@"''; };
+
+  services.frisket.flong.agent = {
+    policy = "standin";
+    set = "all";                        # or "service", with flong's `network`
+  };
+}
+```
+
+Every session `flong.agent` starts is steered before it has any egress: root's
+hook creates frisket's listeners inside the session's namespace and hands them
+to the daemon, loads the ruleset that redirects to them, and only then gives
+the namespace connectivity. The session is closed when it ends, by its own
+trap or by the next launch's sweep.
+
+Any other launcher uses the same three commands, run as root, in this order:
 
 ```console
-$ sudo frisket hold -net /proc/1234/ns/net -spec tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:15353
-{"time":"...","level":"INFO","msg":"session","session":"net:[4026533500]","netns":"net:[4026533500]","helper_pid":9123,"listeners":3}
-{"time":"...","level":"INFO","msg":"connection","session":"net:[4026533500]","conn":1,"listener":"127.0.0.1:15001","peer":"127.0.0.1:41234","dst":"140.82.121.3:443","decision":"steered","action":"accepted"}
+# frisket steer   -netns /proc/$leader/ns/net -steering $file -name $session -policy standin
+# frisket connect -netns /proc/$leader/ns/net -steering $file -name $session
+# frisket close   -name $session
 ```
+
+`$file` is `(frisket.lib.steering { set = "all"; }).json`, written to the
+store: the ruleset and the listener specification from one attrset, so their
+ports cannot drift apart. `frisket steering $file` says what it will do. Each
+step refuses to run out of turn.
+
+### Options
+
+| option | default | |
+|---|---|---|
+| `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credentials, never a DynamicUser |
+| `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
+| `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
+| `services.frisket.flong.<launcher>.policy` | *required* | what the daemon does with the session's connections |
+| `services.frisket.flong.<launcher>.set` | `all` | `all`: everything steered, no network of its own; `service`: DNS and frisket's service address, with flong's `network` |
+| `services.frisket.flong.<launcher>.params` | `{ }` | the policy's parameters; `workspace` is always passed |
+
+## Status
+
+Build step 0 of [PLAN.md](PLAN.md), with the integration it needs: steering,
+the daemon, sessions that survive a restart, and the flong adapter, tested end
+to end in a VM. There is no egress policy, no DNS, no interception and no
+credential yet. The one policy, `standin`, splices every connection to where it
+was going and logs it, and refuses interception and DNS.
 
 ## Working on it
 
 ```console
 $ nix develop          # go, gopls, golangci-lint
-$ nix flake check      # the build, the tests, gofmt, go vet, shellcheck
+$ nix flake check      # the build, the tests, gofmt, go vet, shellcheck,
+                       # both rulesets through nft, and the flong VM test
 $ nix run . -- version
 ```
 

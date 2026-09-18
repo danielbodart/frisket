@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"runtime"
 	"time"
@@ -40,12 +41,20 @@ type HelperArgs struct {
 	Netns     string        // path to a network namespace; empty means "stay here"
 	Specs     []Spec        // the listeners to create
 	LoTimeout time.Duration // how long to wait for lo to come up
+
+	// Isolated refuses a namespace that already has any interface besides lo.
+	// See requireIsolated: it is the first half of the ordering, checked from
+	// inside, by the only code that is ever in there.
+	Isolated bool
 }
 
 func (a HelperArgs) flags() []string {
 	args := []string{"-spec", FormatSpecs(a.Specs), "-lo-timeout", a.LoTimeout.String()}
 	if a.Netns != "" {
 		args = append(args, "-net", a.Netns)
+	}
+	if a.Isolated {
+		args = append(args, "-isolated")
 	}
 	return args
 }
@@ -67,6 +76,7 @@ func RunHelper(argv []string, stderr io.Writer) error {
 	netns := fs.String("net", "", "path to the network namespace to enter; empty stays in this one")
 	specs := fs.String("spec", "", "comma-separated listeners, e.g. tcp4:127.0.0.1:15001,udp6:[::1]:15353")
 	loTimeout := fs.Duration("lo-timeout", DefaultLoopbackTimeout, "how long to wait for lo to come up")
+	isolated := fs.Bool("isolated", false, "refuse a namespace with any interface besides lo")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -93,6 +103,15 @@ func RunHelper(argv []string, stderr io.Writer) error {
 
 	if err := waitLoopback(*loTimeout); err != nil {
 		return err
+	}
+	if *isolated {
+		ifs, err := net.Interfaces()
+		if err != nil {
+			return fmt.Errorf("listing this namespace's interfaces: %w", err)
+		}
+		if err := requireIsolated(ifs); err != nil {
+			return err
+		}
 	}
 
 	fds := make([]int, 0, len(parsed))
@@ -137,6 +156,34 @@ func enterNetns(path string) error {
 			return fmt.Errorf("setns %s: %w (no CAP_SYS_ADMIN in the user namespace that owns it)", path, err)
 		}
 		return fmt.Errorf("setns %s: %w", path, err)
+	}
+	return nil
+}
+
+// requireIsolated refuses a namespace that has anything but loopback in it.
+//
+// LISTENERS, THEN RULES, THEN CONNECTIVITY, and this is the check that the
+// third has not already happened. A namespace nspawn made with
+// --private-network holds lo and nothing else, so until something provisions
+// egress the workload has nowhere to go and no race to win. An interface here
+// means egress came first -- measured, that order leaves 12 of 12 connections
+// unsteered -- or that the namespace is not a sandbox's at all: a container
+// without privateNetwork shares the host's, and steering it would steer the
+// host. Either way the session is refused before a listener exists, so no
+// rules follow it.
+//
+// An interface rather than a route, because a route needs an interface to
+// point at other than lo, and nothing inside could have made one: the
+// namespace is owned by the initial user namespace, so every write is EPERM.
+func requireIsolated(ifs []net.Interface) error {
+	var extra []string
+	for _, i := range ifs {
+		if i.Flags&net.FlagLoopback == 0 {
+			extra = append(extra, i.Name)
+		}
+	}
+	if len(extra) > 0 {
+		return fmt.Errorf("the namespace already has %v besides lo; egress is provisioned after the rules and never before, so this session is refused", extra)
 	}
 	return nil
 }

@@ -1,24 +1,34 @@
 // Command frisket keeps credentials out of sandboxes.
 //
-// This is build step 0: the privileged helper that creates a session's
-// listeners inside a sandbox's network namespace, and the holder that accepts
-// on them from the host and logs one line per connection. There is no egress,
-// no DNS, no interception and no credential here yet -- see PLAN.md.
+// Two halves, one binary. `frisket serve` is the daemon, running as the user
+// whose credentials it holds; it can never enter a sandbox's namespace. `frisket
+// steer` and `frisket connect` are root's, run from a launcher's hook: they
+// create a session's listeners inside the sandbox, hand them to the daemon, and
+// steer the sandbox to them -- in that order, which is the security property.
+// See PLAN.md.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/nsnet"
-	"github.com/danielbodart/frisket/internal/steer"
+	"github.com/danielbodart/frisket/internal/sdnotify"
+	"github.com/danielbodart/frisket/internal/serve"
+	"github.com/danielbodart/frisket/internal/steering"
 )
 
 // version is stamped at build time. scripts/version.sh derives the real one
@@ -27,20 +37,32 @@ var version = "dev"
 
 const usage = `frisket -- credentials on the wire, never in the sandbox
 
-  frisket hold  -net <path> -spec <specs> [-session <id>]
-        Create the listeners inside the network namespace at <path>, hold them
-        from here, and log one line per connection. The walking skeleton's
-        stand-in for "frisket serve" until the control socket exists.
+  frisket serve [-control PATH]
+        The daemon. Holds every session's listeners from the host and decides
+        what happens to each connection steered to them. Under systemd it is
+        socket-activated, and keeps its sessions across a restart in the
+        service's file-descriptor store.
 
-  frisket helper -net <path> -spec <specs>
-        The privileged half. Not run by hand: "hold" re-runs this binary as the
-        helper, which enters the namespace, creates the listeners and passes
-        them back over fd 3.
+  frisket steer -netns PATH -steering FILE -name NAME -policy POLICY [-param K=V]...
+        Root's first step, from a launcher's hook: create the session's
+        listeners inside the network namespace at PATH, hand them to the daemon,
+        then load the ruleset that redirects to them. Provisions NO egress.
 
+  frisket connect -netns PATH -steering FILE -name NAME
+        Root's second step: the service address on lo, and for the "all" set
+        the dummy interface and its default routes. Refuses unless the daemon
+        holds this namespace's session and its ruleset is loaded.
+
+  frisket close -name NAME
+        End a session: the daemon closes every descriptor it holds and drops it
+        from the fd store. Closing one that is not open succeeds.
+
+  frisket sessions        What the daemon holds, one JSON object per line.
+  frisket steering FILE   Check a steering file and print what it will do.
+
+  frisket helper ...      Not run by hand: creates listeners inside a namespace.
+  frisket nsexec ...      Not run by hand: runs nft or ip inside a namespace.
   frisket version
-
-A spec is net:addr:port -- tcp4:127.0.0.1:15001, udp6:[::1]:15353 -- and
-several are separated by commas.
 `
 
 func main() {
@@ -49,11 +71,25 @@ func main() {
 		os.Exit(2)
 	}
 	var err error
+	args := os.Args[2:]
 	switch os.Args[1] {
+	case "serve":
+		err = runServe(args)
+	case "steer":
+		err = runSteer(args)
+	case "connect":
+		err = runConnect(args)
+	case "close":
+		err = runClose(args)
+	case "sessions":
+		err = runSessions(args)
+	case "steering":
+		err = runSteering(args)
 	case "helper":
-		err = nsnet.RunHelper(os.Args[2:], os.Stderr)
-	case "hold":
-		err = hold(os.Args[2:])
+		err = nsnet.RunHelper(args, os.Stderr)
+	case "nsexec":
+		// Returns only on failure: on success this process IS the program.
+		err = nsnet.RunExec(args, os.Stderr)
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
@@ -66,79 +102,221 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(2)
 		}
-		fmt.Fprintf(os.Stderr, "frisket: %v\n", err)
+		fmt.Fprintf(os.Stderr, "frisket %s: %v\n", os.Args[1], err)
 		os.Exit(1)
 	}
 }
 
-func hold(argv []string) error {
-	fs := flag.NewFlagSet("hold", flag.ContinueOnError)
-	netns := fs.String("net", "", "path to the sandbox's network namespace; empty holds listeners in this one")
-	specs := fs.String("spec", "", "comma-separated listeners to create in it")
-	session := fs.String("session", "", "session id for the log; defaults to the namespace inode")
-	loTimeout := fs.Duration("lo-timeout", nsnet.DefaultLoopbackTimeout, "how long to wait for lo to come up in there")
+// lockedWriter serialises writes, so the daemon's lines and every session's
+// lines -- one slog handler, many goroutines -- never interleave mid-line.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+func runServe(argv []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	path := fs.String("control", control.DefaultPath, "control socket to create when systemd has not passed one")
+	uid := fs.Int("control-uid", 0, "the only uid the control socket answers")
+	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	parsed, err := nsnet.ParseSpecs(*specs)
+
+	inherited, err := sdnotify.Listen()
 	if err != nil {
 		return err
 	}
+	var ctl *net.UnixListener
+	var stored []sdnotify.FD
+	for _, fd := range inherited {
+		if fd.Name != serve.ControlName {
+			stored = append(stored, fd)
+			continue
+		}
+		ln, err := net.FileListener(fd.File)
+		_ = fd.File.Close()
+		if err != nil {
+			return fmt.Errorf("the control socket systemd passed: %w", err)
+		}
+		ul, ok := ln.(*net.UnixListener)
+		if !ok {
+			return fmt.Errorf("the control socket systemd passed is a %T", ln)
+		}
+		ctl = ul
+	}
+	if ctl == nil {
+		if ctl, err = listenControl(*path); err != nil {
+			return err
+		}
+	}
 
-	// SIGINT/SIGTERM cancels, and cancelling closes every descriptor. That is
-	// not tidiness: a held listener pins the sandbox's network namespace and
-	// the user namespace that owns it, and nothing else has a handle on them.
+	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, nil))
+	d := &serve.Daemon{
+		Log:        log,
+		Policies:   map[string]serve.Policy{serve.StandInPolicy: serve.StandIn()},
+		ControlUID: *uid,
+		MaxConns:   *maxConns,
+	}
+	// Assigned only when present: a nil *Notifier in the interface would be
+	// a non-nil Notifier that fails every call.
+	if n := sdnotify.FromEnv(); n != nil {
+		d.Notify = n
+	}
+	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored))
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	return d.Run(ctx, ctl, stored)
+}
 
-	set, err := nsnet.Open(ctx, nsnet.Helper{}, nsnet.HelperArgs{
-		Netns:     *netns,
-		Specs:     parsed,
-		LoTimeout: *loTimeout,
-	})
+// listenControl makes the control socket when systemd did not: root-only, from
+// the moment it exists. The umask is what makes that true at bind time; a
+// chmod afterwards would leave a window with the socket open to everyone.
+func listenControl(path string) (*net.UnixListener, error) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	old := syscall.Umask(0o177)
+	ln, err := net.ListenUnix(control.Network, &net.UnixAddr{Name: path, Net: control.Network})
+	syscall.Umask(old)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("control socket %s: %w", path, err)
 	}
-	defer set.Close()
+	return ln, nil
+}
 
-	id := *session
-	if id == "" {
-		id = set.Netns
-	}
-	s := steer.New(id, os.Stderr)
-	s.Log.Info("session",
-		"session", id,
-		"netns", set.Netns,
-		"helper_pid", set.HelperPID,
-		"listeners", len(set.Socks),
-		"version", version,
-	)
+// params is a repeated -param key=value.
+type params map[string]string
 
-	var wg sync.WaitGroup
-	for _, sock := range set.Socks {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			var err error
-			if sock.Listener != nil {
-				err = s.Serve(ctx, sock.Listener, steer.HandlerFunc(announce))
-			} else {
-				err = s.ServePacket(ctx, sock.Packet, nil)
-			}
-			if err != nil {
-				s.Log.Error("listener stopped", "session", id, "listener", sock.Spec.String(), "error", err.Error())
-			}
-		}()
+func (p params) String() string { return fmt.Sprint(map[string]string(p)) }
+func (p params) Set(s string) error {
+	k, v, ok := strings.Cut(s, "=")
+	if !ok || k == "" {
+		return fmt.Errorf("%q: want key=value", s)
 	}
-	wg.Wait()
+	if _, dup := p[k]; dup {
+		return fmt.Errorf("%q given twice", k)
+	}
+	p[k] = v
 	return nil
 }
 
-// announce is the placeholder for everything steps 1 to 3 add. It says where
-// the connection was going and closes: there is no egress yet, and a connection
-// that hung instead of closing would look like a working proxy.
-func announce(_ context.Context, c *steer.Conn) {
-	defer c.Close()
-	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	fmt.Fprintf(c, "frisket %s: steered to %s, and no egress until build step 1\n", version, c.Orig)
+func rootFlags(fs *flag.FlagSet) (s *steering.Steerer, netns, file, name *string) {
+	s = &steering.Steerer{}
+	fs.StringVar(&s.Control, "control", control.DefaultPath, "the daemon's control socket")
+	fs.StringVar(&s.Nft, "nft", "nft", "nft, resolved on the host before entering the namespace")
+	fs.StringVar(&s.IP, "ip", "ip", "ip, likewise")
+	netns = fs.String("netns", "", "path to the sandbox's network namespace")
+	file = fs.String("steering", "", "the steering file lib.steering wrote")
+	name = fs.String("name", "", "the session's name")
+	return
+}
+
+func root(ctx context.Context) (context.Context, context.CancelFunc) {
+	// Bounded: this runs inside a launcher that is holding a session open for
+	// it, and a hook that hangs is a session that never starts.
+	return context.WithTimeout(ctx, 30*time.Second)
+}
+
+func runSteer(argv []string) error {
+	fs := flag.NewFlagSet("steer", flag.ContinueOnError)
+	s, netns, file, name := rootFlags(fs)
+	policy := fs.String("policy", "", "the policy the daemon applies to the session")
+	ps := params{}
+	fs.Var(ps, "param", "a policy parameter, key=value; repeatable")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if *netns == "" || *file == "" || *name == "" || *policy == "" {
+		return errors.New("-netns, -steering, -name and -policy are all required")
+	}
+	plan, err := steering.Load(*file)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := root(context.Background())
+	defer cancel()
+	return s.Steer(ctx, *netns, plan, steering.Session{Name: *name, Policy: *policy, Params: ps})
+}
+
+func runConnect(argv []string) error {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	s, netns, file, name := rootFlags(fs)
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if *netns == "" || *file == "" || *name == "" {
+		return errors.New("-netns, -steering and -name are all required")
+	}
+	plan, err := steering.Load(*file)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := root(context.Background())
+	defer cancel()
+	return s.Connect(ctx, *netns, plan, *name)
+}
+
+func runClose(argv []string) error {
+	fs := flag.NewFlagSet("close", flag.ContinueOnError)
+	s := &steering.Steerer{}
+	fs.StringVar(&s.Control, "control", control.DefaultPath, "the daemon's control socket")
+	name := fs.String("name", "", "the session's name")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	ctx, cancel := root(context.Background())
+	defer cancel()
+	closed, err := s.Close(ctx, *name)
+	if err != nil {
+		return err
+	}
+	if !closed {
+		fmt.Fprintf(os.Stderr, "frisket close: no session %s open\n", *name)
+	}
+	return nil
+}
+
+func runSessions(argv []string) error {
+	fs := flag.NewFlagSet("sessions", flag.ContinueOnError)
+	s := &steering.Steerer{}
+	fs.StringVar(&s.Control, "control", control.DefaultPath, "the daemon's control socket")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	ctx, cancel := root(context.Background())
+	defer cancel()
+	st, err := s.Sessions(ctx)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(os.Stdout)
+	for _, x := range st {
+		if err := enc.Encode(x); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runSteering(argv []string) error {
+	if len(argv) != 1 {
+		return errors.New("want one steering file")
+	}
+	p, err := steering.Load(argv[0])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("set %s, table inet %s\n", p.Set, p.Table)
+	fmt.Printf("listeners %s\n", nsnet.FormatSpecs(p.Listeners))
+	fmt.Printf("service %v\n", p.Service)
+	fmt.Printf("connect:\n%s", p.ConnectBatch())
+	return nil
 }

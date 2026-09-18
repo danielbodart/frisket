@@ -3,7 +3,16 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { self, nixpkgs }:
+  # TEST-ONLY. frisket knows nothing about flong (PLAN.md decision 7); the
+  # adapter is tested against a pinned flong because it is the layer where the
+  # security properties meet and nothing else tests it. Nothing outside
+  # `checks` reads this input, so a consumer never fetches it.
+  inputs.flong = {
+    url = "github:danielbodart/flong";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { self, nixpkgs, flong }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -52,6 +61,14 @@
       };
     in
     {
+      # The ruleset and the listener specification, as one attrset, for any
+      # launcher. See nix/steering.nix.
+      lib.steering = import ./nix/steering.nix { inherit (nixpkgs) lib; };
+
+      # The daemon, and the adapter that maps its sessions onto flong's hooks.
+      nixosModules.default = import ./nix/module.nix self;
+      nixosModules.flong = import ./nix/flong.nix self;
+
       packages = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
         rec {
@@ -106,6 +123,35 @@
               runHook postCheck
             '';
           });
+
+          # Both redirect sets, as lib.steering writes them: checked by
+          # frisket's own reader, which is what steer and connect run, and by
+          # nft itself, in a network namespace of the build's own so the check
+          # has the privilege to ask the kernel without touching anything.
+          steering =
+            let
+              file = set: pkgs.writeText "steering-${set}.json"
+                (self.lib.steering { inherit set; }).json;
+            in
+            pkgs.runCommand "steering"
+              { nativeBuildInputs = [ pkg pkgs.nftables pkgs.util-linux pkgs.jq ]; }
+              ''
+                check() {
+                  frisket steering "$2"
+                  jq -r .ruleset "$2" > "$1.nft"
+                  if unshare -rn true 2>/dev/null; then
+                    unshare -rn nft -c -f "$1.nft"
+                  else
+                    echo "no user namespace in this build sandbox: nft -c skipped for $1" >&2
+                  fi
+                }
+                check all ${file "all"}
+                check service ${file "service"}
+                touch $out
+              '';
+
+          # frisket in flong's real shape, end to end, in two VMs.
+          flong = pkgs.testers.runNixOSTest (import ./tests/flong.nix { inherit self flong; });
 
           # The version script decides what every release is called, so it is
           # gated by the same check that gates the release.
