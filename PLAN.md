@@ -28,11 +28,10 @@ run on this machine; everything else is a decision waiting on code.
 **1. Go, standard library first, with one dependency.** `CGO_ENABLED = 0`, so
 the binary is static. The stdlib covers almost all of it: `httputil.ReverseProxy`
 for credential routes, `crypto/tls` and `crypto/x509` for interception, `net`
-and `io.Copy` for egress (splice on Linux, in both directions between a TCP and
-a unix socket — measured), `crypto/rsa` for RS256, and a `syscall` route to
-`SO_ORIGINAL_DST` for both families (IPv4 through `GetsockoptIPv6Mreq`, IPv6
-through `GetsockoptIPv6MTUInfo` at `IP6T_SO_ORIGINAL_DST`, because `Mreq`
-truncates a `sockaddr_in6` — measured).
+and `io.Copy` for egress (splice on Linux — measured), `crypto/rsa` for RS256,
+and a `syscall` route to `SO_ORIGINAL_DST` for both families (IPv4 through
+`GetsockoptIPv6Mreq`, IPv6 through `GetsockoptIPv6MTUInfo` at
+`IP6T_SO_ORIGINAL_DST`, because `Mreq` truncates a `sockaddr_in6` — measured).
 
 It does not cover DNS, and the allowlist is enforced at frisket's DNS, so
 frisket parses hostile DNS. The rule, in order: use the stdlib; where it falls
@@ -41,40 +40,65 @@ most battle-tested library; judge that library by what it drags in behind it;
 never hand-roll a parser for complicated hostile input to keep the dependency
 count at zero.
 
-That makes `golang.org/x/net/dns/dnsmessage` the one dependency. The package
+That makes `golang.org/x/net/dns/dnsmessage` the first dependency. The package
 imports `errors` and nothing else, and `net/dnsclient.go` in the standard
 library imports it, so every Go binary using the pure-Go resolver already runs
 this code. It enforces what a hand-rolled parser forgets: a 254-byte name limit,
 a pointer-loop limit, the reserved label prefixes, and names containing dots.
 
+The second is `golang.org/x/sys/unix`, for `setns`: `syscall` does not export
+`SYS_SETNS`, and the alternative is an architecture-specific constant written
+out by hand. Same test, same answer — Go team, no dependencies of its own.
+
 `vendorHash` is therefore a pinned hash and not `null`. That is a cost, not a
 loss: `vendorHash = null` is a nice property, never a security one.
 
-**2. One unix socket per session is how every sandbox reaches frisket.**
-Whatever network the sandbox has, frisket traffic never crosses it. The socket
-is bound into that sandbox alone, and it is the capability: nothing inside the
-sandbox — relay, rules, configuration — needs to be trusted.
+**2. frisket's listeners live inside each sandbox's network namespace, and
+frisket holds them from the host.** A socket belongs to the namespace it was
+created in, not to the process holding it. So a privileged helper enters the
+sandbox's namespace, creates the listeners there, passes the descriptors back
+and exits; frisket accepts on them from the host, and every socket it creates
+afterwards — every upstream dial — belongs to the host. Measured: TCP over both
+families and UDP, with replies reaching the client, and nothing on the host's
+own loopback able to reach them.
+
+Nothing of frisket's runs inside the sandbox. There is no relay to trust or
+kill, no socket bind-mounted in, and no framing to parse: the original
+destination comes from the kernel's conntrack entry, which the workload cannot
+forge. A workload that connects to a listener directly instead of being
+redirected is identifiable — the lookup either fails or returns the listener's
+own address — and is refused.
+
+Two listeners per session is the whole surface: one TCP, one DNS. The kernel
+says which is which.
+
+The one unix socket that remains is on the host, between the adapter and
+frisket, for creating a session. It is never bound into a sandbox.
 
 **3. Steering, not proxy configuration.** nspawn creates the sandbox's network
 namespace as it does today (`--private-network`). Once it is running, the
 launcher — root on the host — enters that namespace by the container's leader
-pid and installs the nftables rules and, for a sandbox with no network, a dummy
-interface. Matching connections are redirected to an in-sandbox relay, which
-prefixes each one with where it was going (PROXY protocol v2, from
-`SO_ORIGINAL_DST`) and hands it to the socket. frisket routes by that original
-destination. Nothing guesses a protocol.
+pid, creates frisket's listeners there, and installs the nftables rules that
+redirect to them. frisket routes by original destination. Nothing guesses a
+protocol.
 
-Nothing in the session is ever root and nothing needs `CAP_NET_ADMIN`: the rules
-are installed from outside, and the namespace is owned by the initial user
-namespace, so the workload's uid cannot change them (measured: a non-owner uid
-gets `EPERM` on list, flush, route and sysctl). `CAP_NET_ADMIN` can be dropped
-from the container outright.
+**The ordering is the boundary.** A namespace made with `--private-network` has
+`lo` up and an empty route table, so until something provisions egress the
+workload has nowhere to go. Therefore: listeners, then rules, then connectivity
+— the dummy interface and its routes for a sandbox with no network, or pasta for
+one with. Measured: rules at 0.070 s with egress attached three seconds later
+and no barrier of any kind gave 0 unsteered connections out of 20, with every
+attempt before it failing `ENETUNREACH`. The other order loses every time: 12 of
+12 unsteered. No handshake, no wrapper, nothing inside the sandbox to trust.
 
-The ordering this creates is the price: nspawn starts the workload as soon as
-the namespace exists. The relay wrapping the command is the barrier — it waits
-for frisket to confirm steering is installed before it execs the workload, on
-the same socket handshake that is the session's lease. A barrier that is not
-asserted is a barrier that is not there, so it gets a test of its own.
+Nothing in the session is ever root. What stops the workload changing the rules
+is *ownership*: the namespace belongs to the initial user namespace, so a
+workload that is not its owner gets `EPERM` on every write. Measured — it cannot
+list the ruleset, flush it, change a route, an address or a link, write
+`/proc/sys/net/*`, or move an interface into a namespace it just created.
+`--drop-capability=CAP_NET_ADMIN` is worth passing, but it is defence in depth
+only: one `unshare -U` inside the sandbox restores the full bounding set, and
+the writes still fail.
 
 A tool that ignores proxy settings is not a special case: it is steered like
 everything else, and appears in the log whether it is allowed or refused.
@@ -122,11 +146,12 @@ Where a tool genuinely cannot work this way, frisket mints a short-lived, narrow
 token and hands it over exactly once per session, before the workload can act. A
 second request on that socket is refused.
 
-**6. Every route authorises the request it is injecting into.** The relay's
-PROXY header is attacker-controlled — killing the relay and writing to the
-socket directly reaches the same place — so routing is by original destination
-and scope is enforced by frisket against the real request line: repository, path
-prefix, method. Client-side scoping is convenience, never a boundary: git's
+**6. Every route authorises the request it is injecting into.** The destination
+is the kernel's and cannot be forged, but the *request* is entirely the
+workload's: anything in the sandbox can open a connection to an intercepted host
+and have frisket add the credential. So scope is enforced by frisket against the
+real request line: repository, path prefix, method. Client-side scoping is
+convenience, never a boundary: git's
 `insteadOf` is a longest-prefix string rewrite, so `owner/repo` also matches
 `owner/repo-evil`. A route that cannot produce its credential fails the request
 loudly; it never proceeds uncredentialed.
@@ -135,8 +160,8 @@ loudly; it never proceeds uncredentialed.
 
 - **flong** gives a sandbox a network and a hook around its lifecycle. It knows
   nothing about frisket.
-- **frisket** is the daemon, the relay, and steering expressed as a script over
-  a namespace. It knows nothing about launchers.
+- **frisket** is the daemon, and steering expressed as a script over a
+  namespace. It knows nothing about launchers.
 - **The adapter** maps frisket onto flong's hooks. It ships as
   `frisket.nixosModules.flong` from day one, tested in frisket's own CI against
   a pinned flong, because it is the layer where the security properties actually
@@ -147,10 +172,12 @@ is a fourth thing and stays in nix-config. The printing name for it, if it is
 ever extracted, is **chase**: the frame that locks the type together so the page
 can be printed.
 
-**8. Authorise by socket, never by peer uid.** Without a uid namespace every
+**8. Authorise by listener, never by peer uid.** Without a uid namespace every
 process on both sides is the same uid, so `SO_PEERCRED` says nothing. A
-session's identity and policy are fixed when its socket is created, by root,
-before the sandbox starts.
+session's identity and policy are fixed when its listeners are created, by root,
+in that sandbox's namespace: which socket a connection arrived on *is* which
+session it came from. Nothing is asserted by the client and nothing is looked up
+by path.
 
 **9. frisket runs as the user whose credentials it holds**, hardened by systemd
 (`ProtectSystem=strict`, `ProtectHome=read-only` with only the credential files
@@ -168,7 +195,29 @@ a client retries a 503 with backoff and recovers in the same turn, where two
 401s fail the turn (measured against Claude Code). Who refreshes when no host
 session is running is an open question.
 
-**11. Separate repository from day one.** nix-config declares
+**11. Invariants that came out of measurement.** Each of these is a way to get
+the design wrong that was found by running it, and each gets a test:
+
+- **Never set `SO_REUSEPORT`.** The workload is the first process in the
+  namespace and can bind frisket's port before the helper does. With
+  `SO_REUSEADDR` alone that fails closed and loudly, and the session must abort;
+  with `SO_REUSEPORT` the workload would take a share of its own steered
+  traffic. Never install rules without a listener.
+- **Read the original destination at accept, and cache it.** Flushing conntrack
+  mid-connection invalidates the lookup.
+- **Wait for `lo` before binding `::1`**, which only exists once it is up.
+- **Closing descriptors is teardown.** A held listener pins the namespace and
+  its user namespace, invisibly to `lsns` and `ip netns`, so frisket's fd is the
+  only handle. Leak it and the namespace is pinned for the daemon's lifetime.
+- **Cap concurrent connections per session.** Each one now costs a host
+  descriptor.
+- **If `setns` is ever done in-process, lock the thread and never unlock it.**
+  Measured: unlocking let the Go runtime schedule ordinary goroutines onto a
+  thread still inside the sandbox, and 13 of 200 of frisket's own upstream
+  connections left through the sandbox's network. The forked helper is immune by
+  construction.
+
+**12. Separate repository from day one.** nix-config declares
 `github:danielbodart/frisket` and builds locally with
 `--override-input frisket path:/home/dan/Projects/frisket` (explicitly `path:`,
 so untracked files are included). The override is never written to
@@ -203,11 +252,22 @@ Recorded so they are not re-proposed without new information.
   a to-do. It also avoids exposing the host on every address, which was the
   original reason.
 - **flong pre-creating the namespace and handing it over with
-  `--network-namespace-path`.** It fights nspawn: `lo` is not brought up,
-  `--resolv-conf=auto` copies the host's file in and truncates whatever is
-  mounted there, `CAP_NET_ADMIN` returns to the bounding set, and a pinned
-  namespace file must be unmounted and swept. Entering the namespace nspawn
-  already made costs an ordering barrier and nothing else.
+  `--network-namespace-path`.** Rejected on a narrower margin than it first
+  appeared, and for one measured reason rather than the three originally given.
+  Those three — `lo` left down, the host's `resolv.conf` copied in,
+  `CAP_NET_ADMIN` back in the bounding set — only happen without
+  `--private-network`; passing both flags together gives `lo` up, no
+  `resolv.conf`, and the capability removable. nspawn keys all three on
+  `arg_private_network` alone, never on the path. The real reason is that this
+  costs a bind-mounted pin for *every* session, including the ones with no
+  network, where entering the namespace nspawn already made pins nothing and
+  everything dies with the namespace.
+- **A relay inside the sandbox, framing connections with PROXY protocol v2.**
+  The original way across the namespace boundary, before frisket could hold
+  listeners inside it. It put a process of ours in the sandbox, made the
+  destination something the workload could assert (the relay is killable, and
+  the socket reachable without it), and added a binary parser facing hostile
+  input. All three are gone.
 - **A privileged pid 1 inside the sandbox that sets up and drops.** What the
   nixpkgs container module does. It undoes flong's "nothing in a session is
   root" and needs the capability we would immediately remove.
@@ -280,9 +340,10 @@ flong      gives the sandbox a namespace and a hook around its lifecycle:
              nspawn makes it; root enters it from the host once it is running
              (generic; knows nothing about frisket)
 
-steering   installed by root, in the sandbox's namespace, before the barrier lifts:
-             nftables redirects the chosen set -> relay -> frisket socket
-             each connection prefixed with its original destination (PROXY v2)
+steering   installed by root, in the sandbox's namespace, in this order:
+             listeners created inside the namespace, passed out to frisket
+             nftables redirects the chosen set to them
+             only then is any egress provisioned -- so there is no race
 
 frisket    on the host, one socket per session; routes by original destination:
              - frisket's service address -> its own services
@@ -298,37 +359,35 @@ frisket    on the host, one socket per session; routes by original destination:
 host                                         sandbox network namespace
 ----                                         -------------------------
 frisket serve                                nftables (root, from the host, after start)
-  control.sock <-- adapter: new session         redirect set --> relay
-  ca/                                        frisket relay -- <workload>
-  sessions/<id>/                               waits for steering, then execs
-    frisket.sock <----- bind-mounted ------>    TCP listener  -+
-    tokens/                                     DNS listener  -+-> frisket.sock
+  control.sock <-- adapter: new session        redirect set --> 127.0.0.1:<ports>
+  ca/                                                             ^         ^
+  sessions/<id>/                                                  |         |
+    listeners  -------- held from here, created in there ---------+---------+
+    tokens/                                      (one TCP, one DNS; the workload
+                                                  has nothing of ours to talk to)
 ```
 
 ### Components
 
 **`frisket serve`** — the host daemon. A control socket creates a session with a
-named policy and parameters, and returns its directory, which is what gets bound
-into the sandbox. Sessions are collected when their lease closes.
+named policy and parameters. Sessions are collected when their lease closes, and
+collecting one means closing its descriptors, or its namespace stays pinned.
 
-**`frisket steer <netns> --set <set>`** — installs the ruleset, addresses and
-routes in a namespace, idempotently, and fails loudly. One attrset produces both
-these rules and the relay's arguments, so the ports cannot drift apart.
+**`frisket steer <netns> --set <set>`** — the privileged half, run by root from
+flong's hook. It enters the namespace, creates the listeners, hands them to
+`serve`, loads the ruleset, and returns. It does not provision egress: that is
+the caller's next step, and it must be the next step. One attrset produces both
+the rules and the listener specification, so the ports cannot drift apart.
 
-**`frisket relay -- <command>`** — starts its listeners, waits for the session
-socket to confirm steering, then execs the workload. For each connection it
-reads `SO_ORIGINAL_DST`, writes a PROXY v2 header, and copies bytes; DNS is
-forwarded in its TCP form (RFC 7766). It parses nothing else, and its integrity
-does not matter — killing it and listening instead reaches the same socket.
-
-**`frisket mint <service>`** — a client for the one-shot handout, talking to the
-socket directly, so the sandbox needs no curl.
+**`frisket mint <service>`** — a client for the one-shot handout, over the
+session's own service address, so the sandbox needs no curl and no socket.
 
 ### Redirect sets
 
 - **`all`** — for a sandbox with no network. Every non-loopback TCP connection
-  and all DNS go to the relay. The namespace also needs a dummy interface with a
-  default route *and a non-link-local address per family*: with a route alone,
+  and all DNS go to frisket's listeners. The namespace also needs a dummy
+  interface with a default route *and a non-link-local address per family*:
+  with a route alone,
   IPv4 picks source `0.0.0.0` and the client resets, and IPv6 hangs until
   timeout (measured). Other UDP is rejected rather than dropped, so a QUIC
   client fails over to TCP at once instead of hanging (measured).
@@ -347,8 +406,8 @@ rule silently drops the redirected DNS.
 One address inside the sandbox where frisket's own services live: DNS on 53,
 HTTPS on 443, HTTP on 80. It is assigned to `lo` inside the namespace so that a
 missing rule fails closed with a refusal rather than being routed out
-(measured). The relay listens on high ports and nftables sends traffic to it, so
-nothing binds a privileged port.
+(measured). frisket's listeners sit on high ports and nftables sends traffic to
+them, so nothing binds a privileged port.
 
 It is a dedicated address, not `169.254.169.254`. A 404 at the cloud metadata
 address breaks Azure's credential chain outright — it marks IMDS available,
@@ -446,23 +505,29 @@ Notes:
 
 ## Build order
 
-**0. Walking skeleton.** flong's hook and per-session bind; `frisket steer` over
-a namespace; the relay with PROXY v2 and the barrier; frisket answering one
-intercepted route through the real socket. One NixOS test covering it end to
-end: steered, logged, no credential in the sandbox. This settles the socket wire
-protocol, the control API and the session lease before anything is built on
-them.
+The goal of the first three steps is the base capability, proven end to end:
+a sandbox that is steered, an egress policy that holds, and one intercepted host
+where a credential is added on the wire and never enters. The agents are
+deliberately last — they need refinement of their own, and none of it changes
+the mechanism.
+
+**0. Walking skeleton.** flong's hook (its tasks 1–4) and `frisket steer`
+creating listeners in a namespace; frisket accepting on them and logging one
+line per connection. One NixOS test: steered, logged, and a workload that cannot
+reach anything before the rules land. This settles the control API and the
+session lease before anything is built on them.
 
 **1. Egress.** The classifier, `Dialer.Control`, DNS with the allowlist, the log
-schema, `all` and `service`. Tested in a bare namespace and in the VM.
+schema, `all` and `service`.
 
 **2. Interception.** The CA, certificates minted per name, the splice-through
-list, and the first credential routes: git and hf, which have no unknowns.
+list, and one credential route end to end — git, which has no unknowns.
 
-**3. Agents.** Claude Code and codex through interception, including what the
-host's rotating credential files require.
+**3. The rest of the routes** — hf, the GCP metadata server, minting, gh,
+Cloudflare, as their credential sources appear.
 
-**4. Metadata server and minting** — GCP, gh, Cloudflare.
+**4. Agents.** Claude Code and codex through interception, including what the
+host's rotating credential files require. A separate piece of work.
 
 **5. Integration.** The adapter against nix-config's tiers, and the mounts that
 target state removes.
@@ -476,8 +541,8 @@ target state removes.
 - `nixosModules.default` — the daemon, with a `package` option defaulting to
   this flake's build, so importing the module is enough.
 - `nixosModules.flong` — the adapter, from day one.
-- `lib.steering` — the ruleset and the relay's arguments, as one attrset, for
-  any launcher.
+- `lib.steering` — the ruleset and the listener specification, as one attrset,
+  for any launcher.
 - `devShells.default` — go, gopls, golangci-lint.
 - `checks` — the NixOS tests, the package (`buildGoModule` runs `go test`),
   `gofmt`, and `go vet`. The Go version follows the oldest nixpkgs a consumer
@@ -486,9 +551,18 @@ target state removes.
   gate follow flong.
 
 The service runs as the credential owner, hardened, with `ProtectSystem=strict`
-and nothing else reachable. Session sockets and their directory survive a
-restart, and the daemon re-listens on them, so a `nixos-rebuild switch` does not
-sever a session that has been running for hours.
+and nothing else reachable.
+
+Sessions survive a restart through systemd's file-descriptor store: the
+listeners are stashed with `FDSTORE=1` and a name carrying the session id, at
+session creation rather than at shutdown, so a crash is covered too.
+`FileDescriptorStoreMax=`, `NotifyAccess=main` and
+`FileDescriptorStorePreserve=restart`. While PID 1 holds a copy, the sandbox's
+namespace stays alive across the gap; the successor re-associates listeners to
+sessions from its state directory. A namespace-held listener cannot be reopened
+from a path, so this is the only way a `nixos-rebuild switch` does not sever a
+session that has been running for hours — and teardown must drop the store entry
+as well as close the descriptors.
 
 ---
 
@@ -497,10 +571,8 @@ sever a session that has been running for hours.
 **Go tests.** Unit tests, fuzz targets and property-based tests, because most of
 this is a parser or a classifier facing hostile input:
 
-- Fuzz `dnsmessage` use, the PROXY v2 reader, and the ClientHello peek. The
-  PROXY v2 reader is the one parser written here rather than taken: it is a
-  fixed layout with no compression or recursion, it accepts exactly two shapes,
-  and it is fuzzed hardest.
+- Fuzz the DNS handling and the ClientHello peek — the two places that parse
+  bytes the sandbox chose.
 - Property tests for the address classifier (a refusal is never turned into an
   acceptance by any allowlist; every spelling of an address classifies as the
   address), the allowlist matcher (`evil-google.com` never matches
@@ -524,12 +596,19 @@ node's address can be used.
   address is refused and logged; loopback, link-local and the host's own
   addresses are refused, including its global IPv6 address; UDP 443 is rejected;
   DNS reaches frisket; a refused name triggers no upstream lookup; a connection
-  to an address frisket did not resolve is refused; the workload cannot list or
-  change the rules; the PROXY header's destination matches what the client
-  dialled.
+  to an address frisket did not resolve is refused; the destination frisket logs
+  matches what the client dialled, over both families.
 - Steering, `service`: only DNS and the service address reach frisket.
-- The barrier: with steering deliberately delayed, the workload cannot reach the
-  network, and does once it lands.
+- Ownership, as a regression gate rather than a measurement: the workload cannot
+  list the ruleset, before or after `unshare -U`.
+- Ordering: with egress deliberately delayed, every attempt before it fails and
+  every attempt after it is steered — with no barrier in the sandbox.
+- Listener integrity: a workload that has taken the port first makes session
+  creation fail loudly rather than share it; a workload cannot take the port
+  once frisket holds it; a direct connection to a listener is refused as
+  unsteered.
+- Lifecycle: closing a session frees its namespace (its nsfs inode becomes
+  reusable); a session survives a daemon restart through the fd store.
 - Credentials: the sandbox holds no credential; the real one reaches the
   upstream; a route used under a policy without it gets none; an out-of-scope
   request is refused even when the PROXY header is forged; a Google client
@@ -544,25 +623,18 @@ node's address can be used.
 
 ## Required changes elsewhere
 
-**flong** — generic, agent-agnostic:
+**flong** — generic, agent-agnostic, and written up as its own plan in that
+repository. What frisket needs from it, in dependency order: the two bugs found
+while verifying this design (a unix-export path that no longer matches systemd,
+and a sweep that deletes live sessions' roots), then a root hook that runs after
+the namespace exists with the ordering contract above, a teardown hook called
+from both the clean and the killed path, per-session binds with source ≠
+destination, the capability flags as defence in depth, and `network` — pasta for
+a private session, with a bind-mounted pin and `--runas 0`, released with
+`umount -l`.
 
-- **A root hook after the namespace exists and before the workload is useful**,
-  with the machine name, the namespace, the uid and the resolved workspace in
-  scope, able to add binds of its own.
-- **A teardown hook**, called from cleanup and from the SIGKILL sweep. The sweep
-  currently globs only the current closure's cache directory, so a session from
-  a superseded closure is never swept.
-- **Per-session binds with source ≠ destination**, accepting files and sockets.
-  `extraBinds` cannot: directories only, same path both sides, resolved as the
-  caller, and advertised to the payload.
-- **Capability hardening for a hooked namespace:** refuse `--capability`,
-  `--ambient-capability` and `--private-users` arriving through `extraFlags`,
-  and pass `--drop-capability=CAP_NET_ADMIN` and `--no-new-privileges=yes`.
-  Otherwise steering is decorative.
-- **`outbound`**, giving a private session the host's connectivity through
-  pasta, with `--no-map-gw` and an explicit `none` for every port class, since
-  they all default to `auto`. Its lifetime is the teardown hook's business.
-- The veth, bridge and port options stay refused, for the concurrency reason.
+Two properties frisket depends on that are flong's to keep: the namespace is
+owned by the initial user namespace, and egress is provisioned last.
 
 **nix-config** — policy, and the mounts the target state removes:
 
@@ -594,8 +666,8 @@ inside, which the credential binds going away does not change.
    from the host's own browser. Whether that is worth a forwarder.
 4. **Hugging Face gated repos** — confirm the presigned CDN and Xet paths work
    as ordinary egress, and which hosts a strict allowlist needs.
-5. **pasta as root in the initial user namespace** — it drops to `nobody` before
-   `setns`, so attaching may need `--runas 0` or a dedicated uid. Under
-   verification.
-6. **Which host ports a trusted policy allows**, and whether that list is
+5. **Which host ports a trusted policy allows**, and whether that list is
    per project.
+6. **Where the credentials come from** for the routes that have no source yet:
+   there is no GitHub App, no gcloud installation and no Cloudflare login on
+   this machine, and the Hugging Face token is outside sops.
