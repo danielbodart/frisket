@@ -63,9 +63,12 @@ answered NXDOMAIN, without an upstream lookup, and every address frisket did
 not resolve for the session is refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
 and the host's own addresses, whatever resolved to them.
 
-The CA is at `/etc/frisket/ca.crt` in every session, read-only. Telling each
-runtime to trust it is yours to do, and each has its own way — Node's, for
-one, adds it to the roots it already has:
+The CA is at `/etc/frisket/ca.crt` in every session, read-only. It is
+name-constrained to the hosts the policies intercept, so clients reject it for
+any other name, and the daemon makes a new one when that set changes: a session
+already running keeps the old one and fails on its intercepted hosts until it
+is relaunched. Telling each runtime to trust it is yours to do, and each has
+its own way — Node's, for one, adds it to the roots it already has:
 
 ```nix
 flong.agent.command = ''
@@ -117,7 +120,7 @@ to run out of turn.
 | `services.frisket.policies.<name>.intercept` | `[ ]` | exact names answered with frisket's address; each must be allowed and have a route |
 | `services.frisket.policies.<name>.routes.<route>` | `{ }` | `host`, `upstream`, `upstreamCA`, `credentialFile`, `header` (null: `Authorization: Bearer`), `strip`, `paths` |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
-| `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host |
+| `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host; constrained to every policy's `intercept` |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
 | `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
 | `services.frisket.maxConnections` | built in | concurrent connections per session |

@@ -46,7 +46,8 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         each connection and query steered to them under the session's policy:
         DNS against the allowlist, egress to what that DNS resolved, and
         interception for the routes' hosts. FILE holds the policies; DIR holds
-        the machine's CA, made on first start. Under systemd it is
+        the machine's CA, constrained to the intercepted hosts and made anew
+        when they change. Under systemd it is
         socket-activated, and keeps its sessions across a restart in the
         service's file-descriptor store.
 
@@ -152,9 +153,19 @@ func runServe(argv []string) error {
 	if err != nil {
 		return err
 	}
-	ca, err := intercept.LoadOrCreateCA(filepath.Join(*state, "ca"))
+	// Constrained to every policy's intercepted hosts, and made anew when they
+	// change.
+	hosts, err := cfg.Intercepted()
 	if err != nil {
 		return err
+	}
+	ca, err := intercept.LoadOrCreateCA(filepath.Join(*state, "ca"), hosts)
+	if err != nil {
+		return err
+	}
+	if ca.Replaced() {
+		log.Warn("CA replaced: the intercepted hosts changed; sessions started before now trust the old CA until they are relaunched",
+			"hosts", ca.Hosts())
 	}
 	classifier, dialer, err := policy.Dialer()
 	if err != nil {
@@ -211,7 +222,7 @@ func runServe(argv []string) error {
 	}
 	sort.Strings(names)
 	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored),
-		"policies", names, "ca", filepath.Join(*state, "ca", intercept.CACertFile))
+		"policies", names, "ca", filepath.Join(*state, "ca", intercept.CACertFile), "ca_hosts", ca.Hosts())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

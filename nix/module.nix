@@ -230,10 +230,13 @@ in
       default = "${stateDir}/ca/ca.crt";
       description = ''
         The machine's CA certificate, made by the daemon on its first start:
-        what a sandbox must trust for interception. The key beside it never
-        leaves the state directory. How each runtime inside is told to trust it
-        -- NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, REQUESTS_CA_BUNDLE, a system
-        bundle -- is the consumer's to decide.
+        what a sandbox must trust for interception. It is name-constrained to
+        every policy's intercepted hosts, and made anew on the first start
+        after they change; a session already running trusts the old one until
+        it is relaunched. The key beside it never leaves the state directory.
+        How each runtime inside is told to trust it -- NODE_EXTRA_CA_CERTS,
+        SSL_CERT_FILE, REQUESTS_CA_BUNDLE, a system bundle -- is the consumer's
+        to decide.
       '';
     };
 
@@ -313,7 +316,8 @@ in
         ExecStart = "${lib.getExe cfg.package} serve -control ${cfg.controlSocket}"
           + " -config ${configFile} -state ${stateDir}"
           + lib.optionalString (cfg.maxConnections > 0) " -max-conns ${toString cfg.maxConnections}";
-        # The CA key lives here, 0600 inside a 0700 directory.
+        # The CA key lives here, 0600 inside a 0700 directory. A new CA is
+        # made beside the old and swapped in with RENAME_EXCHANGE.
         StateDirectory = "frisket";
         StateDirectoryMode = "0700";
         User = cfg.user;

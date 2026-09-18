@@ -120,10 +120,20 @@ the wire. No per-tool base URL, no placeholder token, no `insteadOf`, no
 endpoints a tool hard-codes.
 
 - The certificate authority is generated per machine, held by frisket, and
-  trusted only inside sandboxes. Whoever holds that key can impersonate any site
-  *to a sandbox*, which is the blast radius to keep in mind. The daemon makes it
-  on first start in its state directory; the key is `0600` and never leaves it.
-  The NixOS module exposes the certificate's path, and the flong adapter binds
+  trusted only inside sandboxes. It is name-constrained: a critical X.509 Name
+  Constraints extension (RFC 5280 §4.2.1.10) permits the hosts intercepted
+  across all policies and no IP address — X.509 admits the names below a
+  permitted name too, and cannot say less. That limits a stolen key to
+  impersonating those hosts, to a sandbox, and it makes a client reject a leaf
+  frisket mints for any other name by its own mistake. The daemon makes it on
+  first start in its state directory, and makes a new one, swapped in whole, on
+  the first start after the set of intercepted hosts changes; the certificate
+  carries the set, so it is the record the change is detected against. A
+  session already running trusts the CA it started with and fails verification
+  of its intercepted hosts until it is relaunched — accepted, because sessions
+  are short-lived and the set changes only when a policy does. The key is
+  `0600`, created exclusively, and never leaves the state directory. The NixOS
+  module exposes the certificate's path, and the flong adapter binds
   a root-owned `0444` copy into every session at `/etc/frisket/ca.crt` — a copy,
   because flong's binds are read-write and the daemon's file belongs to the
   user whose uid the workload usually shares. Telling each runtime to trust it
@@ -642,7 +652,7 @@ injects what the host file currently holds.
 TPROXY, the daemon and its sessions across restarts, and the flong adapter;
 egress with the structural classifier, `Dialer.Control` and the session's
 resolved set; DNS with the allowlist; and interception with the per-machine CA,
-leaves minted per name, and one generic route adding a credential from a host
+name-constrained to the intercepted hosts, leaves minted per name, and one generic route adding a credential from a host
 file on the wire. The VM test shows the credential reach the upstream and
 appear nowhere in the sandbox.
 
@@ -807,10 +817,5 @@ inside, which the credential binds going away does not change.
 6. **Where the credentials come from** for the routes that have no source yet:
    there is no GitHub App, no gcloud installation and no Cloudflare login on
    this machine, and the Hugging Face token is outside sops.
-7. **Name constraints on the CA.** The CA can mint for any name, so its key can
-   impersonate any site to a sandbox. X.509 name constraints could limit it to
-   the intercepted names — at the cost of a CA that changes, and must be
-   redistributed, whenever a policy intercepts a new name — or be left off, as
-   the CA is made. Undecided.
-8. **QUIC's policy.** Whether a relay's per-address allowlist is enough, or the
+7. **QUIC's policy.** Whether a relay's per-address allowlist is enough, or the
    Initial's SNI must be read (see "Build order").

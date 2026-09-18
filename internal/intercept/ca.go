@@ -14,10 +14,15 @@ import (
 	"fmt"
 	"io/fs"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // The CA's files, inside the directory LoadOrCreateCA is given.
@@ -46,13 +51,19 @@ const (
 // CA is the per-machine certificate authority sandboxes trust, and the leaf
 // certificates minted from it.
 //
-// Whoever holds the key can impersonate any site TO A SANDBOX (PLAN.md,
-// decision 4). That is the blast radius: it is generated here, never leaves
-// this machine, and is trusted nowhere but inside sandboxes.
+// IT IS NAME-CONSTRAINED to the intercepted hosts (PLAN.md, decision 4): a
+// critical X.509 Name Constraints extension (RFC 5280, 4.2.1.10) permits
+// those DNS names and no IP address at all. So a stolen key can impersonate
+// only those hosts, and only to a sandbox -- it is generated here, never
+// leaves this machine, and is trusted nowhere else -- and a client rejects a
+// leaf frisket mints for any other name by its own mistake.
 type CA struct {
 	cert    *x509.Certificate
 	certPEM []byte
 	key     crypto.Signer
+	// replaced is whether this start made a new CA in place of one for other
+	// hosts.
+	replaced bool
 
 	// Now is the clock leaves are minted against; tests move it.
 	Now func() time.Time
@@ -69,23 +80,55 @@ type leaf struct {
 	notAfter time.Time
 }
 
-// LoadOrCreateCA loads the CA from dir, creating it the first time.
+// LoadOrCreateCA loads the CA from dir, constrained to hosts: creating it the
+// first time, and making a new one in its place when the one there is
+// constrained to any other set of hosts.
 //
-// It never regenerates a CA it cannot load. A CA that silently changed would
-// break trust in every sandbox at once, and the most likely reason a load
+// A NEW CA IS A CHANGE OF TRUST FOR EVERY SANDBOX. A session already running
+// trusts the CA it was started with and fails verification against the new
+// one until it is relaunched -- accepted, because sessions are short-lived and
+// the set only changes when a policy intercepts a different host. The
+// certificate is the record of the set: it sits beside the key and carries the
+// constraints, so there is no second copy to disagree with it.
+//
+// It never regenerates a CA it cannot load. A CA that silently changed for
+// that reason would break trust for nothing, and the most likely reason a load
 // fails -- a key with permissions nobody set on purpose, one file of the two
 // missing -- is one the operator needs to see rather than have papered over.
-func LoadOrCreateCA(dir string) (*CA, error) {
+func LoadOrCreateCA(dir string, hosts []string) (*CA, error) {
+	dir = filepath.Clean(dir)
+	names, err := constrainedNames(hosts)
+	if err != nil {
+		return nil, err
+	}
+	// A replacement interrupted after the swap leaves the old CA here. Its key
+	// must not outlive it.
+	if err := os.RemoveAll(nextDir(dir)); err != nil {
+		return nil, fmt.Errorf("intercept: removing a previous CA: %w", err)
+	}
+
 	keyPath := filepath.Join(dir, CAKeyFile)
 	certPath := filepath.Join(dir, CACertFile)
-
 	_, keyErr := os.Lstat(keyPath)
 	_, certErr := os.Lstat(certPath)
 	switch {
 	case keyErr == nil && certErr == nil:
-		return loadCA(keyPath, certPath)
+		ca, err := loadCA(keyPath, certPath)
+		if err != nil {
+			return nil, err
+		}
+		if constrainedTo(ca.cert, names) {
+			return ca, nil
+		}
+		return replaceCA(dir, names)
 	case errors.Is(keyErr, fs.ErrNotExist) && errors.Is(certErr, fs.ErrNotExist):
-		return createCA(dir, keyPath, certPath)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("intercept: CA directory: %w", err)
+		}
+		if err := writeCA(dir, names); err != nil {
+			return nil, err
+		}
+		return loadCA(keyPath, certPath)
 	case keyErr != nil && !errors.Is(keyErr, fs.ErrNotExist):
 		return nil, fmt.Errorf("intercept: CA key: %w", keyErr)
 	case certErr != nil && !errors.Is(certErr, fs.ErrNotExist):
@@ -96,13 +139,122 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	}
 }
 
-func createCA(dir, keyPath, certPath string) (*CA, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("intercept: CA directory: %w", err)
+func nextDir(dir string) string { return dir + ".next" }
+
+// constrainedNames is hosts normalised, without duplicates, in order: the
+// set's one spelling, so the same set always gives the same certificate
+// fields.
+func constrainedNames(hosts []string) ([]string, error) {
+	names := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		n := strings.TrimSuffix(strings.ToLower(h), ".")
+		if n == "" || strings.ContainsAny(n, "*:[]/ ") {
+			return nil, fmt.Errorf("intercept: %q is not a host name to constrain the CA to", h)
+		}
+		names = append(names, n)
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	slices.Sort(names)
+	return slices.Compact(names), nil
+}
+
+// constrain gives tmpl its name constraints: the DNS names permitted, and no
+// IP address -- a leaf naming an address would otherwise be unconstrained,
+// since a DNS constraint says nothing about one. X.509 permits a name and the
+// names below it, so "api.example.com" also admits "x.api.example.com"; it
+// has no way to say one name alone. With no names at all, every DNS name is
+// excluded instead: an empty permitted list is no constraint at all.
+func constrain(tmpl *x509.Certificate, names []string) {
+	tmpl.PermittedDNSDomainsCritical = true
+	tmpl.PermittedDNSDomains = names
+	if len(names) == 0 {
+		// Go and OpenSSL both read the empty name as matching every name. No
+		// leaf is ever minted from a CA with nothing to intercept, so no
+		// other client has to agree.
+		tmpl.ExcludedDNSDomains = []string{""}
+	}
+	tmpl.ExcludedIPRanges = []*net.IPNet{
+		{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(0, 32)},
+		{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
+	}
+}
+
+// constrainedTo reports whether cert carries exactly the constraints names
+// would give it, critical. A CA made before constraints, or for other hosts,
+// does not.
+func constrainedTo(cert *x509.Certificate, names []string) bool {
+	var want x509.Certificate
+	constrain(&want, names)
+	nets := func(ns []*net.IPNet) []string {
+		out := make([]string, len(ns))
+		for i, n := range ns {
+			out[i] = n.String()
+		}
+		return out
+	}
+	return cert.PermittedDNSDomainsCritical &&
+		slices.Equal(cert.PermittedDNSDomains, want.PermittedDNSDomains) &&
+		slices.Equal(cert.ExcludedDNSDomains, want.ExcludedDNSDomains) &&
+		slices.Equal(nets(cert.ExcludedIPRanges), nets(want.ExcludedIPRanges)) &&
+		len(cert.PermittedIPRanges) == 0 &&
+		len(cert.PermittedEmailAddresses)+len(cert.ExcludedEmailAddresses) == 0 &&
+		len(cert.PermittedURIDomains)+len(cert.ExcludedURIDomains) == 0
+}
+
+// replaceCA makes a CA for names beside dir and swaps it in whole.
+//
+// RENAME_EXCHANGE, so at every instant dir holds one complete CA -- the old
+// or the new, never the key of one and the certificate of the other, which a
+// crash between two renames of files would leave, and which the next start
+// would rightly refuse. The old CA ends up beside it and is removed; if that
+// is interrupted, the next start removes it.
+func replaceCA(dir string, names []string) (*CA, error) {
+	next := nextDir(dir)
+	if err := os.Mkdir(next, 0o700); err != nil {
+		return nil, fmt.Errorf("intercept: new CA directory: %w", err)
+	}
+	err := writeCA(next, names)
+	if err == nil {
+		err = syncDir(next)
+	}
+	if err != nil {
+		_ = os.RemoveAll(next)
+		return nil, err
+	}
+	if err := unix.Renameat2(unix.AT_FDCWD, next, unix.AT_FDCWD, dir, unix.RENAME_EXCHANGE); err != nil {
+		_ = os.RemoveAll(next)
+		return nil, fmt.Errorf("intercept: swapping in the new CA: %w", err)
+	}
+	if err := syncDir(filepath.Dir(dir)); err != nil {
+		return nil, fmt.Errorf("intercept: new CA: %w", err)
+	}
+	if err := os.RemoveAll(next); err != nil {
+		return nil, fmt.Errorf("intercept: removing the old CA: %w", err)
+	}
+	ca, err := loadCA(filepath.Join(dir, CAKeyFile), filepath.Join(dir, CACertFile))
 	if err != nil {
 		return nil, err
+	}
+	ca.replaced = true
+	return ca, nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+// writeCA makes a new CA for names in dir, which exists and holds neither
+// file.
+func writeCA(dir string, names []string) error {
+	keyPath := filepath.Join(dir, CAKeyFile)
+	certPath := filepath.Join(dir, CACertFile)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
 	}
 	host, _ := os.Hostname()
 	now := time.Now()
@@ -122,13 +274,14 @@ func createCA(dir, keyPath, certPath string) (*CA, error) {
 		MaxPathLenZero: true,
 		KeyUsage:       x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 	}
+	constrain(tmpl, names)
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// The key first, created exclusively and 0600 from the start -- never
@@ -136,13 +289,13 @@ func createCA(dir, keyPath, certPath string) (*CA, error) {
 	// If the certificate write then fails, the key is removed, so the next
 	// start sees neither file rather than the half a CA refused above.
 	if err := writeExclusive(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		return nil, fmt.Errorf("intercept: CA key: %w", err)
+		return fmt.Errorf("intercept: CA key: %w", err)
 	}
 	if err := writeExclusive(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
 		_ = os.Remove(keyPath)
-		return nil, fmt.Errorf("intercept: CA certificate: %w", err)
+		return fmt.Errorf("intercept: CA certificate: %w", err)
 	}
-	return loadCA(keyPath, certPath)
+	return nil
 }
 
 func writeExclusive(path string, data []byte, mode os.FileMode) error {
@@ -248,6 +401,19 @@ func (ca *CA) CertPEM() []byte { return append([]byte(nil), ca.certPEM...) }
 // Certificate is the parsed CA certificate.
 func (ca *CA) Certificate() *x509.Certificate { return ca.cert }
 
+// Hosts is the set of names the CA is constrained to, in order.
+func (ca *CA) Hosts() []string { return slices.Clone(ca.cert.PermittedDNSDomains) }
+
+// Permits reports whether host is one of the names the CA was made for. A
+// route for any other host would get a leaf every client rejects.
+func (ca *CA) Permits(host string) bool {
+	return slices.Contains(ca.cert.PermittedDNSDomains, normaliseHost(host))
+}
+
+// Replaced reports whether this start made the CA in place of one for other
+// hosts: sessions started before it trust the old one until relaunched.
+func (ca *CA) Replaced() bool { return ca.replaced }
+
 // SetCacheSize changes the bound on minted leaves held.
 func (ca *CA) SetCacheSize(n int) {
 	ca.mu.Lock()
@@ -261,7 +427,8 @@ func (ca *CA) SetCacheSize(n int) {
 
 // Leaf returns a certificate for name, minting one if none is cached or the
 // cached one is near its end. The caller has already decided name is a route:
-// this mints for whatever it is given.
+// this mints for whatever it is given, and a name outside the constraints
+// gets a leaf that clients reject.
 func (ca *CA) Leaf(name string) (*tls.Certificate, error) {
 	now := ca.Now()
 	ca.mu.Lock()

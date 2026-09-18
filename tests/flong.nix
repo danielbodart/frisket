@@ -118,7 +118,7 @@ in
 
     # Run by root, and as the session's uid inside its namespace, to look at
     # and poke at a session from outside it.
-    environment.systemPackages = [ pkgs.nftables pkgs.curl pkgs.dnsutils pkgs.netcat pkgs.iproute2 ];
+    environment.systemPackages = [ pkgs.nftables pkgs.curl pkgs.dnsutils pkgs.netcat pkgs.iproute2 pkgs.openssl ];
 
     # The host resolves through the upstream's DNS server: where the route's
     # upstream, api.test, is found. Nothing names it in /etc/hosts, so a
@@ -569,6 +569,13 @@ in
 
       def upstream_saw(pattern):
           return upstream.execute(f"journalctl -u upstream-https -o cat | grep -E {shlex.quote(pattern)}")[1]
+
+      with subtest("the machine's CA is constrained to the intercepted hosts, critically"):
+          # Every policy's intercepted hosts, which here is api.test in both,
+          # and no IP address at all.
+          text = machine.succeed("openssl x509 -noout -text -in ${ca}")
+          assert re.search(r"X509v3 Name Constraints: critical\n\s+Permitted:\n\s+DNS:api\.test\n\s+Excluded:\n"
+                           r"\s+IP:0\.0\.0\.0/0\.0\.0\.0\n\s+IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0\n", text), text
 
       with subtest("the machine's CA is bound into the session, and the workload cannot change it"):
           machine.succeed(f"cmp /proc/{leader}/root/etc/frisket/ca.crt ${ca}")

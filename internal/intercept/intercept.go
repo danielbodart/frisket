@@ -147,6 +147,9 @@ func New(cfg Config) (*Interceptor, error) {
 			return nil, fmt.Errorf("intercept: %w", err)
 		}
 		host := normaliseHost(r.Host)
+		if !cfg.CA.Permits(host) {
+			return nil, fmt.Errorf("intercept: route %s: the CA is not constrained to %s, so every client would reject its certificate", r.Name, host)
+		}
 		if _, dup := i.routes[host]; dup {
 			return nil, fmt.Errorf("intercept: two routes for %s", host)
 		}

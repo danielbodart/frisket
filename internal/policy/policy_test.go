@@ -48,7 +48,7 @@ func (c *counting) Exchange(_ context.Context, q dnsmessage.Question) (*dnsmessa
 
 func deps(t *testing.T, up dns.Exchanger) Deps {
 	t.Helper()
-	ca, err := intercept.LoadOrCreateCA(filepath.Join(t.TempDir(), "ca"))
+	ca, err := intercept.LoadOrCreateCA(filepath.Join(t.TempDir(), "ca"), []string{"api.test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +96,11 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"a * inside an allowlist name":             func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
 		"a * glued to an allowlist name":           func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
 		"Authorization named as a bare header":     func(p *Policy) { p.Routes[0].Header = "authorization" },
+		"a route for a host the CA does not permit": func(p *Policy) {
+			p.Allow = append(p.Allow, "other.test")
+			p.Intercept = []string{"other.test"}
+			p.Routes[0].Host, p.Routes[0].Upstream = "other.test", "https://other.test"
+		},
 	} {
 		p := valid(t)
 		mutate(&p)
@@ -106,6 +111,26 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 	}
 	if _, err := Build(&Config{Policies: map[string]Policy{"a:b": valid(t)}}, deps(t, &counting{})); err == nil {
 		t.Error("a policy name that cannot be a session's was accepted")
+	}
+}
+
+// The CA is made for every policy's intercepted hosts: each once, normalised,
+// in order -- and never for a wildcard.
+func TestInterceptedIsEveryPolicysHosts(t *testing.T) {
+	c := &Config{Policies: map[string]Policy{
+		"a": {Intercept: []string{"API.test.", "git.test"}},
+		"b": {Intercept: []string{"api.test", "b.test"}},
+		"c": {},
+	}}
+	got, err := c.Intercepted()
+	if err != nil || strings.Join(got, ",") != "api.test,b.test,git.test" {
+		t.Fatalf("Intercepted = %v, %v", got, err)
+	}
+	for _, bad := range []string{"*", "*.test", "a.*.test"} {
+		c := &Config{Policies: map[string]Policy{"a": {Intercept: []string{bad}}}}
+		if got, err := c.Intercepted(); err == nil {
+			t.Errorf("Intercepted with %q = %v", bad, got)
+		}
 	}
 }
 

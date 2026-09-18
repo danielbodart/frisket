@@ -186,7 +186,11 @@ type fixture struct {
 
 func newFixture(t *testing.T, j *journal, routes ...Route) *fixture {
 	t.Helper()
-	ca, err := LoadOrCreateCA(t.TempDir())
+	hosts := make([]string, len(routes))
+	for i, r := range routes {
+		hosts[i] = r.Host
+	}
+	ca, err := LoadOrCreateCA(t.TempDir(), hosts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -969,7 +973,7 @@ func TestOneLinePerRequest(t *testing.T) {
 }
 
 func TestNewRefusesBadRoutes(t *testing.T) {
-	ca, err := LoadOrCreateCA(t.TempDir())
+	ca, err := LoadOrCreateCA(t.TempDir(), []string{"a.test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,6 +989,7 @@ func TestNewRefusesBadRoutes(t *testing.T) {
 		"empty scope":         func(r *Route) { r.Scope = Scope{} },
 		"host with port":      func(r *Route) { r.Host = "a.test:443" },
 		"no name":             func(r *Route) { r.Name = "" },
+		"host outside the CA": func(r *Route) { r.Host, r.Upstream = "b.test", "https://b.test" },
 	} {
 		r := good
 		mutate(&r)

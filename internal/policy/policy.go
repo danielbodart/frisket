@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -106,9 +107,46 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+// Intercepted is every policy's intercepted hosts, normalised, once each, in
+// order: what the machine's CA is constrained to. Each is checked as Build
+// checks it, so the CA is never made for a name no route could serve.
+func (c *Config) Intercepted() ([]string, error) {
+	var out []string
+	for name, p := range c.Policies {
+		hosts, err := interceptHosts(p)
+		if err != nil {
+			return nil, fmt.Errorf("policy %s: %w", name, err)
+		}
+		out = append(out, hosts...)
+	}
+	sort.Strings(out)
+	return slices.Compact(out), nil
+}
+
+// interceptHosts is a policy's intercepted names, each an exact name.
+func interceptHosts(p Policy) ([]string, error) {
+	hosts := make([]string, 0, len(p.Intercept))
+	for _, s := range p.Intercept {
+		pat, err := dns.ParsePattern(s)
+		if err != nil {
+			return nil, fmt.Errorf("intercept: %w", err)
+		}
+		// One name per route, so a wildcard could never be served: every name
+		// it matched would resolve to the service address and fail at the
+		// handshake.
+		if pat.Any || pat.Wildcard {
+			return nil, fmt.Errorf("intercept %s: a wildcard, and a route is for one host", pat)
+		}
+		hosts = append(hosts, pat.Name)
+	}
+	return hosts, nil
+}
+
 // Deps is what every policy shares: the machine's CA, and the one classifier
 // and dialer every upstream connection goes through.
 type Deps struct {
+	// CA is constrained to Config.Intercepted; a route for a host it does not
+	// permit is refused.
 	CA         *intercept.CA
 	Classifier *egress.Classifier
 	Dialer     *egress.Dialer
@@ -181,7 +219,11 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 	if err != nil {
 		return nil, fmt.Errorf("allow: %w", err)
 	}
-	icpt, err := dns.NewMatcher(p.Intercept...)
+	hosts, err := interceptHosts(p)
+	if err != nil {
+		return nil, err
+	}
+	icpt, err := dns.NewMatcher(hosts...)
 	if err != nil {
 		return nil, fmt.Errorf("intercept: %w", err)
 	}
@@ -189,18 +231,12 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 	for _, r := range p.Routes {
 		routed[dns.Normalize(r.Host)] = true
 	}
-	for _, pat := range icpt.Patterns() {
-		// One name per route, so a wildcard could never be served: every name
-		// it matched would resolve to the service address and fail at the
-		// handshake.
-		if pat.Any || pat.Wildcard {
-			return nil, fmt.Errorf("intercept %s: a wildcard, and a route is for one host", pat)
+	for _, h := range hosts {
+		if !allow.Match(h) {
+			return nil, fmt.Errorf("intercept %s is not on the allowlist; interception is how an allowed host gets its credential, not a way round the allowlist", h)
 		}
-		if !allow.Match(pat.Name) {
-			return nil, fmt.Errorf("intercept %s is not on the allowlist; interception is how an allowed host gets its credential, not a way round the allowlist", pat)
-		}
-		if !routed[pat.Name] {
-			return nil, fmt.Errorf("intercept %s has no route", pat)
+		if !routed[h] {
+			return nil, fmt.Errorf("intercept %s has no route", h)
 		}
 	}
 
