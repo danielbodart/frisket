@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.png" alt="flong" width="600"></p>
+
 # frisket
 
 > A *frisket* is the mask on a printing press that covers the parts of the sheet
