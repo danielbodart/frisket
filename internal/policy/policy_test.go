@@ -241,11 +241,7 @@ func TestEveryNameCanBeAllowedWhileSomeAreIntercepted(t *testing.T) {
 	}
 }
 
-func TestResolvConfServers(t *testing.T) {
-	got := ResolvConfServers("# comment\nnameserver 203.0.113.20\nsearch example\nnameserver ::1\nnameserver\n")
-	if strings.Join(got, ",") != "203.0.113.20,::1" {
-		t.Errorf("ResolvConfServers = %v", got)
-	}
+func TestConfiguredDNSServers(t *testing.T) {
 	servers, err := upstreamServers([]string{"203.0.113.20", "[::1]:5353"})
 	if err != nil {
 		t.Fatal(err)

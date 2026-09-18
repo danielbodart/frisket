@@ -167,8 +167,10 @@ in
       default = [ ];
       example = [ "192.0.2.53" "[2001:db8::53]:53" ];
       description = ''
-        Where frisket resolves the names a session is allowed. Empty is the
-        host's own /etc/resolv.conf, read once at start.
+        Where frisket resolves the names a session is allowed. Empty is
+        whatever the host's /etc/resolv.conf names, followed as it changes:
+        a query in flight keeps its server, the next one asks the new one, and
+        a file naming no usable server keeps the last one that did.
       '';
     };
 

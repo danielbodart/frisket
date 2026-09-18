@@ -123,7 +123,7 @@ func TestFileFollowsRenameReplacement(t *testing.T) {
 		replace(t, path, next+"\n")
 		eventually(t, "the "+next+" token", func() bool { return value(f) == next })
 	}
-	if f.polling.Load() {
+	if f.watch.Polling() {
 		t.Fatal("fell back to polling on an ordinary directory; the watch is not what picked the change up")
 	}
 

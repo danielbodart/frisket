@@ -34,7 +34,7 @@ import (
 // Config is the daemon's configuration file.
 type Config struct {
 	// DNS is where frisket resolves the names a session is allowed. Empty
-	// means the host's own /etc/resolv.conf, read once at start.
+	// means whatever the host's /etc/resolv.conf names, followed as it changes.
 	DNS []string `json:"dns,omitempty"`
 	// Policies by name. A session names one; one it names that is not here
 	// is refused, and so never gets rules.
@@ -151,7 +151,7 @@ type Deps struct {
 	Classifier *egress.Classifier
 	Dialer     *egress.Dialer
 	// Upstream answers the names sessions are allowed. Nil builds one from
-	// Config.DNS.
+	// Config.DNS, or follows the host's resolv.conf when that is empty.
 	Upstream dns.Exchanger
 	// Log is the daemon's; credential watchers and interceptors write to it.
 	Log *slog.Logger
@@ -163,7 +163,7 @@ type Set struct {
 	closers  []func() error
 }
 
-// Close stops every interceptor and credential watcher.
+// Close stops every interceptor and watcher.
 func (s *Set) Close() error {
 	var errs []error
 	for i := len(s.closers) - 1; i >= 0; i-- {
@@ -182,20 +182,18 @@ func Build(c *Config, d Deps) (_ *Set, err error) {
 	if d.CA == nil || d.Classifier == nil || d.Dialer == nil || d.Log == nil {
 		return nil, errors.New("policy: a CA, a classifier, a dialer and a logger are all required")
 	}
-	up := d.Upstream
-	if up == nil {
-		servers, err := upstreamServers(c.DNS)
-		if err != nil {
-			return nil, err
-		}
-		up = &dns.Upstream{Servers: servers}
-	}
 	set := &Set{Policies: map[string]serve.Policy{}}
 	defer func() {
 		if err != nil {
 			_ = set.Close()
 		}
 	}()
+	up := d.Upstream
+	if up == nil {
+		if up, err = upstream(c.DNS, d.Log, set); err != nil {
+			return nil, err
+		}
+	}
 	names := make([]string, 0, len(c.Policies))
 	for name := range c.Policies {
 		names = append(names, name)
@@ -329,47 +327,35 @@ func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
 	return out, f.Close, nil
 }
 
-// upstreamServers parses the configured servers, or the host's resolv.conf
-// when there are none. A server is an address, with :53 assumed.
-func upstreamServers(conf []string) ([]netip.AddrPort, error) {
+// upstream is the configured servers, fixed, or with none configured whatever
+// the host's resolv.conf names, followed as it changes.
+func upstream(conf []string, log *slog.Logger, set *Set) (dns.Exchanger, error) {
 	if len(conf) == 0 {
-		b, err := os.ReadFile("/etc/resolv.conf")
+		rc, err := dns.FollowResolvConf(dns.HostResolvConf, dns.Upstream{}, log)
 		if err != nil {
-			return nil, fmt.Errorf("no DNS servers configured, and the host's: %w", err)
+			return nil, err
 		}
-		conf = ResolvConfServers(string(b))
-		if len(conf) == 0 {
-			return nil, errors.New("no DNS servers configured, and /etc/resolv.conf names none")
-		}
+		set.closers = append(set.closers, rc.Close)
+		return rc, nil
 	}
+	servers, err := upstreamServers(conf)
+	if err != nil {
+		return nil, err
+	}
+	return &dns.Upstream{Servers: servers}, nil
+}
+
+// upstreamServers parses the configured servers.
+func upstreamServers(conf []string) ([]netip.AddrPort, error) {
 	out := make([]netip.AddrPort, 0, len(conf))
 	for _, s := range conf {
-		ap, err := netip.ParseAddrPort(s)
+		ap, err := dns.ParseServer(s)
 		if err != nil {
-			a, aerr := netip.ParseAddr(s)
-			if aerr != nil {
-				return nil, fmt.Errorf("DNS server %q: want an address, or address:port", s)
-			}
-			ap = netip.AddrPortFrom(a, 53)
+			return nil, err
 		}
 		out = append(out, ap)
 	}
 	return out, nil
-}
-
-// ResolvConfServers returns the nameserver lines of a resolv.conf. The file is
-// the host's own, written by root, and this reads one keyword out of it.
-func ResolvConfServers(conf string) []string {
-	var out []string
-	for _, line := range strings.Split(conf, "\n") {
-		f := strings.Fields(line)
-		if len(f) >= 2 && f[0] == "nameserver" {
-			// A zone (fe80::1%eth0) names an interface on the host; keep it
-			// for netip to parse or refuse.
-			out = append(out, f[1])
-		}
-	}
-	return out
 }
 
 // Dialer is the daemon's one dialer, for egress and for interception's

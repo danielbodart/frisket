@@ -37,6 +37,12 @@ func (j *journal) reset() {
 
 func (j *journal) lines(t testing.TB) []map[string]any {
 	t.Helper()
+	return j.linesOf(t, "dns")
+}
+
+// linesOf is every line with the message msg.
+func (j *journal) linesOf(t testing.TB, msg string) []map[string]any {
+	t.Helper()
 	j.mu.Lock()
 	raw := j.buf.String()
 	j.mu.Unlock()
@@ -49,7 +55,7 @@ func (j *journal) lines(t testing.TB) []map[string]any {
 		if err := json.Unmarshal(l, &m); err != nil {
 			t.Fatalf("log line is not JSON: %q: %v", l, err)
 		}
-		if m["msg"] == "dns" {
+		if m["msg"] == msg {
 			out = append(out, m)
 		}
 	}

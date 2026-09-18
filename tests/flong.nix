@@ -3,8 +3,8 @@
 #
 # Two machines on the test VLAN and nothing else, so no real network is
 # needed: `machine` runs frisket and the sessions, `upstream` runs web servers
-# -- HTTP, and HTTPS under a CA of its own -- and a DNS server, on both
-# families. The upstream's addresses are TEST-NET-3 and a documentation v6
+# -- HTTP, and HTTPS under a CA of its own -- and two DNS servers, the first on
+# both families. The upstream's addresses are TEST-NET-3 and a documentation v6
 # prefix rather than the VLAN's 192.168.1.0/24, because the egress policy
 # refuses RFC 1918 structurally.
 #
@@ -18,6 +18,8 @@ let
   pkgs = hostPkgs;
   upstream4 = "203.0.113.20";
   upstream6 = "2001:db8:113::20";
+  # Where the host's resolver moves to mid-test.
+  moved4 = "203.0.113.21";
   url4 = "http://${upstream4}/";
   url6 = "http://[${upstream6}]/";
 
@@ -67,7 +69,10 @@ in
   name = "frisket-flong";
 
   nodes.upstream = { pkgs, ... }: {
-    networking.interfaces.eth1.ipv4.addresses = [{ address = upstream4; prefixLength = 24; }];
+    networking.interfaces.eth1.ipv4.addresses = [
+      { address = upstream4; prefixLength = 24; }
+      { address = moved4; prefixLength = 24; }
+    ];
     networking.interfaces.eth1.ipv6.addresses = [{ address = upstream6; prefixLength = 64; }];
     networking.firewall.enable = false;
     # A DNS server the sandbox can be seen NOT to reach: with frisket's steering
@@ -91,6 +96,16 @@ in
           "/unlisted.test/${upstream4}"
         ];
       };
+    };
+    # A second DNS server: the one the host's resolv.conf is rewritten to name
+    # mid-session. It answers allowed.test with its own address, so an answer
+    # says which server was asked.
+    systemd.services.moved-dns = {
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ];
+      serviceConfig.ExecStart = "${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null"
+        + " --pid-file= --no-resolv --no-hosts --bind-dynamic --listen-address=${moved4}"
+        + " --log-queries --log-facility=- --address=/allowed.test/${moved4}";
     };
     systemd.services.upstream-https = {
       wantedBy = [ "multi-user.target" ];
@@ -122,7 +137,8 @@ in
 
     # The host resolves through the upstream's DNS server: where the route's
     # upstream, api.test, is found. Nothing names it in /etc/hosts, so a
-    # workload asking the same question is answered by frisket instead.
+    # workload asking the same question is answered by frisket instead. frisket
+    # has no `dns` of its own, so it follows this too.
     networking.nameservers = [ upstream4 ];
 
     # The daemon runs as the user whose credentials it holds: a person, not a
@@ -131,7 +147,6 @@ in
     services.frisket = {
       user = "alice";
       group = "users";
-      dns = [ upstream4 ];
       policies.test = {
         allow = [ "allowed.test" "api.test" ];
         intercept = [ "api.test" ];
@@ -745,6 +760,45 @@ in
           assert out.strip() == "upstream-api-ok", out
           [r] = wait_log("request", name, lambda m: m["path"] == "/v1/models", "the request")
           assert r["decision"] == "allowed" and r["status"] == 200 and r["route"] == "api", r
+          release(name)
+
+      with subtest("the host's resolv.conf rewritten mid-session: the next query reaches the new resolver"):
+          def nameservers():
+              return re.findall(r"^nameserver\s+(\S+)", machine.succeed("cat /etc/resolv.conf"), re.M)
+          # The upstream's server first; whatever else the VM's own DHCP adds
+          # after it is never reached.
+          host = nameservers()
+          assert host[0] == "${upstream4}", host
+          upstream.wait_for_unit("moved-dns.service")
+          name, leader = hold("${strict}", "ip link show frisket0")
+          ask = as_workload(leader, "dig +short +time=2 +tries=1 A allowed.test @127.0.0.1")
+          assert machine.succeed(ask).strip() == "${upstream4}"
+
+          # By rename, as resolvconf and NetworkManager write it, and then
+          # back again the same way.
+          machine.succeed("cp -a /etc/resolv.conf /etc/resolv.conf.orig")
+          for new, old, answer, rewrite in [
+              (["${moved4}"], host, "${moved4}",
+               "echo 'nameserver ${moved4}' > /etc/resolv.conf.new && mv -f /etc/resolv.conf.new /etc/resolv.conf"),
+              (host, ["${moved4}"], "${upstream4}", "mv -f /etc/resolv.conf.orig /etc/resolv.conf"),
+          ]:
+              changes = len(lines_of("dns upstream"))
+              machine.succeed(rewrite)
+              assert nameservers() == new, nameservers()
+              # One line for the change; and the query after it -- the very
+              # next, not an eventual one -- asks the new server.
+              for _ in range(100):
+                  if len(lines_of("dns upstream")) > changes:
+                      break
+                  time.sleep(0.1)
+              [c] = lines_of("dns upstream")[changes:]
+              assert c["outcome"] == "changed" and c["path"] == "/etc/resolv.conf", c
+              assert c["servers"] == [f"{s}:53" for s in new], c
+              assert c["previous"] == [f"{s}:53" for s in old], c
+              assert machine.succeed(ask).strip() == answer
+              d = [m for m in lines_of("dns", name) if m.get("name") == "allowed.test"][-1]
+              assert d["decision"] == "resolved" and d["upstream"] == f"{new[0]}:53", d
+          upstream.succeed("journalctl -u moved-dns -o cat | grep -qF 'query[A] allowed.test'")
           release(name)
 
       with subtest("the workload cannot list the ruleset, even after unshare -U"):
