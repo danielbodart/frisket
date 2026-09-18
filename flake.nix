@@ -31,9 +31,10 @@
         src = ./.;
 
         # Pinned rather than null, because there are dependencies: x/sys for
-        # setns, and x/net/dns/dnsmessage once DNS lands. vendorHash = null is a
-        # nice property and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-1JOxilzB1HukcixIkQAqwi3kZvL0CXT0teG3MkK9pt8=";
+        # setns, and x/net for dns/dnsmessage, the one parser frisket points at
+        # hostile DNS. vendorHash = null is a nice property and never a security
+        # one -- see PLAN.md, decision 1.
+        vendorHash = "sha256-clsI+yIoIwYbjJOiQmnQh7RZvL55lJhhqnFRKct84UU=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has
