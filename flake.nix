@@ -67,7 +67,13 @@
       lib.steering = import ./nix/steering.nix { inherit (nixpkgs) lib; };
 
       # The daemon, and the adapter that maps its sessions onto flong's hooks.
-      nixosModules.default = import ./nix/module.nix self;
+      # Keyed, so the module system can tell it is one module however many
+      # times it is imported: the flong adapter imports it too, and without a
+      # key two imports are two anonymous functions declaring every option twice.
+      nixosModules.default = {
+        key = "github:danielbodart/frisket#nixosModules.default";
+        imports = [ (import ./nix/module.nix self) ];
+      };
       nixosModules.flong = import ./nix/flong.nix self;
 
       packages = forAllSystems (system:
@@ -98,6 +104,25 @@
           # The build, which is also the unit tests, the property tests and the
           # fuzz corpora.
           inherit (self.packages.${system}) frisket;
+
+          # Importing the daemon module beside the flong adapter, which imports
+          # it too, must evaluate: the key on nixosModules.default is what makes
+          # the second import the same module rather than a second declaration
+          # of every option.
+          modules =
+            let
+              eval = nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  flong.nixosModules.default
+                  self.nixosModules.default
+                  self.nixosModules.flong
+                  { boot.isContainer = true; system.stateVersion = "26.05"; }
+                ];
+              };
+            in
+            pkgs.writeText "frisket-modules"
+              (builtins.toJSON { inherit (eval.config.services.frisket) enable user; });
 
           # Formatting as a gate rather than a habit: this is one repository
           # with one formatter and no argument to have about it.

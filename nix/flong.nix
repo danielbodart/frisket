@@ -39,7 +39,7 @@ let
     (lib.attrNames s.params);
 in
 {
-  imports = [ (import ./module.nix self) ];
+  imports = [ self.nixosModules.default ];
 
   options.services.frisket.flong = mkOption {
     default = { };
