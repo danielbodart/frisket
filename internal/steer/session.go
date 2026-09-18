@@ -17,16 +17,16 @@ import (
 // attack on the daemon, and through it on every other session.
 const DefaultMaxConns = 512
 
-// What a connection's line says happened to it. Kept apart from Decision on
-// purpose: Decision is what the KERNEL says about the connection, and Action is
-// what frisket did about it. A refusal for exceeding the cap is not a statement
-// that the kernel did not steer it.
+// What a refusal's line says happened. Kept apart from Decision on purpose:
+// Decision is what the RULESET says about the connection, and Action is what
+// frisket did about it. A refusal for exceeding the cap is not a statement
+// that the ruleset did not steer it.
 const (
 	ActionAccepted = "accepted"
 	ActionRefused  = "refused"
 )
 
-// ReasonAtCapacity is the refusal that is ours rather than the kernel's.
+// ReasonAtCapacity is the refusal that is ours rather than the ruleset's.
 const ReasonAtCapacity = "session connection cap"
 
 // Session is one sandbox's identity on this side of the boundary.
@@ -36,6 +36,12 @@ const ReasonAtCapacity = "session connection cap"
 // by the client and nothing is looked up by path. Which socket a connection
 // arrived on IS which session it came from, fixed when the listeners were
 // created in that namespace.
+//
+// ONE LINE PER CONNECTION, AND THIS IS NOT WHERE IT IS WRITTEN for anything
+// that is served: the handler that serves a connection or a query owns its
+// outcome, and a second line here would make every connection two. Session
+// writes the line only for what it refuses -- unsteered, or over the cap --
+// because nothing else ever sees those.
 type Session struct {
 	// ID names the session in every log line it produces.
 	ID string
@@ -48,9 +54,13 @@ type Session struct {
 	// MaxConns caps concurrent connections; zero means DefaultMaxConns.
 	MaxConns int
 
-	// OrigDst is the original-destination lookup, injectable so a test can
-	// count how many times it runs. Nil means steer.OriginalDst.
-	OrigDst func(*net.TCPConn) (netip.AddrPort, error)
+	// Mark is the firewall mark the ruleset puts on every packet it steers.
+	// A datagram without it is refused; see ClassifyDatagram.
+	Mark uint32
+
+	// Dst is the destination lookup, injectable so a test can steer a
+	// loopback connection somewhere without a ruleset. Nil means LocalDst.
+	Dst func(*net.TCPConn) netip.AddrPort
 
 	seq  atomic.Uint64
 	live atomic.Int64
@@ -68,23 +78,21 @@ type Conn struct {
 
 	Session string
 	// ID is unique within the session and rises; it is what joins this
-	// connection's line to whatever else is logged about it later.
+	// connection's line to whatever else is logged about it.
 	ID uint64
 	// Bound is the listener's own address, inside the sandbox's namespace.
 	Bound netip.AddrPort
 	// Peer is the workload's address.
 	Peer netip.AddrPort
-	// Orig is where the workload was really going. READ ONCE, AT ACCEPT, AND
-	// CACHED HERE: the lookup is a conntrack lookup, and flushing conntrack
-	// mid-connection invalidates it. There is deliberately no method that
-	// re-reads it.
+	// Orig is where the workload was really going: the accepted socket's
+	// local address, which TPROXY left as the client dialled it.
 	Orig netip.AddrPort
 	// Verdict is the classification of Orig against Bound.
 	Verdict Verdict
 }
 
-// Handler is given every connection the kernel steered. It owns the connection
-// and must close it.
+// Handler is given every connection the ruleset steered. It owns the
+// connection, must close it, and writes its one line.
 type Handler interface {
 	ServeConn(ctx context.Context, c *Conn)
 }
@@ -94,9 +102,9 @@ type HandlerFunc func(ctx context.Context, c *Conn)
 
 func (f HandlerFunc) ServeConn(ctx context.Context, c *Conn) { f(ctx, c) }
 
-// Serve accepts on ln until it is closed or ctx is cancelled, logging exactly
-// one line per connection and refusing everything the kernel did not steer
-// here.
+// Serve accepts on ln until it is closed or ctx is cancelled, refusing -- and
+// logging -- everything the ruleset did not steer here, and handing the rest
+// to h.
 //
 // It closes ln when ctx is done, so a cancelled context ends the loop; closing
 // ln from outside ends it too, and a double close is harmless.
@@ -133,11 +141,11 @@ func (s *Session) Serve(ctx context.Context, ln net.Listener, h Handler) error {
 }
 
 func (s *Session) serveConn(ctx context.Context, bound netip.AddrPort, tc *net.TCPConn, h Handler) {
-	lookup := s.OrigDst
+	lookup := s.Dst
 	if lookup == nil {
-		lookup = OriginalDst
+		lookup = LocalDst
 	}
-	orig, lookupErr := lookup(tc)
+	dst := lookup(tc)
 	peer, _ := boundAddrPort(tc.RemoteAddr())
 
 	c := &Conn{
@@ -146,66 +154,82 @@ func (s *Session) serveConn(ctx context.Context, bound netip.AddrPort, tc *net.T
 		ID:      s.seq.Add(1),
 		Bound:   bound,
 		Peer:    peer,
-		Orig:    orig,
-		Verdict: Classify(bound, orig, lookupErr),
+		Orig:    dst,
+		Verdict: Classify(bound, dst),
 	}
 
-	action, reason := ActionAccepted, c.Verdict.Reason
-	if !c.Verdict.Steered() {
-		action = ActionRefused
-	}
-
+	reason := c.Verdict.Reason
 	// The cap is checked after the classification so that the line still says
 	// where the connection was going. An unsteered connection is refused
 	// whatever the count is, and does not consume a slot.
-	if action == ActionAccepted {
+	if c.Verdict.Steered() {
 		limit := s.MaxConns
 		if limit <= 0 {
 			limit = DefaultMaxConns
 		}
 		if s.live.Add(1) > int64(limit) {
 			s.live.Add(-1)
-			action, reason = ActionRefused, ReasonAtCapacity
+			reason = ReasonAtCapacity
 		} else {
 			defer s.live.Add(-1)
 		}
 	}
 
-	attrs := []any{
-		"session", s.ID,
-		"conn", c.ID,
-		"listener", bound.String(),
-		"peer", peer.String(),
-		"dst", orig.String(),
-		"decision", string(c.Verdict.Decision),
-		"action", action,
-	}
 	if reason != "" {
-		attrs = append(attrs, "reason", reason)
-	}
-	if lookupErr != nil {
-		// The error is a log field, not an event of its own: one line per
-		// connection means one line, including the ones that failed.
-		attrs = append(attrs, "error", lookupErr.Error())
-	}
-	s.Log.Info("connection", attrs...)
-
-	if action == ActionRefused {
+		s.Log.Info("connection",
+			"session", s.ID,
+			"conn", c.ID,
+			"listener", bound.String(),
+			"peer", peer.String(),
+			"dst", dst.String(),
+			"decision", string(c.Verdict.Decision),
+			"action", ActionRefused,
+			"reason", reason,
+		)
 		_ = tc.Close()
 		return
 	}
-	// The handler owns the connection from here, including closing it, so the
-	// slot is released when it returns.
+	// The handler owns the connection from here, including closing it and
+	// its line, so the slot is released when it returns.
 	h.ServeConn(ctx, c)
 }
 
-// ServePacket reads datagrams until pc is closed, logging one line each with
-// the destination the kernel recorded.
+// Datagram is one datagram the ruleset steered, and the means to answer it.
+type Datagram struct {
+	Session string
+	// Peer is the workload's address; Orig is where it sent the datagram,
+	// and where the reply must appear to come from.
+	Peer, Orig netip.AddrPort
+	// Payload is steer's buffer, reused for the next datagram as soon as
+	// ServePacket returns: a handler that answers later copies it first.
+	Payload []byte
+
+	reply func(b []byte) error
+}
+
+// NewDatagram builds a datagram whose reply goes through send, for handlers
+// tested without a transparent socket.
+func NewDatagram(session string, peer, orig netip.AddrPort, payload []byte, send func([]byte) error) *Datagram {
+	return &Datagram{Session: session, Peer: peer, Orig: orig, Payload: payload, reply: send}
+}
+
+// Reply sends b to Peer from Orig. Safe to call after ServePacket has
+// returned, and from any goroutine.
+func (d *Datagram) Reply(b []byte) error { return d.reply(b) }
+
+// PacketHandler is given every datagram the ruleset steered, and writes each
+// one's line.
+type PacketHandler interface {
+	ServePacket(ctx context.Context, d *Datagram)
+}
+
+// ServePacket reads datagrams until pc is closed, refusing -- and logging --
+// every one the ruleset did not mark, and handing the rest to h.
 //
-// Step 0 has no DNS, so the payload is dropped. What this proves is the other
-// half of the mechanism: for UDP there is no accept and no conntrack lookup to
-// make, so the pre-NAT destination arrives attached to each datagram, because
-// the socket asked for it when it was created in the sandbox's namespace.
+// There is no accept for UDP, so each datagram is classified on its own, by
+// the mark it carries (see ClassifyDatagram), and its original destination
+// comes with it as a control message. The reply is sent from that
+// destination, through the same transparent socket.
 func (s *Session) ServePacket(ctx context.Context, pc net.PacketConn, h PacketHandler) error {
 	uc, ok := pc.(*net.UDPConn)
 	if !ok {
@@ -237,40 +261,45 @@ func (s *Session) ServePacket(ctx context.Context, pc net.PacketConn, h PacketHa
 			s.Log.Error("read failed", "session", s.ID, "listener", bound.String(), "error", err.Error())
 			return err
 		}
-		orig, lookupErr := OriginalDstFromCmsg(oob[:oobn])
-		verdict := Classify(bound, orig, lookupErr)
-
-		action, reason := ActionAccepted, verdict.Reason
+		peer = netip.AddrPortFrom(canon(peer.Addr()), peer.Port())
+		r, cerr := ParseControl(oob[:oobn])
+		verdict := ClassifyDatagram(s.Mark, r)
+		if cerr != nil {
+			verdict = Verdict{Unsteered, ReasonBadControl}
+		}
 		if !verdict.Steered() {
-			action = ActionRefused
+			attrs := []any{
+				"session", s.ID,
+				"conn", s.seq.Add(1),
+				"listener", bound.String(),
+				"peer", peer.String(),
+				"dst", r.Orig.String(),
+				"bytes", n,
+				"decision", string(verdict.Decision),
+				"action", ActionRefused,
+				"reason", verdict.Reason,
+			}
+			if r.Marked {
+				attrs = append(attrs, "mark", r.Mark)
+			}
+			if cerr != nil {
+				attrs = append(attrs, "error", cerr.Error())
+			}
+			s.Log.Info("datagram", attrs...)
+			continue
 		}
-		attrs := []any{
-			"session", s.ID,
-			"conn", s.seq.Add(1),
-			"listener", bound.String(),
-			"peer", peer.String(),
-			"dst", orig.String(),
-			"bytes", n,
-			"decision", string(verdict.Decision),
-			"action", action,
-		}
-		if reason != "" {
-			attrs = append(attrs, "reason", reason)
-		}
-		if lookupErr != nil {
-			attrs = append(attrs, "error", lookupErr.Error())
-		}
-		s.Log.Info("datagram", attrs...)
-
-		if action == ActionAccepted && h != nil {
-			h.ServePacket(ctx, uc, peer, orig, buf[:n])
-		}
+		orig := r.Orig
+		h.ServePacket(ctx, &Datagram{
+			Session: s.ID,
+			Peer:    peer,
+			Orig:    orig,
+			Payload: buf[:n],
+			reply: func(b []byte) error {
+				_, _, err := uc.WriteMsgUDPAddrPort(b, pktinfo(orig.Addr()), peer)
+				return err
+			},
+		})
 	}
-}
-
-// PacketHandler is given every datagram the kernel steered.
-type PacketHandler interface {
-	ServePacket(ctx context.Context, uc *net.UDPConn, peer, orig netip.AddrPort, payload []byte)
 }
 
 // boundAddrPort canonicalises a net.Addr into a netip.AddrPort. TCPAddr.AddrPort

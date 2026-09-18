@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -150,26 +149,28 @@ func (s *Server) Wait() { s.wg.Wait() }
 
 // ServePacket answers one datagram.
 //
-// steer reuses payload's buffer for the next datagram as soon as this returns,
-// and an upstream lookup can take seconds, so the query is copied and answered
-// on its own goroutine -- bounded by the in-flight cap, because unbounded is
-// one goroutine per packet a sandbox cares to send (ottergate's shape).
+// steer reuses the payload's buffer for the next datagram as soon as this
+// returns, and an upstream lookup can take seconds, so the query is copied and
+// answered on its own goroutine -- bounded by the in-flight cap, because
+// unbounded is one goroutine per packet a sandbox cares to send (ottergate's
+// shape).
 //
-// The reply goes out of the same socket to the peer; conntrack un-NATs it, so
-// the client sees it come from the address it asked.
-func (s *Server) ServePacket(ctx context.Context, uc *net.UDPConn, peer, orig netip.AddrPort, payload []byte) {
-	l := s.newLine("udp", peer, orig)
-	if !s.admit(&l, payload) {
+// The reply goes out through the datagram's own Reply, which sends it FROM the
+// address the client asked -- 8.8.8.8:53, or 127.0.0.1:53 -- so a client that
+// only accepts an answer from where it sent the question gets one.
+func (s *Server) ServePacket(ctx context.Context, d *steer.Datagram) {
+	l := s.newLine("udp", d.Peer, d.Orig)
+	if !s.admit(&l, d.Payload) {
 		return
 	}
-	req := bytes.Clone(payload)
+	req := bytes.Clone(d.Payload)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer func() { <-s.inflight }()
 		resp := s.handle(ctx, req, &l, true)
 		if resp != nil {
-			if _, err := uc.WriteToUDPAddrPort(resp, peer); err != nil && l.err == nil {
+			if err := d.Reply(resp); err != nil && l.err == nil {
 				l.err = fmt.Errorf("reply: %w", err)
 			}
 		}

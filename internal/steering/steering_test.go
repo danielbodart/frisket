@@ -15,12 +15,14 @@ const ruleset = "table inet frisket {\n}\n"
 
 func allFile() File {
 	return File{
-		Set:       "all",
-		Table:     "frisket",
-		Listeners: []string{"tcp4:127.0.0.1:15001", "tcp6:[::1]:15001", "udp4:127.0.0.1:15353", "udp6:[::1]:15353"},
-		Ruleset:   ruleset,
-		Service:   []string{"192.0.2.2", "2001:db8::2"},
-		Dummy:     &Dummy{Interface: "frisket0", Addresses: []string{"192.0.2.1", "2001:db8::1"}},
+		Set:        "all",
+		Table:      "frisket",
+		Listeners:  []string{"tcp4:127.0.0.1:15001", "tcp6:[::1]:15001", "udp4:127.0.0.1:53", "udp6:[::1]:53"},
+		Ruleset:    ruleset,
+		Service:    []string{"192.0.2.2", "2001:db8::2"},
+		Mark:       1,
+		RouteTable: 100,
+		Dummy:      &Dummy{Interface: "frisket0", Addresses: []string{"192.0.2.1", "2001:db8::1"}},
 	}
 }
 
@@ -40,12 +42,19 @@ func TestPlanRefusesAFileThatWouldSteerBadly(t *testing.T) {
 		"two TCP listeners in one family": func(f *File) {
 			f.Listeners = append(f.Listeners, "tcp4:127.0.0.1:15002")
 		},
-		"a listener off loopback, where redirect never sends": func(f *File) {
+		"a listener off loopback, where tproxy never sends": func(f *File) {
 			f.Listeners[0] = "tcp4:192.0.2.1:15001"
 		},
-		"one service address":            func(f *File) { f.Service = f.Service[:1] },
-		"`all` with no dummy":            func(f *File) { f.Dummy = nil },
-		"a dummy with a route and no v6": func(f *File) { f.Dummy.Addresses = f.Dummy.Addresses[:1] },
+		// PKTINFO sets a reply's source address and not its port.
+		"a UDP listener off the port it answers from": func(f *File) { f.Listeners[2] = "udp4:127.0.0.1:15353" },
+		// TCP DNS to 127.0.0.1:53 would look like a direct connection.
+		"a TCP listener on a port the ruleset steers": func(f *File) { f.Listeners[0] = "tcp4:127.0.0.1:53" },
+		"a mark every unmarked packet has":            func(f *File) { f.Mark = 0 },
+		"the kernel's main table":                     func(f *File) { f.RouteTable = 254 },
+		"no route table":                              func(f *File) { f.RouteTable = 0 },
+		"one service address":                         func(f *File) { f.Service = f.Service[:1] },
+		"`all` with no dummy":                         func(f *File) { f.Dummy = nil },
+		"a dummy with a route and no v6":              func(f *File) { f.Dummy.Addresses = f.Dummy.Addresses[:1] },
 		// A route alone half-works: IPv4 picks source 0.0.0.0 and IPv6 hangs.
 		// A link-local address is not picked as a source for a global
 		// destination either.
@@ -97,10 +106,12 @@ func TestConnectBatchPutsTheRoutesLast(t *testing.T) {
 // fakeRoot records the steps a Steerer takes, in order, and fails the one it
 // is told to.
 type fakeRoot struct {
-	steps []string
-	fail  string
-	held  []control.Status
-	links string
+	steps  []string
+	fail   string
+	held   []control.Status
+	links  string
+	rules  string
+	routes string
 }
 
 func (f *fakeRoot) steerer() *Steerer {
@@ -128,8 +139,13 @@ func (f *fakeRoot) steerer() *Steerer {
 			if f.fail == step {
 				return "", errors.New("failed")
 			}
-			if step == "ip -o link show" {
+			switch step {
+			case "ip -o link show":
 				return f.links, nil
+			case "ip -4 rule show", "ip -6 rule show":
+				return f.rules, nil
+			case "ip -4 route show table 100", "ip -6 route show table 100":
+				return f.routes, nil
 			}
 			return "", nil
 		},
@@ -143,13 +159,14 @@ func TestSteerInstallsRulesOnlyOnceTheDaemonHoldsTheListeners(t *testing.T) {
 		fail string
 		want []string
 	}{
-		{"", []string{"listeners", "daemon open", "nft -f -"}},
+		{"", []string{"listeners", "daemon open", "ip -4 -batch -", "ip -6 -batch -", "nft -f -"}},
 		// A workload that took the port first: no listener, so no rules.
 		{"listeners", []string{"listeners"}},
 		// The daemon refused (an unknown policy, say): no rules either.
 		{"daemon open", []string{"listeners", "daemon open"}},
-		// The rules failed: the session they were for is closed.
-		{"nft -f -", []string{"listeners", "daemon open", "nft -f -", "daemon close"}},
+		// The routing or the rules failed: the session they were for is closed.
+		{"ip -6 -batch -", []string{"listeners", "daemon open", "ip -4 -batch -", "ip -6 -batch -", "daemon close"}},
+		{"nft -f -", []string{"listeners", "daemon open", "ip -4 -batch -", "ip -6 -batch -", "nft -f -", "daemon close"}},
 	} {
 		f := &fakeRoot{fail: c.fail}
 		err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, sess)
@@ -159,7 +176,7 @@ func TestSteerInstallsRulesOnlyOnceTheDaemonHoldsTheListeners(t *testing.T) {
 		if strings.Join(f.steps, ", ") != strings.Join(c.want, ", ") {
 			t.Errorf("failing %q: steps = %v, want %v", c.fail, f.steps, c.want)
 		}
-		if err != nil && c.fail != "nft -f -" && !strings.Contains(err.Error(), "no rules were installed") {
+		if err != nil && c.fail != "nft -f -" && c.fail != "ip -6 -batch -" && !strings.Contains(err.Error(), "no rules were installed") {
 			t.Errorf("failing %q: the error does not say no rules were installed: %v", c.fail, err)
 		}
 	}
@@ -184,18 +201,25 @@ func TestConnectRefusesToRunOutOfTurn(t *testing.T) {
 		t.Skip(err)
 	}
 	ours := []control.Status{{Session: control.Session{Name: "s", Netns: here}}}
+	const rules = "0:\tfrom all lookup local\n32765:\tfrom all fwmark 0x1 lookup 100\n32766:\tfrom all lookup main\n"
+	const routes = "local default dev lo scope host\n"
+	checks := []string{"daemon list", "nft list table inet frisket",
+		"ip -4 rule show", "ip -4 route show table 100", "ip -6 rule show", "ip -6 route show table 100"}
 	for _, c := range []struct {
 		name string
 		f    fakeRoot
 		want []string
 		ok   bool
 	}{
-		{"in order", fakeRoot{held: ours, links: loOnly}, []string{"daemon list", "nft list table inet frisket", "ip -o link show", "ip -batch -"}, true},
+		{"in order", fakeRoot{held: ours, links: loOnly, rules: rules, routes: routes}, append(checks, "ip -o link show", "ip -batch -"), true},
 		// Something provisioned egress between steer and connect.
-		{"after something else gave it egress", fakeRoot{held: ours, links: loOnly + "2: eth0@if7: <BROADCAST,MULTICAST> mtu 1500\n"}, []string{"daemon list", "nft list table inet frisket", "ip -o link show"}, false},
+		{"after something else gave it egress", fakeRoot{held: ours, rules: rules, routes: routes, links: loOnly + "2: eth0@if7: <BROADCAST,MULTICAST> mtu 1500\n"}, append(checks, "ip -o link show"), false},
 		{"before steer", fakeRoot{}, []string{"daemon list"}, false},
 		{"another namespace's session", fakeRoot{held: []control.Status{{Session: control.Session{Name: "s", Netns: "net:[1]"}}}}, []string{"daemon list"}, false},
 		{"before the rules", fakeRoot{held: ours, fail: "nft list table inet frisket"}, []string{"daemon list", "nft list table inet frisket"}, false},
+		// Marks with nowhere to go: in `service`, out through pasta.
+		{"without the mark's rule", fakeRoot{held: ours, links: loOnly, rules: "32766:\tfrom all lookup main\n", routes: routes}, checks[:3], false},
+		{"without the table's route", fakeRoot{held: ours, links: loOnly, rules: rules}, checks[:4], false},
 	} {
 		err := c.f.steerer().Connect(context.Background(), "/proc/self/ns/net", p, "s")
 		if (err == nil) != c.ok {
@@ -203,6 +227,42 @@ func TestConnectRefusesToRunOutOfTurn(t *testing.T) {
 		}
 		if strings.Join(c.f.steps, ", ") != strings.Join(c.want, ", ") {
 			t.Errorf("%s: steps = %v, want %v", c.name, c.f.steps, c.want)
+		}
+	}
+}
+
+func TestRoutingBatchSendsTheMarkBackOntoLoopback(t *testing.T) {
+	p, err := allFile().Plan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := p.RoutingBatch(false), "rule add fwmark 1 lookup 100\nroute add local 0.0.0.0/0 dev lo table 100\n"; got != want {
+		t.Errorf("v4 batch =\n%s\nwant\n%s", got, want)
+	}
+	if got, want := p.RoutingBatch(true), "rule add fwmark 1 lookup 100\nroute add local ::/0 dev lo table 100\n"; got != want {
+		t.Errorf("v6 batch =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestTheRoutingReadersReadIPOutput(t *testing.T) {
+	for out, want := range map[string]bool{
+		"32765:\tfrom all fwmark 0x1 lookup 100\n": true,
+		"32765:\tfrom all fwmark 0x2 lookup 100\n": false,
+		"32765:\tfrom all fwmark 0x1 lookup 101\n": false,
+		"32766:\tfrom all lookup main\n":           false,
+	} {
+		if got := hasMarkRule(out, 1, 100); got != want {
+			t.Errorf("hasMarkRule(%q) = %v", out, got)
+		}
+	}
+	for out, want := range map[string]bool{
+		"local default dev lo scope host\n":              true,
+		"local default dev lo metric 1024 pref medium\n": true,
+		"default dev frisket0 scope link\n":              false,
+		"":                                               false,
+	} {
+		if got := hasLocalDefault(out); got != want {
+			t.Errorf("hasLocalDefault(%q) = %v", out, got)
 		}
 	}
 }

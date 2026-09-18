@@ -174,9 +174,20 @@ func (r *recorder) policy() Policy {
 				fmt.Fprintln(c, "intercept")
 				_ = c.Close()
 			}),
+			DNS: recordedDNS{},
 		}, nil
 	})
 }
+
+// recordedDNS answers a TCP connection with "dns", so a test can see which
+// handler a connection went to.
+type recordedDNS struct{}
+
+func (recordedDNS) ServeConn(_ context.Context, c *steer.Conn) {
+	fmt.Fprintln(c, "dns")
+	_ = c.Close()
+}
+func (recordedDNS) ServePacket(context.Context, *steer.Datagram) {}
 
 var service4 = netip.MustParseAddr("192.0.2.2")
 
@@ -192,14 +203,14 @@ type daemonFixture struct {
 	done    chan error
 }
 
-func startDaemon(t *testing.T, sd Notifier, rec *recorder, orig func(*net.TCPConn) (netip.AddrPort, error), inherited []sdnotify.FD) *daemonFixture {
+func startDaemon(t *testing.T, sd Notifier, rec *recorder, orig func(*net.TCPConn) netip.AddrPort, inherited []sdnotify.FD) *daemonFixture {
 	t.Helper()
 	return startDaemonWith(t, nil, sd, rec, orig, inherited)
 }
 
 // startDaemonWith lets a test change the daemon before it runs, rather than
 // racing it afterwards.
-func startDaemonWith(t *testing.T, configure func(*Daemon), sd Notifier, rec *recorder, orig func(*net.TCPConn) (netip.AddrPort, error), inherited []sdnotify.FD) *daemonFixture {
+func startDaemonWith(t *testing.T, configure func(*Daemon), sd Notifier, rec *recorder, orig func(*net.TCPConn) netip.AddrPort, inherited []sdnotify.FD) *daemonFixture {
 	t.Helper()
 	j := &journal{}
 	d := &Daemon{
@@ -208,7 +219,7 @@ func startDaemonWith(t *testing.T, configure func(*Daemon), sd Notifier, rec *re
 		Notify:     sd,
 		ControlUID: os.Getuid(),
 		own:        1,
-		origDst:    orig,
+		dst:        orig,
 	}
 	if configure != nil {
 		configure(d)
@@ -263,6 +274,7 @@ func listeners(t *testing.T, name string) (control.Session, []*os.File, net.List
 		Name:   name,
 		Policy: "recorder",
 		Set:    control.SetAll,
+		Mark:   1,
 		Service: []netip.Addr{
 			service4,
 			netip.MustParseAddr("2001:db8::2"),
@@ -322,7 +334,7 @@ func TestASessionIsServedStoredAndClosedCompletely(t *testing.T) {
 	sd := newFakeSystemd()
 	rec := &recorder{block: make(chan struct{})}
 	var nextOrig = make(chan netip.AddrPort, 4)
-	f := startDaemon(t, sd, rec, func(*net.TCPConn) (netip.AddrPort, error) { return <-nextOrig, nil }, nil)
+	f := startDaemon(t, sd, rec, func(*net.TCPConn) netip.AddrPort { return <-nextOrig }, nil)
 
 	before := countFDs(t)
 	info, files, ln := listeners(t, "netless-1-2")
@@ -358,6 +370,19 @@ func TestASessionIsServedStoredAndClosedCompletely(t *testing.T) {
 		t.Errorf("a connection to the service address went to %q", line)
 	}
 	c2.Close()
+	// Port 53 is DNS whatever the address, the service address included: DNS
+	// is first in the ruleset and first here.
+	for _, dst := range []netip.AddrPort{netip.AddrPortFrom(service4, 53), netip.MustParseAddrPort("127.0.0.1:53")} {
+		nextOrig <- dst
+		c3, err := net.Dial("tcp4", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line, _ := readLine(c3); line != "dns" {
+			t.Errorf("a connection to %v went to %q", dst, line)
+		}
+		c3.Close()
+	}
 
 	// Two listeners, the one live connection and the record. Waited for,
 	// because the intercepted connection is closed by its handler a moment
@@ -474,7 +499,7 @@ func TestTheControlSocketAnswersOnlyItsOwner(t *testing.T) {
 func TestARestartAdoptsTheStoredSessions(t *testing.T) {
 	sd := newFakeSystemd()
 	rec := &recorder{}
-	orig := func(*net.TCPConn) (netip.AddrPort, error) { return netip.MustParseAddrPort("203.0.113.20:80"), nil }
+	orig := func(*net.TCPConn) netip.AddrPort { return netip.MustParseAddrPort("203.0.113.20:80") }
 	first := startDaemon(t, sd, rec, orig, nil)
 	info, files, ln := listeners(t, "netless-7-8")
 	addr := ln.Addr().String()
@@ -631,7 +656,11 @@ func TestTheStandInDNSAnswersRefused(t *testing.T) {
 	}
 	defer cl.Close()
 	query := []byte{0xab, 0xcd, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 3, 'f', 'o', 'o', 0, 0, 1, 0, 1}
-	h.DNS.ServePacket(context.Background(), srv, netip.MustParseAddrPort(cl.LocalAddr().String()), netip.MustParseAddrPort("192.0.2.2:53"), query)
+	peer := netip.MustParseAddrPort(cl.LocalAddr().String())
+	h.DNS.ServePacket(context.Background(), steer.NewDatagram("s", peer, netip.MustParseAddrPort("192.0.2.2:53"), query, func(b []byte) error {
+		_, err := srv.WriteToUDPAddrPort(b, peer)
+		return err
+	}))
 	_ = cl.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 512)
 	n, err := cl.Read(buf)

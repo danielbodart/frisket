@@ -6,7 +6,6 @@ package serve
 import (
 	"context"
 	"log/slog"
-	"net"
 	"net/netip"
 
 	"github.com/danielbodart/frisket/internal/control"
@@ -14,17 +13,23 @@ import (
 )
 
 // Handlers are what a policy gives one session. Each owns what it is handed,
-// including closing it.
+// including closing it and writing its one line.
 type Handlers struct {
-	// Egress gets every steered connection whose original destination is
-	// anywhere but frisket's service address.
+	// Egress gets every steered connection whose destination is neither DNS
+	// nor frisket's service address.
 	Egress steer.Handler
-	// Intercept gets every steered connection whose original destination IS
-	// the service address: frisket's own services, and the hosts frisket's
-	// DNS resolved to it because it adds their credentials.
+	// Intercept gets every steered connection to the service address:
+	// frisket's own services, and the hosts frisket's DNS resolved to it
+	// because it adds their credentials.
 	Intercept steer.Handler
-	// DNS gets every steered datagram. Nil logs and drops.
-	DNS steer.PacketHandler
+	// DNS gets every steered datagram, and every TCP connection to port 53.
+	DNS DNSHandler
+}
+
+// DNSHandler answers DNS over both transports.
+type DNSHandler interface {
+	steer.Handler
+	steer.PacketHandler
 }
 
 // Policy builds a session's handlers when the session is created. Everything
@@ -40,15 +45,21 @@ type PolicyFunc func(s control.Session, log *slog.Logger) (Handlers, error)
 
 func (f PolicyFunc) Handlers(s control.Session, log *slog.Logger) (Handlers, error) { return f(s, log) }
 
-// Dispatch is the one routing rule, and it routes by ORIGINAL DESTINATION
-// alone -- the address the kernel recorded when it rewrote the packet, which
-// the workload cannot forge. Nothing here reads a byte of the connection:
-// routing by the first bytes would be protocol sniffing, rejected in PLAN.md as
-// dishonest, and a workload chooses its first bytes.
+// Dispatch is the one routing rule, and it routes by DESTINATION alone -- the
+// address the client dialled, which TPROXY left on the packet and the kernel
+// put on the accepted socket, and which the workload cannot forge. Nothing
+// here reads a byte of the connection: routing by the first bytes would be
+// protocol sniffing, rejected in PLAN.md as dishonest, and a workload chooses
+// its first bytes.
 //
-//   - the session's service address -> Intercept
+//   - port 53, any address            -> DNS
+//   - the session's service address   -> Intercept
 //   - anything else                   -> Egress
-//   - every datagram (DNS)            -> DNS
+//   - every datagram                  -> DNS
+//
+// DNS first, as it is first in the ruleset: TCP DNS to the service address is
+// still DNS, and so is TCP DNS to 127.0.0.1, which reaches the TCP listener
+// with its own destination rather than a port nobody holds.
 type Dispatch struct {
 	Service []netip.Addr
 	Handlers
@@ -56,18 +67,22 @@ type Dispatch struct {
 
 // ServeConn routes one steered connection.
 func (d Dispatch) ServeConn(ctx context.Context, c *steer.Conn) {
-	if d.IsService(c.Orig.Addr()) {
+	switch {
+	case c.Orig.Port() == DNSPort:
+		d.DNS.ServeConn(ctx, c)
+	case d.IsService(c.Orig.Addr()):
 		d.Intercept.ServeConn(ctx, c)
-		return
+	default:
+		d.Egress.ServeConn(ctx, c)
 	}
-	d.Egress.ServeConn(ctx, c)
 }
 
+// DNSPort is the port every set steers to frisket's DNS.
+const DNSPort = 53
+
 // ServePacket hands one steered datagram to the DNS handler.
-func (d Dispatch) ServePacket(ctx context.Context, uc *net.UDPConn, peer, orig netip.AddrPort, payload []byte) {
-	if d.DNS != nil {
-		d.DNS.ServePacket(ctx, uc, peer, orig, payload)
-	}
+func (d Dispatch) ServePacket(ctx context.Context, dg *steer.Datagram) {
+	d.DNS.ServePacket(ctx, dg)
 }
 
 // IsService compares as addresses, not spellings: ::ffff:192.0.2.2 is the v4

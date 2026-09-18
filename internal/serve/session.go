@@ -49,10 +49,10 @@ func (s *session) descriptors() int {
 }
 
 // start serves every listener until the session is closed.
-func (s *session) start(parent context.Context, d Dispatch, maxConns int, origDst func(*net.TCPConn) (netip.AddrPort, error)) {
+func (s *session) start(parent context.Context, d Dispatch, maxConns int, dst func(*net.TCPConn) netip.AddrPort) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
-	st := &steer.Session{ID: s.info.Name, Log: s.log, MaxConns: maxConns, OrigDst: origDst}
+	st := &steer.Session{ID: s.info.Name, Log: s.log, MaxConns: maxConns, Mark: s.info.Mark, Dst: dst}
 	s.conns.next = d
 	for _, sock := range s.socks {
 		s.serving.Add(1)
@@ -264,7 +264,7 @@ func ownCookie() (uint64, error) {
 // All of a session's sockets must share one namespace, and it must not be
 // ours. A listener in the daemon's own namespace means the helper never
 // entered the sandbox's: it would listen on the HOST's loopback while the
-// sandbox's rules redirect to a port nobody holds there.
+// sandbox's rules steer to a port nobody holds there.
 func adoptSockets(specs []nsnet.Spec, files []*os.File, own uint64) (socks []*nsnet.Sock, err error) {
 	defer control.CloseAll(files)
 	defer func() {

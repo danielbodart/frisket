@@ -56,8 +56,8 @@ type Daemon struct {
 	// own is this process's network namespace cookie; zero means "read it at
 	// Run". A listener in this namespace is refused.
 	own uint64
-	// origDst replaces the conntrack lookup, for tests that have no redirect.
-	origDst func(*net.TCPConn) (netip.AddrPort, error)
+	// dst replaces the destination lookup, for tests that have no ruleset.
+	dst func(*net.TCPConn) netip.AddrPort
 
 	mu       sync.Mutex
 	ctx      context.Context
@@ -321,15 +321,15 @@ func (d *Daemon) serve(s *session, policy Policy) error {
 	if err != nil {
 		return fmt.Errorf("session %s: policy %s: %w", s.info.Name, s.info.Policy, err)
 	}
-	if h.Egress == nil || h.Intercept == nil {
-		return fmt.Errorf("session %s: policy %s has no handler for egress or interception", s.info.Name, s.info.Policy)
+	if h.Egress == nil || h.Intercept == nil || h.DNS == nil {
+		return fmt.Errorf("session %s: policy %s has no handler for egress, interception or DNS", s.info.Name, s.info.Policy)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.sessions == nil {
 		return errors.New("frisket is stopping")
 	}
-	s.start(d.ctx, Dispatch{Service: s.info.Service, Handlers: h}, d.MaxConns, d.origDst)
+	s.start(d.ctx, Dispatch{Service: s.info.Service, Handlers: h}, d.MaxConns, d.dst)
 	d.sessions[s.info.Name] = s
 	return nil
 }

@@ -9,21 +9,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// IPV6_RECVORIGDSTADDR is missing from x/sys/unix (it has the v4 spelling,
-// unix.IP_RECVORIGDSTADDR, but not this one). From linux/in6.h.
-const ipv6RecvOrigDstAddr = 74
-
 // createSocket makes one listener on the CURRENT THREAD, with raw syscalls, so
 // that whatever namespace the thread is in is the namespace the socket belongs
 // to. Going through net.Listen would work too, but it hides the socket options
-// below, and one of them is a security property.
+// below, and several of them are security properties.
+//
+// It runs as root, in the helper, and some of what it sets needs to be: the
+// daemon that holds the socket afterwards is not root and could not set
+// IP_TRANSPARENT itself (measured: EPERM for a uid with no capabilities). The
+// flag belongs to the socket, so it travels across SCM_RIGHTS with it.
 func createSocket(s Spec) (fd int, err error) {
 	if err := s.Validate(); err != nil {
 		return -1, err
 	}
-	domain := unix.AF_INET
+	domain, level := unix.AF_INET, unix.SOL_IP
 	if s.V6() {
-		domain = unix.AF_INET6
+		domain, level = unix.AF_INET6, unix.SOL_IPV6
 	}
 	typ := unix.SOCK_DGRAM
 	if s.Stream() {
@@ -38,38 +39,65 @@ func createSocket(s Spec) (fd int, err error) {
 			_ = unix.Close(fd)
 		}
 	}()
+	set := func(name string, level, opt int) {
+		if err == nil {
+			if e := unix.SetsockoptInt(fd, level, opt, 1); e != nil {
+				err = fmt.Errorf("%s %s: %w", name, s, e)
+			}
+		}
+	}
 
-	// SO_REUSEADDR AND NOTHING ELSE. SO_REUSEPORT would let the workload -- the
-	// first process in the namespace, running before we get here -- bind the
-	// same address and take a share of its own steered traffic, silently. With
-	// SO_REUSEADDR alone a workload that got there first makes the bind below
-	// fail, which aborts the session loudly, which is the behaviour we want.
-	// There is no code path in frisket that sets SO_REUSEPORT; see
-	// TestSocketOptionsRefuseReuseport.
-	if err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
-		return -1, fmt.Errorf("SO_REUSEADDR %s: %w", s, err)
+	// NEVER SO_REUSEPORT. It would let the workload -- the first process in
+	// the namespace, running before we get here -- bind the same address and
+	// take a share of its own steered traffic, silently. There is no code
+	// path in frisket that sets it; see TestSocketsCarryTheirOptions.
+	//
+	// SO_REUSEADDR on TCP only. On TCP it lets a listener rebind past
+	// TIME_WAIT and nothing more: a workload that already holds the port still
+	// makes the bind below fail, which aborts the session loudly. On UDP it is
+	// something else entirely -- two sockets that both set it may bind the
+	// same address and port -- so it is never set there.
+	if typ == unix.SOCK_STREAM {
+		set("SO_REUSEADDR", unix.SOL_SOCKET, unix.SO_REUSEADDR)
 	}
 
 	if domain == unix.AF_INET6 {
 		// Without this a v6 socket also answers v4, and then one listener
 		// carries both families and the log cannot say which the client used.
 		// The specs name a family each; keep the sockets that way.
-		if err = unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1); err != nil {
-			return -1, fmt.Errorf("IPV6_V6ONLY %s: %w", s, err)
-		}
+		set("IPV6_V6ONLY", unix.SOL_IPV6, unix.IPV6_V6ONLY)
+	}
+
+	// TRANSPARENT, on every listener: TPROXY hands a packet only to a socket
+	// that has it (nft_tproxy checks, and skips any other), and it is what lets
+	// a socket accept a connection for -- and answer a datagram from -- an
+	// address that is not its own. Needs CAP_NET_ADMIN, which root has here
+	// and the workload does not; the ownership of the namespace is what keeps
+	// the workload from setting it on a socket of its own.
+	if domain == unix.AF_INET6 {
+		set("IPV6_TRANSPARENT", unix.SOL_IPV6, unix.IPV6_TRANSPARENT)
+	} else {
+		set("IP_TRANSPARENT", unix.SOL_IP, unix.IP_TRANSPARENT)
 	}
 
 	if typ == unix.SOCK_DGRAM {
-		// A redirected datagram arrives with its destination already rewritten,
-		// so the pre-NAT address comes back as a control message or not at all.
-		// TCP has SO_ORIGINAL_DST for the same job; see the steer package.
-		level, opt := unix.IPPROTO_IP, unix.IP_RECVORIGDSTADDR
+		// A datagram has no accept and no socket of its own to read the
+		// destination from, so the kernel attaches it to each one. TPROXY left
+		// the packet unrewritten, so it is the address the client dialled.
 		if domain == unix.AF_INET6 {
-			level, opt = unix.IPPROTO_IPV6, ipv6RecvOrigDstAddr
+			set("IPV6_RECVORIGDSTADDR", level, unix.IPV6_RECVORIGDSTADDR)
+		} else {
+			set("IP_RECVORIGDSTADDR", level, unix.IP_RECVORIGDSTADDR)
 		}
-		if err = unix.SetsockoptInt(fd, level, opt, 1); err != nil {
-			return -1, fmt.Errorf("RECVORIGDSTADDR %s: %w", s, err)
-		}
+		// And the firewall mark, which is how a datagram is known to have
+		// been steered (steer.ClassifyDatagram). Set here, by root, because
+		// kernels between 1f86123b9749 and its 2023 revert made SO_RCVMARK
+		// privileged; on current kernels the daemon could set it, and this
+		// works on both.
+		set("SO_RCVMARK", unix.SOL_SOCKET, unix.SO_RCVMARK)
+	}
+	if err != nil {
+		return -1, err
 	}
 
 	sa, err := sockaddr(s)

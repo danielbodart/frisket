@@ -43,7 +43,7 @@ const (
 	OpList  = "list"  // what the daemon holds, for connect's precondition and for people
 )
 
-// The redirect sets. See PLAN.md, "Redirect sets".
+// The steering sets. See PLAN.md, "Steering sets".
 const (
 	SetAll     = "all"
 	SetService = "service"
@@ -70,11 +70,14 @@ type Session struct {
 	Policy string `json:"policy"`
 	// Params are the policy's parameters -- the workspace, for one.
 	Params map[string]string `json:"params,omitempty"`
-	// Set is the redirect set the rules were built from.
+	// Set is the steering set the rules were built from.
 	Set string `json:"set"`
 	// Service is frisket's service address, one per family. A connection
 	// whose original destination is one of these is for frisket itself.
 	Service []netip.Addr `json:"service"`
+	// Mark is the firewall mark the session's ruleset puts on everything it
+	// steers. A datagram is served only if it carries it.
+	Mark uint32 `json:"mark"`
 	// Listeners are the specs, in descriptor order.
 	Listeners []string `json:"listeners"`
 	// Netns is the namespace as the helper saw it after its setns,
@@ -144,6 +147,11 @@ func (s *Session) Validate() error {
 		if _, err := nsnet.ParseSpec(l); err != nil {
 			return fmt.Errorf("session %s: %w", s.Name, err)
 		}
+	}
+	// Zero is what every unmarked packet carries: a session with no mark
+	// would refuse every datagram, and says so here instead.
+	if s.Mark == 0 {
+		return fmt.Errorf("session %s: no firewall mark", s.Name)
 	}
 	// The dispatch rule compares original destinations against these, so an
 	// address that is not one would make "is this for frisket?" answer no for

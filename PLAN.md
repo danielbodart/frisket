@@ -25,13 +25,11 @@ run on this machine; everything else is a decision waiting on code.
 
 ## Locked decisions
 
-**1. Go, standard library first, with one dependency.** `CGO_ENABLED = 0`, so
+**1. Go, standard library first, and two dependencies.** `CGO_ENABLED = 0`, so
 the binary is static. The stdlib covers almost all of it: `httputil.ReverseProxy`
 for credential routes, `crypto/tls` and `crypto/x509` for interception, `net`
-and `io.Copy` for egress (splice on Linux — measured), `crypto/rsa` for RS256,
-and a `syscall` route to `SO_ORIGINAL_DST` for both families (IPv4 through
-`GetsockoptIPv6Mreq`, IPv6 through `GetsockoptIPv6MTUInfo` at
-`IP6T_SO_ORIGINAL_DST`, because `Mreq` truncates a `sockaddr_in6` — measured).
+and `io.Copy` for egress (splice on Linux — measured), and `crypto/rsa` for
+RS256.
 
 It does not cover DNS, and the allowlist is enforced at frisket's DNS, so
 frisket parses hostile DNS. The rule, in order: use the stdlib; where it falls
@@ -46,9 +44,11 @@ library imports it, so every Go binary using the pure-Go resolver already runs
 this code. It enforces what a hand-rolled parser forgets: a 254-byte name limit,
 a pointer-loop limit, the reserved label prefixes, and names containing dots.
 
-The second is `golang.org/x/sys/unix`, for `setns`: `syscall` does not export
-`SYS_SETNS`, and the alternative is an architecture-specific constant written
-out by hand. Same test, same answer — Go team, no dependencies of its own.
+The second is `golang.org/x/sys/unix`, for `setns` and for the socket options
+and control messages steering rests on — `IP_TRANSPARENT`, `SO_RCVMARK`,
+`IPV6_RECVORIGDSTADDR`, `IP_PKTINFO` — which `syscall` does not export, and the
+alternative is architecture-specific constants written out by hand. Same test,
+same answer — Go team, no dependencies of its own.
 
 `vendorHash` is therefore a pinned hash and not `null`. That is a cost, not a
 loss: `vendorHash = null` is a nice property, never a security one.
@@ -63,11 +63,13 @@ families and UDP, with replies reaching the client, and nothing on the host's
 own loopback able to reach them.
 
 Nothing of frisket's runs inside the sandbox. There is no relay to trust or
-kill, no socket bind-mounted in, and no framing to parse: the original
-destination comes from the kernel's conntrack entry, which the workload cannot
-forge. A workload that connects to a listener directly instead of being
-redirected is identifiable — the lookup either fails or returns the listener's
-own address — and is refused.
+kill, no socket bind-mounted in, and no framing to parse. Steering is TPROXY,
+which does not rewrite the packet: a TCP connection's destination is the
+accepted socket's own local address, and a datagram's arrives with it as
+`IP_ORIGDSTADDR`. The workload chooses where to connect and cannot choose what
+frisket is told about it. Something that reaches a listener without being
+steered is identifiable and refused: a TCP connection whose destination is the
+listener's own address, and a datagram without the ruleset's firewall mark.
 
 Two listeners per session is the whole surface: one TCP, one DNS — four
 sockets, since each exists per family, and the ruleset and the listener
@@ -77,11 +79,11 @@ The one unix socket that remains is on the host, between the adapter and
 frisket, for creating a session. It is never bound into a sandbox.
 
 **3. Steering, not proxy configuration.** nspawn creates the sandbox's network
-namespace as it does today (`--private-network`). Once it is running, the
-launcher — root on the host — enters that namespace by the container's leader
-pid, creates frisket's listeners there, and installs the nftables rules that
-redirect to them. frisket routes by original destination. Nothing guesses a
-protocol.
+namespace (`--private-network`). Once it is running, the launcher — root on the
+host — enters that namespace by the container's leader pid, creates frisket's
+listeners there, and installs the policy routing and nftables rules that steer
+to them. frisket routes by the destination the client dialled, which the kernel
+keeps. Nothing guesses a protocol.
 
 **The ordering is the boundary.** A namespace made with `--private-network` has
 `lo` up and an empty route table, so until something provisions egress the
@@ -199,13 +201,28 @@ session is running is an open question.
 **11. Invariants that came out of measurement.** Each of these is a way to get
 the design wrong that was found by running it, and each gets a test:
 
-- **Never set `SO_REUSEPORT`.** The workload is the first process in the
-  namespace and can bind frisket's port before the helper does. With
-  `SO_REUSEADDR` alone that fails closed and loudly, and the session must abort;
-  with `SO_REUSEPORT` the workload would take a share of its own steered
-  traffic. Never install rules without a listener.
-- **Read the original destination at accept, and cache it.** Flushing conntrack
-  mid-connection invalidates the lookup.
+- **Never set `SO_REUSEPORT`, and `SO_REUSEADDR` on TCP only.** The workload is
+  the first process in the namespace and can bind frisket's port before the
+  helper does. With `SO_REUSEADDR` alone on TCP that fails closed and loudly,
+  and the session must abort; with `SO_REUSEPORT` the workload would take a
+  share of its own steered traffic; and on UDP, `SO_REUSEADDR` itself lets two
+  sockets share an address. Never install rules without a listener.
+- **A UDP listener is bound on the port it answers from.** A reply names the
+  client's original destination as its source with `IP_PKTINFO`, which sets
+  the address and not the port. Measured: a listener on `:15353` answering a
+  query to `:5353` sent without error, and the client timed out. So the DNS
+  listeners are on 53, and a TCP listener is on a high port the ruleset never
+  steers, because a TCP connection is refused when its destination is the
+  listener's own address.
+- **Datagrams are classified by mark, not address.** glibc's default resolver
+  is `127.0.0.1:53`, which is the v4 DNS listener's own address, so legitimate
+  DNS arrives looking like a direct datagram (measured). The mark comes with
+  each datagram through `SO_RCVMARK`; the workload cannot set one.
+- **The helper sets every socket option,** `IP_TRANSPARENT` and `SO_RCVMARK`
+  included. The daemon cannot set `IP_TRANSPARENT` (measured: `EPERM` with no
+  capabilities), and kernels between the commit that made `SO_RCVMARK`
+  privileged and its 2023 revert refuse that too. The flags belong to the
+  socket and cross `SCM_RIGHTS` with it.
 - **Wait for `lo` before binding `::1`**, which only exists once it is up.
 - **Closing descriptors is teardown.** A held listener pins the namespace and
   its user namespace, invisibly to `lsns` and `ip netns`, so frisket's fd is the
@@ -252,6 +269,16 @@ Recorded so they are not re-proposed without new information.
   hard-coded hosts a base URL cannot redirect, subscription mode through a
   custom base URL needs an undocumented internal variable, and codex needs a
   placeholder `auth.json` of JWT-shaped tokens. Interception needs none of it.
+- **NAT (`redirect`) with `SO_ORIGINAL_DST`.** It gives TCP its destination
+  back through conntrack and gives UDP none: a redirected datagram's
+  `IP_ORIGDSTADDR` is the listener's own address (measured, every datagram), so
+  DNS could not say which server was asked, and a relay for any other UDP is
+  impossible. It keeps NAT and conntrack in every sandbox (17 entries for the
+  traffic that left none under TPROXY), and a redirect to a port frisket does
+  not listen on for that protocol is a port the workload can take: TCP DNS
+  redirected to the UDP listener's port was answered by the workload's own
+  listener (measured). Guarding the listeners with `ct status dnat` fixes DNS
+  but stops frisket logging a direct attempt.
 - **One port, protocol sniffing.** Routing by the first byte of a connection.
   Rejected as dishonest; routing is by original destination.
 - **A veth pair, or any declaration-derived addressing.** flong runs many
@@ -352,15 +379,18 @@ flong      gives the sandbox a namespace and a hook around its lifecycle:
 
 steering   installed by root, in the sandbox's namespace, in this order:
              listeners created inside the namespace, passed out to frisket
-             nftables redirects the chosen set to them
+             policy routing and nftables steer the chosen set to them (TPROXY)
              only then is any egress provisioned -- so there is no race
 
-frisket    on the host, one socket per session; routes by original destination:
-             - frisket's service address -> its own services
-                 DNS:   answered here; an intercepted name resolves to this address
-                 HTTPS: terminated with the sandbox's CA, credential added, scope
-                        enforced, forwarded upstream over a real TLS connection
-             - anything else               -> egress
+frisket    on the host, four sockets per session; routes by destination:
+             - port 53, any address      -> DNS, over UDP and TCP; an
+                                            intercepted name resolves to the
+                                            service address
+             - frisket's service address -> interception: terminated with the
+                                            sandbox's CA, credential added, scope
+                                            enforced, forwarded upstream over a
+                                            real TLS connection
+             - anything else             -> egress
                  policy by address, named where possible, logged,
                  then an opaque splice to the original destination
 ```
@@ -369,7 +399,7 @@ frisket    on the host, one socket per session; routes by original destination:
 host                                         sandbox network namespace
 ----                                         -------------------------
 frisket serve                                nftables (root, from the host, after start)
-  control.sock <-- adapter: new session        redirect set --> 127.0.0.1:<ports>
+  control.sock <-- adapter: new session        mark, route to lo, tproxy --> 127.0.0.1
   ca/                                                             ^         ^
   sessions/<id>/                                                  |         |
     listeners  -------- held from here, created in there ---------+---------+
@@ -392,32 +422,60 @@ the rules and the listener specification, so the ports cannot drift apart.
 **`frisket mint <service>`** — a client for the one-shot handout, over the
 session's own service address, so the sandbox needs no curl and no socket.
 
-### Redirect sets
+### Steering sets
 
 - **`all`** — for a sandbox with no network. Every non-loopback TCP connection
   and all DNS go to frisket's listeners. The namespace also needs a dummy
   interface with a default route *and a non-link-local address per family*:
-  with a route alone,
-  IPv4 picks source `0.0.0.0` and the client resets, and IPv6 hangs until
-  timeout (measured). Other UDP is rejected rather than dropped, so a QUIC
-  client fails over to TCP at once instead of hanging (measured).
+  with a route alone, IPv4 picks source `0.0.0.0` and the client resets, and
+  IPv6 hangs until timeout (measured). Other UDP is rejected rather than
+  dropped, so a QUIC client fails over to TCP at once instead of hanging
+  (measured).
 - **`service`** — for a sandbox with its own network. DNS and frisket's service
-  address are redirected; everything else goes direct.
+  address are steered; everything else goes direct.
 
-The ruleset's order is load-bearing and was arrived at by experiment: the DNS
-redirect comes first, or a loopback resolver (`127.0.0.53`, or glibc's
-`127.0.0.1` default) is never steered; the local exemption comes second; and the
-filter chain matches `fib daddr type local`, because after an output-path
-redirect `meta oif` is still the pre-NAT device, so the obvious `oifname "lo"`
-rule silently drops the redirected DNS.
+Both are TPROXY. The output hook marks what is to be steered; a policy-routing
+rule per family (`fwmark 1 lookup 100`, and `local default dev lo` in table 100)
+turns a marked packet back onto loopback; and prerouting's `tproxy` hands it to
+frisket's transparent socket without touching it. So the kernel keeps the
+destination, there is no NAT and no conntrack entry in the sandbox (measured:
+none), and a datagram can be answered from the address it was sent to. `frisket steer` installs the
+routing before the ruleset, and `frisket connect` refuses a namespace without
+it.
+
+The mark chain's order is load-bearing and was arrived at by measurement: DNS
+first, or a loopback resolver (`127.0.0.53`, or glibc's `127.0.0.1` default) is
+never steered; the service address second, because it is on `lo` and the local
+exemption that follows would pass it to nothing. Four rules are needed and not
+obvious, and each is in the ruleset with the measurement behind it:
+
+- **`socket transparent 1 return`, first.** frisket's own replies leave through
+  the sandbox's output hook; a SYN-ACK from the service address to the service
+  address would be marked and handed back to the listener. Without it, TCP to
+  the service address timed out.
+- **`meta mark 1 accept` in the `all` set's output filter,** before the local
+  exemption: a marked packet is routed to `lo` but is not addressed to a local
+  address.
+- **Prerouting ends in rejects, not a drop.** A marked packet with no socket to
+  take it — a session the daemon has closed — is refused at once: a reset for
+  TCP, `icmpx admin-prohibited` for the rest. With a drop the client waits out
+  its own timeout; with the ICMP alone, a TCP connect over IPv4 did too.
+- **The guard, `meta mark 1 oifname != "lo" drop`, in both sets.** Without the
+  policy-routing rule a marked packet follows the ordinary routes, and in
+  `service` that is out through pasta, unsteered (measured, and with the guard
+  it is refused at send).
 
 ### frisket's service address
 
-One address inside the sandbox where frisket's own services live: DNS on 53,
-HTTPS on 443, HTTP on 80. It is assigned to `lo` inside the namespace so that a
-missing rule fails closed with a refusal rather than being routed out
-(measured). frisket's listeners sit on high ports and nftables sends traffic to
-them, so nothing binds a privileged port.
+One address per family inside the sandbox where frisket's own services live:
+`192.0.2.2` and `2001:db8::2`. It is assigned to `lo` inside the namespace so
+that a missing rule fails closed with a refusal rather than being routed out
+(measured). Documentation ranges (RFC 5737, RFC 3849), because they are never
+routed: in `service` the sandbox has a real network, and an address on `lo`
+shadows whatever real host has it, so the range is one nobody uses. Not
+link-local either, which is never picked as a source for a global destination,
+and not pasta's DNS forwarding addresses (`169.254.1.1`, `100::1`), so that two
+mechanisms never share an address in a log.
 
 It is a dedicated address, not `169.254.169.254`. A 404 at the cloud metadata
 address breaks Azure's credential chain outright — it marks IMDS available,

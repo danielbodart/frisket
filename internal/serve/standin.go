@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/netip"
 	"sync"
 	"time"
 
@@ -106,27 +105,62 @@ func (r refuse) ServeConn(_ context.Context, c *steer.Conn) {
 	_ = c.Close()
 }
 
-// refuseDNS answers every query REFUSED, reading nothing of it but the two
-// bytes of its id and the opcode bits it copies back. It is not a DNS parser
-// and does not pretend to be one; the real one is dnsmessage, in its own
-// package.
+// refuseDNS answers every query REFUSED, over UDP and TCP, reading nothing of
+// it but the two bytes of its id and the opcode bits it copies back. It is not
+// a DNS parser and does not pretend to be one; the real one is dnsmessage, in
+// its own package.
 type refuseDNS struct {
 	log     *slog.Logger
 	session string
 }
 
-func (r refuseDNS) ServePacket(_ context.Context, uc *net.UDPConn, peer, orig netip.AddrPort, payload []byte) {
-	r.log.Info("dns", "session", r.session, "peer", peer.String(), "dst", orig.String(), "action", "refused",
-		"reason", "DNS is not built yet")
-	if len(payload) < 12 {
-		return
+func refused(query []byte) []byte {
+	if len(query) < 12 {
+		return nil
 	}
 	var resp [12]byte
-	copy(resp[0:2], payload[0:2]) // id
+	copy(resp[0:2], query[0:2]) // id
 	// QR, the query's opcode and RD; RCODE 5, REFUSED. Every count zero.
-	resp[2] = 0x80 | payload[2]&0x79
+	resp[2] = 0x80 | query[2]&0x79
 	resp[3] = 0x05
-	if _, err := uc.WriteToUDPAddrPort(resp[:], peer); err != nil && !errors.Is(err, net.ErrClosed) {
-		r.log.Info("dns", "session", r.session, "peer", peer.String(), "action", "failed", "error", err.Error())
+	return resp[:]
+}
+
+func (r refuseDNS) ServePacket(_ context.Context, d *steer.Datagram) {
+	attrs := []any{"session", r.session, "transport", "udp", "peer", d.Peer.String(), "dst", d.Orig.String(),
+		"action", "refused", "reason", "DNS is not built yet"}
+	if resp := refused(d.Payload); resp != nil {
+		if err := d.Reply(resp); err != nil && !errors.Is(err, net.ErrClosed) {
+			attrs = append(attrs, "error", err.Error())
+		}
 	}
+	r.log.Info("dns", attrs...)
+}
+
+// ServeConn answers each RFC 7766 frame on the connection REFUSED, and logs
+// the connection once.
+func (r refuseDNS) ServeConn(_ context.Context, c *steer.Conn) {
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	n := 0
+	for {
+		var l [2]byte
+		if _, err := io.ReadFull(c, l[:]); err != nil {
+			break
+		}
+		q := make([]byte, int(l[0])<<8|int(l[1]))
+		if _, err := io.ReadFull(c, q); err != nil {
+			break
+		}
+		resp := refused(q)
+		if resp == nil {
+			break
+		}
+		if _, err := c.Write(append([]byte{0, byte(len(resp))}, resp...)); err != nil {
+			break
+		}
+		n++
+	}
+	r.log.Info("dns", "session", r.session, "conn", c.ID, "transport", "tcp", "peer", c.Peer.String(),
+		"dst", c.Orig.String(), "queries", n, "action", "refused", "reason", "DNS is not built yet")
 }

@@ -169,7 +169,8 @@ func validSession() Session {
 		Policy:    "standin",
 		Set:       SetAll,
 		Service:   []netip.Addr{netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2")},
-		Listeners: []string{"tcp4:127.0.0.1:15001", "udp6:[::1]:15353"},
+		Mark:      1,
+		Listeners: []string{"tcp4:127.0.0.1:15001", "udp6:[::1]:53"},
 		Netns:     "net:[4026533500]",
 	}
 }
@@ -188,6 +189,7 @@ func TestValidateRefusesWhatCannotBeHeld(t *testing.T) {
 		"wildcard listener":          func(s *Session) { s.Listeners = []string{"tcp4:0.0.0.0:15001"} },
 		"no service address":         func(s *Session) { s.Service = nil },
 		"unspecified service":        func(s *Session) { s.Service = []netip.Addr{netip.IPv4Unspecified()} },
+		"no mark":                    func(s *Session) { s.Mark = 0 },
 	} {
 		s := validSession()
 		mutate(&s)

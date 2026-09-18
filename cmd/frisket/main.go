@@ -46,12 +46,14 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
   frisket steer -netns PATH -steering FILE -name NAME -policy POLICY [-param K=V]...
         Root's first step, from a launcher's hook: create the session's
         listeners inside the network namespace at PATH, hand them to the daemon,
-        then load the ruleset that redirects to them. Provisions NO egress.
+        then install the policy routing and load the ruleset that steers to
+        them. Provisions NO egress.
 
   frisket connect -netns PATH -steering FILE -name NAME
         Root's second step: the service address on lo, and for the "all" set
         the dummy interface and its default routes. Refuses unless the daemon
-        holds this namespace's session and its ruleset is loaded.
+        holds this namespace's session and its policy routing and ruleset are
+        in place.
 
   frisket close -name NAME
         End a session: the daemon closes every descriptor it holds and drops it
@@ -317,6 +319,9 @@ func runSteering(argv []string) error {
 	fmt.Printf("set %s, table inet %s\n", p.Set, p.Table)
 	fmt.Printf("listeners %s\n", nsnet.FormatSpecs(p.Listeners))
 	fmt.Printf("service %v\n", p.Service)
+	fmt.Printf("mark %#x, route table %d\n", p.Mark, p.RouteTable)
+	fmt.Printf("steer, ip -4:\n%s", p.RoutingBatch(false))
+	fmt.Printf("steer, ip -6:\n%s", p.RoutingBatch(true))
 	fmt.Printf("connect:\n%s", p.ConnectBatch())
 	return nil
 }

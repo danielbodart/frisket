@@ -490,7 +490,7 @@ func TestARateLimitedQueryIsDroppedAndLogged(t *testing.T) {
 	})
 	uc, client := udpPair(t)
 	for i := range 3 {
-		f.s.ServePacket(context.Background(), uc, testPeer, testDst, query(t, uint16(i), "pkg.example.", dnsmessage.TypeA, false))
+		f.s.ServePacket(context.Background(), datagram(uc, testPeer, query(t, uint16(i), "pkg.example.", dnsmessage.TypeA, false)))
 	}
 	f.s.Wait()
 	lines := f.j.lines(t)
@@ -518,8 +518,8 @@ func TestTheInFlightCapDropsAndLogs(t *testing.T) {
 	f := newFixture(t, func(c *Config) { c.MaxInFlight = 1 })
 	f.up.block = block
 	uc, _ := udpPair(t)
-	f.s.ServePacket(context.Background(), uc, testPeer, testDst, query(t, 1, "pkg.example.", dnsmessage.TypeA, false))
-	f.s.ServePacket(context.Background(), uc, testPeer, testDst, query(t, 2, "pkg.example.", dnsmessage.TypeA, false))
+	f.s.ServePacket(context.Background(), datagram(uc, testPeer, query(t, 1, "pkg.example.", dnsmessage.TypeA, false)))
+	f.s.ServePacket(context.Background(), datagram(uc, testPeer, query(t, 2, "pkg.example.", dnsmessage.TypeA, false)))
 	close(block)
 	f.s.Wait()
 	lines := f.j.lines(t)
@@ -529,6 +529,15 @@ func TestTheInFlightCapDropsAndLogs(t *testing.T) {
 	if lines[0]["reason"] != "in-flight cap" || lines[0]["decision"] != DecisionDropped {
 		t.Fatalf("the second query was not dropped at the cap: %v", lines)
 	}
+}
+
+// datagram is a steered datagram whose reply goes out of an ordinary socket:
+// the transparent socket and PKTINFO are steer's, and tested there.
+func datagram(uc *net.UDPConn, peer netip.AddrPort, payload []byte) *steer.Datagram {
+	return steer.NewDatagram("sess-d", peer, testDst, payload, func(b []byte) error {
+		_, err := uc.WriteToUDPAddrPort(b, peer)
+		return err
+	})
 }
 
 func udpPair(t *testing.T) (server, client *net.UDPConn) {
@@ -553,7 +562,7 @@ func TestServePacketAnswersOverUDP(t *testing.T) {
 	uc, client := udpPair(t)
 	peer := netip.MustParseAddrPort(client.LocalAddr().String())
 	buf := query(t, 0x4242, "pkg.example.", dnsmessage.TypeA, false)
-	f.s.ServePacket(context.Background(), uc, peer, testDst, buf)
+	f.s.ServePacket(context.Background(), datagram(uc, peer, buf))
 	for i := range buf {
 		buf[i] = 0xff // steer's next datagram
 	}

@@ -46,7 +46,7 @@ type egressFixture struct {
 }
 
 // startEgress runs a real steer.Session with the egress Handler behind it,
-// the original destination replaced so no namespace or redirect is needed.
+// the destination replaced so no namespace or ruleset is needed.
 func startEgress(t *testing.T, h *Handler, orig netip.AddrPort) *egressFixture {
 	t.Helper()
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -55,7 +55,7 @@ func startEgress(t *testing.T, h *Handler, orig netip.AddrPort) *egressFixture {
 	}
 	j := &journal{}
 	s := steer.New("sess-e", j)
-	s.OrigDst = func(*net.TCPConn) (netip.AddrPort, error) { return orig, nil }
+	s.Dst = func(*net.TCPConn) netip.AddrPort { return orig }
 	h.Log = slog.New(slog.NewJSONHandler(j, nil))
 	h.PolicyName = "strict"
 

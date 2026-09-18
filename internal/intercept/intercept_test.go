@@ -203,7 +203,7 @@ func newFixture(t *testing.T, j *journal, routes ...Route) *fixture {
 	sess := steer.New("sess-test", j)
 	// The kernel's answer, as the steering would give it: this connection
 	// was going to the service address's HTTPS port.
-	sess.OrigDst = func(*net.TCPConn) (netip.AddrPort, error) { return serviceAddr443, nil }
+	sess.Dst = func(*net.TCPConn) netip.AddrPort { return serviceAddr443 }
 
 	// Cleanups run last-registered-first: cancel, then wait for the accept
 	// loop, then close the interceptor (registered above).
@@ -385,14 +385,15 @@ func TestOutOfScopeIsRefusedOnASteeredConnection(t *testing.T) {
 				t.Errorf("line %d: %v", i, l)
 			}
 		}
-		// And the connection they came on was steered, and accepted as such.
-		for _, conn := range f.journal.lines(t, "connection") {
-			if conn["decision"] != string(steer.Steered) || conn["action"] != steer.ActionAccepted {
-				t.Fatalf("connection line: %v", conn)
-			}
+		// And they came through steer, which handed the connection on without
+		// a line of its own: the request lines are the connection's.
+		if conns := f.journal.lines(t, "connection"); len(conns) != 0 {
+			t.Fatalf("steer logged a connection the interceptor served: %v", conns)
 		}
-		if len(f.journal.lines(t, "connection")) == 0 {
-			t.Fatal("no connection line; the requests did not come through steer")
+		for _, l := range lines {
+			if l["session"] != "sess-test" || l["conn"] == nil {
+				t.Fatalf("a request line without its session and connection: %v", l)
+			}
 		}
 	})
 }

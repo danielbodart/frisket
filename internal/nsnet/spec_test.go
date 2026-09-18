@@ -15,8 +15,8 @@ func TestParseSpec(t *testing.T) {
 	}{
 		{"tcp4:127.0.0.1:15001", Spec{TCP4, netip.MustParseAddrPort("127.0.0.1:15001")}},
 		{"tcp6:[::1]:15001", Spec{TCP6, netip.MustParseAddrPort("[::1]:15001")}},
-		{"udp4:127.0.0.1:15353", Spec{UDP4, netip.MustParseAddrPort("127.0.0.1:15353")}},
-		{"udp6:[::1]:15353", Spec{UDP6, netip.MustParseAddrPort("[::1]:15353")}},
+		{"udp4:127.0.0.1:53", Spec{UDP4, netip.MustParseAddrPort("127.0.0.1:53")}},
+		{"udp6:[::1]:53", Spec{UDP6, netip.MustParseAddrPort("[::1]:53")}},
 	} {
 		got, err := ParseSpec(tc.in)
 		if err != nil {
@@ -59,7 +59,7 @@ func TestParseSpecRefusals(t *testing.T) {
 }
 
 func TestParseSpecsRoundTrip(t *testing.T) {
-	in := "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:15353,udp6:[::1]:15353"
+	in := "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:53,udp6:[::1]:53"
 	specs, err := ParseSpecs(in)
 	if err != nil {
 		t.Fatal(err)

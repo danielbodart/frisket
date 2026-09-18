@@ -44,8 +44,8 @@ sessions is one line beside it:
 
 Every session `flong.agent` starts is steered before it has any egress: root's
 hook creates frisket's listeners inside the session's namespace and hands them
-to the daemon, loads the ruleset that redirects to them, and only then gives
-the namespace connectivity. The session is closed when it ends, by its own
+to the daemon, installs the policy routing and the ruleset that steer to them
+(TPROXY), and only then gives the namespace connectivity. The session is closed when it ends, by its own
 trap or by the next launch's sweep.
 
 Any other launcher uses the same three commands, run as root, in this order:
@@ -83,9 +83,12 @@ was going and logs it, and refuses interception and DNS.
 ## Working on it
 
 ```console
-$ nix develop          # go, gopls, golangci-lint
-$ nix flake check      # the build, the tests, gofmt, go vet, shellcheck,
-                       # both rulesets through nft, and the flong VM test
+$ nix develop                       # go, gopls, golangci-lint
+$ go test ./...
+$ CGO_ENABLED=1 go test -race ./... # the shell builds static, as the flake does
+$ nix flake check                   # the build, the tests with and without -race,
+                                    # gofmt, go vet, shellcheck, both rulesets
+                                    # through nft, and the flong VM test
 $ nix run . -- version
 ```
 

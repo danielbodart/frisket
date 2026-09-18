@@ -7,14 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/danielbodart/frisket/internal/steer"
 	"golang.org/x/sys/unix"
 )
 
@@ -128,6 +129,8 @@ func park() {
 			reply = dialOnce(fields[1], fields[2])
 		case len(fields) == 4 && fields[0] == "udp":
 			reply = udpOnce(fields[1], fields[2], fields[3])
+		case len(fields) == 5 && fields[0] == "udpmark":
+			reply = udpMarked(fields[1], fields[2], fields[3], fields[4])
 		}
 		fmt.Fprintln(out, reply)
 		_ = out.Flush()
@@ -185,6 +188,41 @@ func udpOnce(network, addr, payload string) string {
 		return "error: " + err.Error()
 	}
 	return "ok"
+}
+
+// udpMarked sends one datagram with a firewall mark on it, as the ruleset
+// would put there, and waits for the answer on a CONNECTED socket -- which
+// drops anything that does not come from the exact address and port it
+// dialled, as a real resolver client does. Setting the mark needs
+// CAP_NET_ADMIN over the namespace, which this parked process has as root of
+// the user namespace that owns it, and a workload does not.
+func udpMarked(network, addr, payload, mark string) string {
+	var m int
+	if _, err := fmt.Sscan(mark, &m); err != nil {
+		return "error: " + err.Error()
+	}
+	d := net.Dialer{Control: func(_, _ string, rc syscall.RawConn) error {
+		var serr error
+		if err := rc.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, m) }); err != nil {
+			return err
+		}
+		return serr
+	}}
+	c, err := d.Dial(network, addr)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte(payload)); err != nil {
+		return "error: " + err.Error()
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	b := make([]byte, 256)
+	n, err := c.Read(b)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return "ok " + string(b[:n])
 }
 
 // ---------------------------------------------------------------- the fixture
@@ -307,77 +345,64 @@ func sockOpt(t *testing.T, sock *Sock, level, opt int) int {
 	return v
 }
 
-func freePort(t *testing.T) uint16 {
-	t.Helper()
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("no loopback to bind on: %v", err)
-	}
-	port := uint16(ln.Addr().(*net.TCPAddr).Port)
-	_ = ln.Close()
-	return port
-}
-
 // ---------------------------------------------------------------- the invariants
 
-// SO_REUSEPORT IS NEVER SET. The workload is the first process in the namespace
-// and could bind frisket's port before the helper does; with SO_REUSEPORT it
-// would take a share of its own steered traffic and nothing would say so. This
-// asserts the option on the socket rather than reading the source, because the
-// source is not what the kernel reads.
-func TestSocketNeverSetsReuseport(t *testing.T) {
-	port := freePort(t)
-	for _, network := range []string{TCP4, UDP4} {
-		s := Spec{Net: network, Addr: netipAddrPort("127.0.0.1", port)}
-		fd, err := createSocket(s)
-		if err != nil {
-			t.Skipf("cannot bind %s here: %v", s, err)
+// THE OPTIONS ARE ASSERTED ON THE SOCKETS THAT CAME BACK through SCM_RIGHTS,
+// made by the helper inside a sandbox, rather than on the source -- the source
+// is not what the kernel reads -- and rather than on a socket made here, where
+// this process has no CAP_NET_ADMIN over the namespace and could not set
+// IP_TRANSPARENT at all.
+//
+//   - SO_REUSEPORT never: the workload is the first process in the namespace
+//     and could bind frisket's port before the helper does; with it, the
+//     workload would take a share of its own steered traffic, silently.
+//   - SO_REUSEADDR on TCP only: on UDP it lets a second socket bind the same
+//     address and port.
+//   - IP_TRANSPARENT everywhere, or tproxy skips the socket.
+//   - SO_RCVMARK and ORIGDSTADDR on UDP, or a datagram can be neither
+//     classified nor answered.
+//   - IPV6_V6ONLY on v6, so one socket never carries two families.
+func TestSocketsCarryTheirOptions(t *testing.T) {
+	sb := newSandbox(t)
+	sb.loUp(t)
+	set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:53,udp6:[::1]:53")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+	for _, sock := range set.Socks {
+		v6, stream := sock.Spec.V6(), sock.Spec.Stream()
+		want := map[string][3]int{
+			"SO_REUSEPORT": {unix.SOL_SOCKET, unix.SO_REUSEPORT, 0},
+			"SO_REUSEADDR": {unix.SOL_SOCKET, unix.SO_REUSEADDR, b2i(stream)},
 		}
-		reuseport, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT)
-		if err != nil {
-			t.Fatal(err)
+		if v6 {
+			want["IPV6_V6ONLY"] = [3]int{unix.SOL_IPV6, unix.IPV6_V6ONLY, 1}
+			want["IPV6_TRANSPARENT"] = [3]int{unix.SOL_IPV6, unix.IPV6_TRANSPARENT, 1}
+		} else {
+			want["IP_TRANSPARENT"] = [3]int{unix.SOL_IP, unix.IP_TRANSPARENT, 1}
 		}
-		reuseaddr, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR)
-		if err != nil {
-			t.Fatal(err)
+		if !stream {
+			want["SO_RCVMARK"] = [3]int{unix.SOL_SOCKET, unix.SO_RCVMARK, 1}
+			if v6 {
+				want["IPV6_RECVORIGDSTADDR"] = [3]int{unix.SOL_IPV6, unix.IPV6_RECVORIGDSTADDR, 1}
+			} else {
+				want["IP_RECVORIGDSTADDR"] = [3]int{unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1}
+			}
 		}
-		_ = unix.Close(fd)
-		if reuseport != 0 {
-			t.Errorf("%s: SO_REUSEPORT is %d; the workload can take a share of the steered traffic", s, reuseport)
-		}
-		if reuseaddr != 1 {
-			t.Errorf("%s: SO_REUSEADDR is %d, want 1", s, reuseaddr)
+		for name, w := range want {
+			if got := sockOpt(t, sock, w[0], w[1]); got != w[2] {
+				t.Errorf("%s: %s = %d, want %d", sock.Spec, name, got, w[2])
+			}
 		}
 	}
 }
 
-func TestSocketSetsV6OnlyAndRecvOrigDst(t *testing.T) {
-	port := freePort(t)
-	fd, err := createSocket(Spec{Net: UDP4, Addr: netipAddrPort("127.0.0.1", port)})
-	if err != nil {
-		t.Skipf("cannot bind udp4 here: %v", err)
+func b2i(b bool) int {
+	if b {
+		return 1
 	}
-	got, err := unix.GetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_RECVORIGDSTADDR)
-	_ = unix.Close(fd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != 1 {
-		t.Errorf("IP_RECVORIGDSTADDR is %d, want 1; without it a redirected datagram has no destination", got)
-	}
-
-	fd6, err := createSocket(Spec{Net: TCP6, Addr: netipAddrPort("::1", port)})
-	if err != nil {
-		t.Skipf("cannot bind tcp6 here: %v", err)
-	}
-	v6only, err := unix.GetsockoptInt(fd6, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY)
-	_ = unix.Close(fd6)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v6only != 1 {
-		t.Errorf("IPV6_V6ONLY is %d, want 1; one socket for two families cannot say which the client used", v6only)
-	}
+	return 0
 }
 
 // The whole mechanism, end to end: the listeners are created in the sandbox's
@@ -391,7 +416,7 @@ func TestListenersLiveInTheSandboxAndAreHeldFromHere(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	specs := mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:15353")
+	specs := mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:53")
 	set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
 	if err != nil {
 		t.Fatal(err)
@@ -403,14 +428,6 @@ func TestListenersLiveInTheSandboxAndAreHeldFromHere(t *testing.T) {
 	}
 	if len(set.Socks) != len(specs) {
 		t.Fatalf("got %d sockets, want %d", len(set.Socks), len(specs))
-	}
-
-	// The invariant again, this time on the descriptors that actually came back
-	// through SCM_RIGHTS rather than on a socket made in this process.
-	for _, sock := range set.Socks {
-		if got := sockOpt(t, sock, unix.SOL_SOCKET, unix.SO_REUSEPORT); got != 0 {
-			t.Errorf("%s arrived with SO_REUSEPORT = %d", sock.Spec, got)
-		}
 	}
 
 	for _, sock := range set.Socks {
@@ -445,7 +462,7 @@ func TestListenersLiveInTheSandboxAndAreHeldFromHere(t *testing.T) {
 	if udp == nil {
 		t.Fatal("no packet conn in the set")
 	}
-	if got := sb.do(t, "udp udp4 127.0.0.1:15353 hello"); got != "ok" {
+	if got := sb.do(t, "udp udp4 127.0.0.1:53 hello"); got != "ok" {
 		t.Fatalf("sending a datagram from inside the sandbox: %s", got)
 	}
 	_ = udp.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -464,6 +481,71 @@ func TestListenersLiveInTheSandboxAndAreHeldFromHere(t *testing.T) {
 		c.Close()
 		t.Error("127.0.0.1:15001 is reachable from the host; the socket is not in the sandbox's namespace")
 	}
+}
+
+// A DATAGRAM, STEERED AND ANSWERED, through everything but the ruleset: the
+// helper's socket in the sandbox, held from here and served by steer. A
+// datagram carrying the ruleset's mark is handed on, and the answer -- sent
+// with PKTINFO naming the address the client dialled -- reaches a CONNECTED
+// client, which drops anything from any other address. One without the mark
+// is refused and logged. Both are to 127.0.0.1:53, the listener's own address,
+// because that is where glibc's default resolver sends: the address cannot be
+// what decides.
+func TestAMarkedDatagramIsAnsweredAndAnUnmarkedOneRefused(t *testing.T) {
+	sb := newSandbox(t)
+	sb.loUp(t)
+	set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: mustSpecs(t, "udp4:127.0.0.1:53,udp6:[::1]:53")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+
+	var log lockedBuffer
+	s := steer.New("sess-udp", &log)
+	s.Mark = 1
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	for _, sock := range set.Socks {
+		go func() {
+			_ = s.ServePacket(ctx, sock.Packet, echo{})
+		}()
+	}
+
+	if got := sb.do(t, "udpmark udp4 127.0.0.1:53 hello 1"); got != "ok echo hello to 127.0.0.1:53" {
+		t.Errorf("a marked v4 datagram: %s", got)
+	}
+	if got := sb.do(t, "udpmark udp6 [::1]:53 hello 1"); got != "ok echo hello to [::1]:53" {
+		t.Errorf("a marked v6 datagram: %s", got)
+	}
+	if got := sb.do(t, "udpmark udp4 127.0.0.1:53 direct 0"); !strings.HasPrefix(got, "error") {
+		t.Errorf("an unmarked datagram was answered: %s", got)
+	}
+	if !strings.Contains(log.String(), `"reason":"`+steer.ReasonNotMarked+`"`) {
+		t.Errorf("the unmarked datagram left no refusal in the log:\n%s", log.String())
+	}
+}
+
+type echo struct{}
+
+func (echo) ServePacket(_ context.Context, d *steer.Datagram) {
+	_ = d.Reply([]byte(fmt.Sprintf("echo %s to %s", d.Payload, d.Orig)))
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // A workload that took the port first must make session creation FAIL, loudly.
@@ -557,7 +639,7 @@ func TestCloseReleasesEveryDescriptor(t *testing.T) {
 	sb := newSandbox(t)
 	sb.loUp(t)
 
-	specs := mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:15353")
+	specs := mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:53")
 	cycle := func() {
 		set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
 		if err != nil {
@@ -697,8 +779,4 @@ func TestExecRefusesWhatWouldRunOnTheHost(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-}
-
-func netipAddrPort(addr string, port uint16) netip.AddrPort {
-	return netip.AddrPortFrom(netip.MustParseAddr(addr), port)
 }

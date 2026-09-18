@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/danielbodart/frisket/internal/control"
@@ -79,9 +80,9 @@ type Session struct {
 }
 
 // Steer creates the session's listeners inside the namespace at netns, hands
-// them to the daemon, and only then loads the ruleset that redirects to them.
-// It does NOT provision egress: that is Connect, and it is the caller's next
-// step.
+// them to the daemon, and only then installs the policy routing and loads the
+// ruleset that steers to them. It does NOT provision egress: that is Connect,
+// and it is the caller's next step.
 //
 // Every failure before the rules is a session with no rules, which with no
 // egress either is a sandbox with nowhere to go -- closed, not open. A failure
@@ -117,6 +118,7 @@ func (s *Steerer) Steer(ctx context.Context, netns string, p *Plan, sess Session
 		Params:    sess.Params,
 		Set:       p.Set,
 		Service:   p.Service,
+		Mark:      p.Mark,
 		Listeners: listeners,
 		Netns:     set.Netns,
 	}}
@@ -129,15 +131,32 @@ func (s *Steerer) Steer(ctx context.Context, netns string, p *Plan, sess Session
 	files = nil
 	_ = set.Close()
 
-	// 3. The rules.
-	if _, err := s.runIn(ctx, netns, p.Ruleset, or(s.Nft, "nft"), "-f", "-"); err != nil {
+	// 3. The rules: the policy routing first, so that from the moment
+	// anything is marked, a marked packet has somewhere to go -- lo -- and
+	// then the ruleset. Nothing has egress yet, so neither can be raced.
+	closeOnFailure := func(step string, err error) error {
 		_, cerr := s.callDaemon(ctx, control.Request{Op: control.OpClose, Name: sess.Name}, nil)
 		if cerr != nil {
-			return fmt.Errorf("loading session %s's ruleset: %w; and closing the session failed too: %v", sess.Name, err, cerr)
+			return fmt.Errorf("%s for session %s: %w; and closing the session failed too: %v", step, sess.Name, err, cerr)
 		}
-		return fmt.Errorf("loading session %s's ruleset: %w; the session was closed", sess.Name, err)
+		return fmt.Errorf("%s for session %s: %w; the session was closed", step, sess.Name, err)
+	}
+	for _, v6 := range []bool{false, true} {
+		if _, err := s.runIn(ctx, netns, p.RoutingBatch(v6), or(s.IP, "ip"), family(v6), "-batch", "-"); err != nil {
+			return closeOnFailure("installing the policy routing", err)
+		}
+	}
+	if _, err := s.runIn(ctx, netns, p.Ruleset, or(s.Nft, "nft"), "-f", "-"); err != nil {
+		return closeOnFailure("loading the ruleset", err)
 	}
 	return nil
+}
+
+func family(v6 bool) string {
+	if v6 {
+		return "-6"
+	}
+	return "-4"
 }
 
 // sockFile is a descriptor for sock to send: a dup, closed by the caller.
@@ -162,7 +181,7 @@ var ErrOutOfOrder = errors.New("connect runs after steer, never before")
 // lo, and for `all` the dummy interface and its default routes -- and refuses
 // to unless everything that must precede it is in place: the daemon holds this
 // session, the session is THIS namespace's, and the namespace has frisket's
-// table loaded.
+// policy routing and table loaded.
 func (s *Steerer) Connect(ctx context.Context, netns string, p *Plan, name string) error {
 	resp, err := s.callDaemon(ctx, control.Request{Op: control.OpList}, nil)
 	if err != nil {
@@ -189,6 +208,26 @@ func (s *Steerer) Connect(ctx context.Context, netns string, p *Plan, name strin
 	if _, err := s.runIn(ctx, netns, "", or(s.Nft, "nft"), "list", "table", "inet", p.Table); err != nil {
 		return fmt.Errorf("session %s has no table inet %s loaded (%v): %w; no egress was provisioned", name, p.Table, err, ErrOutOfOrder)
 	}
+	// The policy routing, both families. Without it a marked packet follows
+	// the ordinary routes, and in the `service` set that is out through the
+	// sandbox's own network; the ruleset's guard drops it there, but the
+	// guard is the second line and this is the first.
+	for _, v6 := range []bool{false, true} {
+		rules, err := s.runIn(ctx, netns, "", or(s.IP, "ip"), family(v6), "rule", "show")
+		if err == nil && !hasMarkRule(rules, p.Mark, p.RouteTable) {
+			err = fmt.Errorf("no rule sending fwmark %#x to table %d", p.Mark, p.RouteTable)
+		}
+		if err != nil {
+			return fmt.Errorf("session %s's %s policy routing: %v: %w; no egress was provisioned", name, family(v6), err, ErrOutOfOrder)
+		}
+		routes, err := s.runIn(ctx, netns, "", or(s.IP, "ip"), family(v6), "route", "show", "table", strconv.Itoa(p.RouteTable))
+		if err == nil && !hasLocalDefault(routes) {
+			err = fmt.Errorf("table %d has no local default route on lo", p.RouteTable)
+		}
+		if err != nil {
+			return fmt.Errorf("session %s's %s policy routing: %v: %w; no egress was provisioned", name, family(v6), err, ErrOutOfOrder)
+		}
+	}
 	// And nothing has given it egress already. Whatever runs between steer
 	// and here -- a consumer's own rules -- must not provision any, and a
 	// second egress beside the dummy, or before pasta, is a way round the
@@ -204,6 +243,40 @@ func (s *Steerer) Connect(ctx context.Context, netns string, p *Plan, name strin
 		return fmt.Errorf("provisioning session %s's egress: %w", name, err)
 	}
 	return nil
+}
+
+// hasMarkRule reads `ip rule show` and reports whether a rule sends mark to
+// table: "32765:	from all fwmark 0x1 lookup 100".
+func hasMarkRule(out string, mark uint32, table int) bool {
+	wantMark, wantTable := fmt.Sprintf("%#x", mark), strconv.Itoa(table)
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		var gotMark, gotTable string
+		for i := 0; i+1 < len(f); i++ {
+			switch f[i] {
+			case "fwmark":
+				gotMark = f[i+1]
+			case "lookup", "table":
+				gotTable = f[i+1]
+			}
+		}
+		if gotMark == wantMark && gotTable == wantTable {
+			return true
+		}
+	}
+	return false
+}
+
+// hasLocalDefault reads `ip route show table N` and reports whether it holds
+// "local default dev lo ...".
+func hasLocalDefault(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 4 && f[0] == "local" && f[1] == "default" && f[2] == "dev" && f[3] == "lo" {
+			return true
+		}
+	}
+	return false
 }
 
 // nonLoopback reads `ip -o link show` and returns every interface but lo:

@@ -20,7 +20,7 @@ import (
 
 // Spec names one listener to create: a network and the address to bind it to,
 // spelled the way a flag or a manifest carries it -- "tcp4:127.0.0.1:15001",
-// "udp6:[::1]:15353".
+// "udp6:[::1]:53".
 //
 // The address is always explicit. See Validate for why a wildcard is refused.
 type Spec struct {
@@ -34,8 +34,8 @@ type Spec struct {
 }
 
 // The four networks a session can ask for. Two listeners per session is the
-// whole surface -- one TCP, one DNS -- but each exists per family, because a
-// v4 and a v6 redirect land on different sockets and the kernel decides which.
+// whole surface -- one TCP, one DNS -- but each exists per family, because
+// tproxy names a socket per family and the kernel decides which.
 const (
 	TCP4 = "tcp4"
 	TCP6 = "tcp6"
@@ -98,16 +98,21 @@ func (s Spec) Validate() error {
 	}
 	if s.Addr.Port() == 0 {
 		// Port 0 would work -- the kernel picks one -- but the ports are also
-		// what the nftables rules redirect to, and the two come out of one
-		// attrset precisely so they cannot drift. A spec that lets the kernel
-		// choose has already drifted.
-		return fmt.Errorf("%s: port 0; the redirect rules name the port, so it cannot be the kernel's choice", s.Net)
+		// what the ruleset's tproxy statements name, and the two come out of
+		// one attrset precisely so they cannot drift. A spec that lets the
+		// kernel choose has already drifted.
+		return fmt.Errorf("%s: port 0; the ruleset names the port, so it cannot be the kernel's choice", s.Net)
 	}
-	// A WILDCARD LISTENER CANNOT TELL STEERED FROM DIRECT. The original
-	// destination of a connection that was never redirected is simply the
-	// address it arrived on, and steer.Classify refuses a connection whose
-	// original destination is the listener's own address. Bound to 0.0.0.0 that
-	// comparison never matches, so every direct connection would look steered.
+	// A WILDCARD LISTENER CANNOT TELL STEERED FROM DIRECT. A TCP connection is
+	// refused as unsteered when its destination is the listener's own address
+	// (steer.Classify); bound to 0.0.0.0 that comparison never matches, so
+	// every direct connection would look steered. And a transparent wildcard
+	// socket would take connections for every address in the namespace, the
+	// sandbox's own services included, rather than the ones tproxy names.
+	//
+	// Which ports a listener may use is the steering file's business, not
+	// this one's, because it depends on the ruleset: steering.Plan puts UDP on
+	// the port it steers and TCP on a port it never does.
 	if s.Addr.Addr().IsUnspecified() {
 		return fmt.Errorf("%s: wildcard address %s; a direct connection to a wildcard listener is indistinguishable from a steered one", s.Net, s.Addr.Addr())
 	}

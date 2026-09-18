@@ -125,7 +125,20 @@
             '';
           });
 
-          # Both redirect sets, as lib.steering writes them: checked by
+          # The tests again, under the race detector. It needs cgo -- the race
+          # runtime is C -- so this check turns it on for itself; the package
+          # is still built static, with CGO_ENABLED=0, and never ships this.
+          race = pkg.overrideAttrs (old: {
+            pname = "frisket-race";
+            env = (old.env or { }) // { CGO_ENABLED = 1; };
+            checkPhase = ''
+              runHook preCheck
+              go test -race ./...
+              runHook postCheck
+            '';
+          });
+
+          # Both steering sets, as lib.steering writes them: checked by
           # frisket's own reader, which is what steer and connect run, and by
           # nft itself, in a network namespace of the build's own so the check
           # has the privilege to ask the kernel without touching anything.
