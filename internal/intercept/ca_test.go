@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -21,6 +22,9 @@ import (
 var testHosts = []string{"api.example.test", "a.test", "b.test", "c.test", "d.test", "e.test"}
 
 func TestCAIsCreatedOnceAndPersisted(t *testing.T) {
+	// The daemon's unit runs it under UMask=0077, which must not reach the
+	// certificate: it is public, and a sandbox of another uid reads it.
+	defer syscall.Umask(syscall.Umask(0o077))
 	dir := filepath.Join(t.TempDir(), "ca")
 	ca, err := LoadOrCreateCA(dir, testHosts)
 	if err != nil {
@@ -33,6 +37,9 @@ func TestCAIsCreatedOnceAndPersisted(t *testing.T) {
 	}
 	if perm := st.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("CA key mode %04o, want 0600", perm)
+	}
+	if st, err := os.Stat(filepath.Join(dir, CACertFile)); err != nil || st.Mode().Perm() != 0o644 {
+		t.Fatalf("CA certificate: %v, %v; want 0644", st.Mode(), err)
 	}
 	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
 		t.Fatalf("CA directory: %v, %v", st.Mode(), err)

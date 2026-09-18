@@ -45,7 +45,7 @@ launcher:
   };
 
   containers.agent.privateNetwork = true;
-  flong.agent = { user = "alice"; command = ''set -- "$@"''; };
+  flong.agent = { user = "alice"; command = [ "codex" ]; };
 
   services.frisket.flong.agent = {
     policy = "research";
@@ -63,18 +63,17 @@ answered NXDOMAIN, without an upstream lookup, and every address frisket did
 not resolve for the session is refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
 and the host's own addresses, whatever resolved to them.
 
-The CA is at `/etc/frisket/ca.crt` in every session, read-only. It is
+The CA is at `/etc/frisket/ca.crt` in every session of the launcher's
+container, read-only, bound through the container's own `bindMounts`. It is
 name-constrained to the hosts the policies intercept, so clients reject it for
 any other name, and the daemon makes a new one when that set changes: a session
 already running keeps the old one and fails on its intercepted hosts until it
 is relaunched. Telling each runtime to trust it is yours to do, and each has
-its own way — Node's, for one, adds it to the roots it already has:
+its own way — Node's, for one, adds it to the roots it already has, from a
+variable the container exports to its payload:
 
 ```nix
-flong.agent.command = ''
-  export NODE_EXTRA_CA_CERTS=/etc/frisket/ca.crt
-  set -- "$@"
-'';
+containers.agent.config.environment.variables.NODE_EXTRA_CA_CERTS = "/etc/frisket/ca.crt";
 ```
 
 ## Sets

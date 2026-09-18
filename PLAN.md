@@ -132,11 +132,16 @@ endpoints a tool hard-codes.
   session already running trusts the CA it started with and fails verification
   of its intercepted hosts until it is relaunched — accepted, because sessions
   are short-lived and the set changes only when a policy does. The key is
-  `0600`, created exclusively, and never leaves the state directory. The NixOS
-  module exposes the certificate's path, and the flong adapter binds the
-  daemon's own file into every session at `/etc/frisket/ca.crt`, read-only —
-  the file belongs to the user whose uid the workload usually shares, and a
-  read-only bind is what stops that uid rewriting it. Telling each runtime to trust it
+  `0600`, created exclusively, and never leaves the state directory. The
+  certificate is `0644` whatever the daemon's umask, so a workload of any uid
+  can read it. The NixOS module exposes the certificate's path, and the flong
+  adapter binds the daemon's own file at `/etc/frisket/ca.crt`, read-only, into
+  every session of the launcher's container, through that container's declared
+  `bindMounts` — the file belongs to the user whose uid the workload usually
+  shares, and a read-only bind is what stops that uid rewriting it. The daemon
+  writes it before it reports ready and keeps it across restarts; a session
+  started before the daemon ever has finds nothing at the bind's source, and
+  nspawn refuses to start it. Telling each runtime to trust it
   (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, a system
   bundle) is the consumer's policy, not frisket's.
 - Which hosts are intercepted is decided by frisket's DNS: an intercepted name
@@ -774,9 +779,9 @@ node's address can be used.
 **flong** — generic, agent-agnostic, with a plan of its own in that
 repository. What frisket uses from it: `postStart`, a root hook that runs
 after the namespace exists with the ordering contract above; `postStop`, called
-from both the clean and the killed path; `preStart`'s `flong-bind`, a
-read-only per-session bind with source ≠ destination (the CA); `path`, for
-the tools the hooks run; the capability flags as defence in depth; and
+from both the clean and the killed path; the container declaration's
+`bindMounts`, which flong reads as data, for the CA, read-only at a
+destination unlike its source; `path`, for the tools the hooks run; the capability flags as defence in depth; and
 `network` — pasta for a private session.
 
 Two properties frisket depends on that are flong's to keep: the namespace is

@@ -298,9 +298,18 @@ func writeCA(dir string, names []string) error {
 	return nil
 }
 
+// writeExclusive creates path with exactly mode, whatever the umask: the
+// daemon's unit sets UMask=0077, which would leave the certificate 0600 and
+// unreadable by a sandbox whose uid is not the daemon's. The chmod narrows
+// nothing and widens only to mode, before anything is written.
 func writeExclusive(path string, data []byte, mode os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
 		return err
 	}
 	if _, err := f.Write(data); err != nil {

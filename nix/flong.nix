@@ -19,9 +19,10 @@
 # Each frisket step refuses to run out of turn, so a snippet that gets this
 # wrong fails the launch rather than leaving a session unsteered.
 #
-# And the machine's CA certificate is bound into every session at
-# /etc/frisket/ca.crt, read-only. Which runtimes are told to trust it, and
-# how, is the consumer's business.
+# And the machine's CA certificate is bound at /etc/frisket/ca.crt, read-only,
+# into every session of the launcher's container -- through the container's
+# own declaration, because it is known at evaluation. Which runtimes are told
+# to trust it, and how, is the consumer's business.
 self:
 { config, lib, pkgs, ... }:
 
@@ -85,18 +86,28 @@ in
   config = lib.mkIf (cfg.flong != { }) {
     services.frisket.enable = lib.mkDefault true;
 
+    # The daemon's own file, read-only: the workload cannot write it through
+    # the bind, and a read-only bind cannot be made writable from inside. The
+    # certificate is public and 0644, so a workload of any uid can read it.
+    #
+    # The daemon writes it before it tells systemd it is ready, and keeps it
+    # across restarts; a session started before the daemon ever has -- so
+    # with nothing at the source -- is refused by nspawn, not started without.
+    containers = lib.mapAttrs'
+      (name: _: lib.nameValuePair config.flong.${name}.container {
+        bindMounts."/etc/frisket/ca.crt" = {
+          hostPath = toString cfg.caCertificate;
+          isReadOnly = true;
+        };
+      })
+      cfg.flong;
+
     flong = lib.mapAttrs
       (name: s:
         let file = steeringFile name s; in {
           # frisket itself, and the nft and ip it runs inside the namespace,
           # resolved on the host before it enters.
           path = [ cfg.package pkgs.nftables pkgs.iproute2 ];
-          # The daemon's own file, read-only: the workload cannot write it
-          # through the bind, and a read-only bind cannot be made writable
-          # from inside.
-          preStart = ''
-            flong-bind ${cfg.caCertificate} /etc/frisket/ca.crt
-          '';
           # Listeners, handed over, and the rules. A failure here ends the
           # session: flong kills the scope of a hook that exits non-zero.
           postStart = lib.mkMerge [

@@ -202,7 +202,7 @@ in
     flong.strict = {
       user = "alice";
       workspace = "realpath /srv/work";
-      command = ''set -- bash -c "$1"'';
+      command = [ "bash" "-c" ];
       # Ahead of frisket's own steps, so the test can find the session.
       postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
@@ -216,7 +216,7 @@ in
       container = "strict";
       user = "alice";
       workspace = "realpath /srv/work";
-      command = ''set -- bash -c "$1"'';
+      command = [ "bash" "-c" ];
       postStart = lib.mkMerge [
         (lib.mkOrder 100 ''
           echo "$machine" > /tmp/last-session
@@ -268,7 +268,7 @@ in
       container = "strict";
       user = "alice";
       workspace = "realpath /srv/work";
-      command = ''set -- bash -c "$1"'';
+      command = [ "bash" "-c" ];
       postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
     services.frisket.flong.badpolicy.policy = "nonesuch";
@@ -279,7 +279,7 @@ in
       container = "strict";
       user = "alice";
       workspace = "realpath /srv/work";
-      command = ''set -- bash -c "$1"'';
+      command = [ "bash" "-c" ];
       network = { };
       postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
@@ -290,7 +290,7 @@ in
       container = "strict";
       user = "alice";
       workspace = "realpath /srv/work";
-      command = ''set -- bash -c "$1"'';
+      command = [ "bash" "-c" ];
       network = { };
       postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
     };
@@ -586,7 +586,15 @@ in
                            r"\s+IP:0\.0\.0\.0/0\.0\.0\.0\n\s+IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0\n", text), text
 
       with subtest("the machine's CA is bound into the session, and the workload cannot change it"):
+          # Bound by the container's declaration, which every session of it
+          # mounts.
           machine.succeed(f"cmp /proc/{leader}/root/etc/frisket/ca.crt ${ca}")
+          # Public, so readable whatever uid the workload runs as: 0644 though
+          # the daemon runs under UMask=0077, and read here by a uid that is
+          # not the daemon's.
+          assert machine.succeed("stat -c %a ${ca}").strip() == "644"
+          machine.succeed(f"nsenter --target={leader} --mount setpriv --reuid=1001 --regid=100 "
+                          "--clear-groups -- cat /etc/frisket/ca.crt | grep -q 'BEGIN CERTIFICATE'")
           # The daemon's own file, owned by the workload's uid: only the bind
           # being read-only stops it, so that is what each attempt must hit.
           assert machine.succeed("stat -c %u ${ca}").strip() == "1000"
