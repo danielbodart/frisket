@@ -649,6 +649,24 @@ no gcloud installation, no Cloudflare login, and the hf token is outside sops.
 The agent rows depend on decision 10: frisket holds no login of its own and
 injects what the host file currently holds.
 
+### GitHub
+
+GitHub allowed by name is an exfiltration channel in strict, even with no
+credential of ours in the sandbox: a prompt injection brings its own throwaway
+account's token and posts a gist. So GitHub is not on strict's allowlist until
+it can be offered as an intercepted, read-only route:
+
+- whatever `Authorization` the sandbox sends is stripped, and nothing is
+  injected: every request goes upstream anonymous;
+- only `GET` and `HEAD` are admitted, and git's upload-pack for clone and fetch
+  (`info/refs?service=git-upload-pack`, and the `POST` to `git-upload-pack`);
+- receive-pack (push), `info/refs?service=git-receive-pack` included, and every
+  write method are refused.
+
+The same argument applies to any host reachable by name with an
+attacker-supplied credential, the model APIs included. Strict must allow those,
+and there it is closed only by those hosts' own credential routes.
+
 ---
 
 ## Build order
