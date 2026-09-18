@@ -479,7 +479,7 @@ in
           # source being right.
           for server in ["127.0.0.1", "::1", "${upstream4}", "${upstream6}", "127.0.0.53"]:
               out = machine.succeed(as_workload(leader, f"dig +time=2 +tries=1 example.com @{server}"))
-              assert "status: REFUSED" in out, (server, out)
+              assert "status: NXDOMAIN" in out, (server, out)
               assert f"SERVER: {server}#53" in out, (server, out)
           dsts = {m["dst"] for m in lines_of("dns", name) if m["transport"] == "udp"}
           for dst in ["127.0.0.1:53", "[::1]:53", "${upstream4}:53", "[${upstream6}]:53", "127.0.0.53:53"]:
@@ -490,7 +490,7 @@ in
       with subtest("DNS over TCP is answered by frisket, not a port nobody holds"):
           for server in ["${upstream4}", "127.0.0.1", "::1"]:
               out = machine.succeed(as_workload(leader, f"dig +tcp +time=2 +tries=1 example.com @{server}"))
-              assert "status: REFUSED" in out, (server, out)
+              assert "status: NXDOMAIN" in out, (server, out)
           tcp = [m for m in lines_of("dns", name) if m["transport"] == "tcp"]
           assert {m["dst"] for m in tcp} >= {"${upstream4}:53", "127.0.0.1:53", "[::1]:53"}, tcp
           assert all(m["decision"] == "refused" and m["reason"] == "not allowed" for m in tcp), tcp
@@ -641,9 +641,11 @@ in
           assert len(spliced) == 2 and all(m["decision"] == "accepted" for m in spliced), spliced
           assert [m for m in lines_of("request", name) if m.get("host") == "allowed.test"] == []
 
-      with subtest("a name not on the allowlist is refused without an upstream lookup"):
+      with subtest("a name not on the allowlist is NXDOMAIN, without an upstream lookup"):
+          # NXDOMAIN and not REFUSED, which musl takes as a hard failure and
+          # stops walking its search list.
           out = machine.succeed(as_workload(leader, "dig +time=2 +tries=1 denied.test @127.0.0.1"))
-          assert "status: REFUSED" in out, out
+          assert "status: NXDOMAIN" in out, out
           [d] = wait_log("dns", name, lambda m: m.get("name") == "denied.test", "the refusal")
           assert d["decision"] == "refused" and d["reason"] == "not allowed" and "upstream" not in d, d
           machine.fail(as_workload(leader, "curl -sS -m 5 http://denied.test/"))

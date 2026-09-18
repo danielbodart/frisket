@@ -236,19 +236,23 @@ func expect(t testing.TB, line map[string]any, want map[string]any) {
 	}
 }
 
-// A NAME NOT ALLOWED IS REFUSED WITHOUT AN UPSTREAM LOOKUP -- so it cannot
-// leak through DNS -- and says so in the log.
-func TestANameNotAllowedIsRefusedWithoutAskingUpstream(t *testing.T) {
+// A NAME NOT ALLOWED IS NXDOMAIN, WITHOUT AN UPSTREAM LOOKUP -- so it cannot
+// leak through DNS -- and says so in the log. NXDOMAIN and not REFUSED,
+// because musl stops walking its search list at a REFUSED.
+func TestANameNotAllowedIsNXDOMAINWithoutAskingUpstream(t *testing.T) {
 	f := newFixture(t, nil)
 	for _, name := range []string{"exfil-c2VjcmV0.attacker.example.", "evil-cdn.example.", "cdn.example."} {
 		m, line := f.ask(t, query(t, 0x1234, name, dnsmessage.TypeA, false))
-		if m == nil || m.RCode != dnsmessage.RCodeRefused || m.ID != 0x1234 || !m.Response {
-			t.Fatalf("%s: reply %+v, want REFUSED to id 0x1234", name, m)
+		if m == nil || m.RCode != dnsmessage.RCodeNameError || m.ID != 0x1234 || !m.Response {
+			t.Fatalf("%s: reply %+v, want NXDOMAIN to id 0x1234", name, m)
 		}
 		if len(m.Questions) != 1 || m.Questions[0].Name.String() != name {
 			t.Errorf("%s: the reply does not echo the question: %+v", name, m.Questions)
 		}
-		expect(t, line, map[string]any{"decision": DecisionRefused, "reason": "not allowed", "rcode": "Refused", "name": Normalize(name)})
+		if len(m.Answers) != 0 || len(m.Authorities) != 0 {
+			t.Errorf("%s: NXDOMAIN with records: %+v", name, m)
+		}
+		expect(t, line, map[string]any{"decision": DecisionRefused, "reason": "not allowed", "rcode": "NameError", "name": Normalize(name)})
 	}
 	if n := f.up.count(); n != 0 {
 		t.Fatalf("refused names caused %d upstream lookups", n)
@@ -310,10 +314,10 @@ func TestAnInterceptedNameResolvesToTheServiceAddress(t *testing.T) {
 func TestAnInterceptedNameMustAlsoBeAllowed(t *testing.T) {
 	f := newFixture(t, nil)
 	m, line := f.ask(t, query(t, 1, "not-allowed-but-intercepted.example.", dnsmessage.TypeA, false))
-	if m.RCode != dnsmessage.RCodeRefused || len(m.Answers) != 0 {
+	if m.RCode != dnsmessage.RCodeNameError || len(m.Answers) != 0 {
 		t.Fatalf("reply = %+v", m)
 	}
-	expect(t, line, map[string]any{"decision": DecisionRefused})
+	expect(t, line, map[string]any{"decision": DecisionRefused, "reason": "not allowed"})
 }
 
 // OTTERGATE'S AUDIT-LOG BUG. One 14-byte wire label "api.github.com" -- not
@@ -340,9 +344,10 @@ func TestALabelContainingADotIsNeverTheName(t *testing.T) {
 	}
 }
 
-// A name made of bytes a name cannot contain is refused, and logged escaped so
-// the line cannot be made to say something else.
-func TestAnInvalidNameIsRefusedAndLoggedEscaped(t *testing.T) {
+// A name made of bytes a name cannot contain is not allowed by any policy, and
+// is answered as a name not allowed is; it is logged escaped so the line
+// cannot be made to say something else.
+func TestAnInvalidNameIsNXDOMAINAndLoggedEscaped(t *testing.T) {
 	f := newFixture(t, nil)
 	label := "pkg\"x\\"
 	req := []byte{0, 9, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, byte(len(label))}
@@ -351,10 +356,10 @@ func TestAnInvalidNameIsRefusedAndLoggedEscaped(t *testing.T) {
 	req = append(req, "example"...)
 	req = append(req, 0, 0, 1, 0, 1)
 	m, line := f.ask(t, req)
-	if m == nil || m.RCode != dnsmessage.RCodeRefused {
+	if m == nil || m.RCode != dnsmessage.RCodeNameError {
 		t.Fatalf("reply = %+v", m)
 	}
-	expect(t, line, map[string]any{"decision": DecisionRefused, "reason": "invalid name", "name": `pkg\x22x\x5c.example.`})
+	expect(t, line, map[string]any{"decision": DecisionRefused, "reason": "invalid name", "rcode": "NameError", "name": `pkg\x22x\x5c.example.`})
 }
 
 func TestMalformedAndOddQueriesAreAnsweredOrDroppedAndAlwaysLogged(t *testing.T) {
@@ -634,7 +639,7 @@ func TestServeConnAnswersPipelinedTCP(t *testing.T) {
 	for _, want := range []struct {
 		id    uint16
 		rcode dnsmessage.RCode
-	}{{1, dnsmessage.RCodeSuccess}, {2, dnsmessage.RCodeRefused}} {
+	}{{1, dnsmessage.RCodeSuccess}, {2, dnsmessage.RCodeNameError}} {
 		b, err := readFrame(c)
 		if err != nil {
 			t.Fatal(err)

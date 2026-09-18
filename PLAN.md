@@ -504,7 +504,16 @@ which to use.
 frisket answers every query it is given. A name on the session's allowlist that
 is intercepted resolves to the service address; a name that is allowed but not
 intercepted is resolved upstream and returned; a name that is not allowed is
-refused without an upstream lookup, so it cannot leak through DNS.
+answered NXDOMAIN without an upstream lookup, so it cannot leak through DNS.
+
+NXDOMAIN and not REFUSED, because musl-based programs (Alpine, and static
+binaries built on it) treat REFUSED as a hard failure and stop walking the
+`resolv.conf` search list: with `search lan`, a refused `foo.lan` means `foo`
+alone is never tried. Cilium documents this and makes its reject code
+configurable for it. The other codes are the ones that are true: FORMERR for a
+malformed query, NOTIMP for an opcode other than QUERY and for a zone transfer,
+REFUSED for a class other than IN, and SERVFAIL when the upstream fails. A
+query over the rate limit is dropped unanswered, so the client retries it.
 
 An allowlist entry has three shapes, with the meanings Cilium, Azure Firewall,
 Squid and `NO_PROXY` give them: a name; `*.name`, every name below it at any
@@ -724,9 +733,9 @@ node's address can be used.
   proxy settings is steered, allowed and logged; a raw connection to a private
   address is refused and logged; loopback, link-local and the host's own
   addresses are refused, including its global IPv6 address; UDP 443 is rejected;
-  DNS reaches frisket; a refused name triggers no upstream lookup; a connection
-  to an address frisket did not resolve is refused; the destination frisket logs
-  matches what the client dialled, over both families.
+  DNS reaches frisket; a name not allowed is NXDOMAIN and triggers no upstream
+  lookup; a connection to an address frisket did not resolve is refused; the
+  destination frisket logs matches what the client dialled, over both families.
 - Steering, `service`: only DNS and the service address reach frisket.
 - Ownership, as a regression gate rather than a measurement: the workload cannot
   list the ruleset, before or after `unshare -U`.

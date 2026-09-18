@@ -121,8 +121,8 @@ func TestLoadRefusesUnknownFields(t *testing.T) {
 }
 
 // Each session gets its own DNS, answering the intercepted name with ITS
-// service address and refusing what is not allowed without asking upstream,
-// and its own egress, which refuses what its DNS did not resolve.
+// service address and NXDOMAIN for what is not allowed, without asking
+// upstream, and its own egress, which refuses what its DNS did not resolve.
 func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 	up := &counting{}
 	set, err := Build(&Config{Policies: map[string]Policy{"p": valid(t)}}, deps(t, up))
@@ -145,7 +145,7 @@ func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 	if len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{192, 0, 2, 2} {
 		t.Errorf("the intercepted name answered %+v, want the session's service address", m.Answers)
 	}
-	if m := ask("denied.test."); m.RCode != dnsmessage.RCodeRefused {
+	if m := ask("denied.test."); m.RCode != dnsmessage.RCodeNameError {
 		t.Errorf("a name not allowed answered %v", m.RCode)
 	}
 	up.mu.Lock()

@@ -201,7 +201,7 @@ in
               Names a session may resolve: `name`; `*.name`, which matches
               every name below it at any depth and not the name itself; or `*`
               alone, every name. A `*` anywhere else is refused. A name not
-              here is refused at DNS without an upstream lookup, and egress
+              here is answered NXDOMAIN without an upstream lookup, and egress
               accepts only addresses DNS resolved for a name that is.
             '';
           };

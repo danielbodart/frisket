@@ -264,6 +264,10 @@ func readQueryFrame(r io.Reader) (msg []byte, partial bool, err error) {
 // drop -- with the name, if the query has one, because "rate limited" with no
 // name says nothing about what was being asked. On success the caller holds an
 // in-flight slot and must release it.
+//
+// Dropped, not answered: an answer costs what the flood costs, and a client
+// retries a query that went unanswered, where REFUSED would be final for the
+// name and, to musl, for the rest of its search list.
 func (s *Server) admit(l *line, req []byte) bool {
 	reason := ""
 	if !s.limit.allow() {
@@ -311,11 +315,15 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 		l.drop("not a query")
 		return nil
 	}
+	// THE ANSWER CODE IS CHOSEN CASE BY CASE, because stub resolvers act on
+	// it. NXDOMAIN says the name does not exist, and a resolver carries on
+	// down its search list; every other failure can stop it there.
 	q, err := p.Question()
 	if err != nil {
-		// The id is known, so say FORMERR rather than leave the client to
-		// time out. dnsmessage refuses a label containing a dot here -- the
-		// name ottergate would have logged as api.github.com never exists.
+		// FORMERR: the query itself is broken, and the id is known, so say so
+		// rather than leave the client to time out. dnsmessage refuses a label
+		// containing a dot here -- the name ottergate would have logged as
+		// api.github.com never exists.
 		l.refuse("malformed question", dnsmessage.RCodeFormatError)
 		l.err = err
 		return s.reply(h, nil, l, nil, nil, ednsInfo{}, limit)
@@ -334,25 +342,44 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 	if edns.present && udp {
 		limit = max(udpLimit, int(edns.size))
 	}
+	// NOTIMP: an opcode other than QUERY -- NOTIFY, UPDATE -- is an operation
+	// frisket does not implement, which is exactly what the code says. Stub
+	// resolvers never send one.
 	if h.OpCode != 0 {
 		l.refuse(fmt.Sprintf("opcode %d", h.OpCode), dnsmessage.RCodeNotImplemented)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
+	// REFUSED: frisket serves class IN and declines the rest -- CHAOS's
+	// version.bind and the like -- by policy, which is what REFUSED means. The
+	// name may well exist in that class, so NXDOMAIN would be a lie, and a
+	// search list is only ever walked in class IN.
 	if q.Class != dnsmessage.ClassINET {
 		l.refuse("class "+strings.TrimPrefix(q.Class.String(), "Class"), dnsmessage.RCodeRefused)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
+	// NXDOMAIN: a string no name could be is not allowed by any policy -- even
+	// "*" is every name, not every string -- so it gets a name not allowed's
+	// answer, below.
 	name := Normalize(q.Name.String())
 	if !ValidQueryName(name) {
-		l.refuse("invalid name", dnsmessage.RCodeRefused)
+		l.refuse("invalid name", dnsmessage.RCodeNameError)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
 	// NOT ALLOWED MEANS NO UPSTREAM LOOKUP. A refused name must not leave the
 	// host at all, or DNS is an exfiltration channel with a refusal on top.
+	//
+	// NXDOMAIN, NOT REFUSED. musl -- Alpine, and every static binary built
+	// on it -- treats REFUSED as a hard failure and stops walking the
+	// resolv.conf search list, so with `search lan` a refused `foo.lan` means
+	// `foo` alone is never tried, and a name the policy does allow fails
+	// because of one it does not. Cilium documents the same and makes its
+	// reject code configurable for it. To the sandbox, a name it may not
+	// resolve is a name that does not exist.
 	if !s.cfg.Allow.Match(name) {
-		l.refuse("not allowed", dnsmessage.RCodeRefused)
+		l.refuse("not allowed", dnsmessage.RCodeNameError)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
+	// NOTIMP: frisket is not a zone's server and has no transfer to give.
 	if q.Type == dnsmessage.TypeAXFR || q.Type == typeIXFR {
 		l.refuse("zone transfer", dnsmessage.RCodeNotImplemented)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
@@ -365,6 +392,9 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 	m, tr, err := s.cfg.Upstream.Exchange(ctx, q)
 	l.trace = tr
 	if err != nil {
+		// SERVFAIL: the name may exist and frisket could not find out. That
+		// is temporary, a client retries it, and NXDOMAIN would be a lie a
+		// negative cache would keep.
 		l.fail("upstream", err)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}

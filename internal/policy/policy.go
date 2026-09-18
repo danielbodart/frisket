@@ -44,8 +44,8 @@ type Config struct {
 type Policy struct {
 	// Allow is the name allowlist: exact names, "*.suffix" for every name
 	// below suffix, and "*" alone for every name. A name not on it is
-	// refused at DNS without an upstream lookup, and so has no address egress
-	// would accept.
+	// answered NXDOMAIN without an upstream lookup, and so has no address
+	// egress would accept.
 	Allow []string `json:"allow"`
 	// Intercept names are answered with the session's service address, so
 	// their connections reach interception. Each must also be allowed --

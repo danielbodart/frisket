@@ -59,8 +59,8 @@ terminates its TLS with the machine's CA, checks each request against the
 route's paths, replaces whatever `Authorization` the sandbox sent with
 `Bearer <token>` from the file, and forwards it upstream. `*.pkg.example.org`
 resolves as usual and is spliced through untouched. Every other name is
-refused at DNS, and every address frisket did not resolve for the session is
-refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
+answered NXDOMAIN, without an upstream lookup, and every address frisket did
+not resolve for the session is refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
 and the host's own addresses, whatever resolved to them.
 
 The CA is at `/etc/frisket/ca.crt` in every session, read-only. Telling each
