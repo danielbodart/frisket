@@ -58,11 +58,10 @@ type Policy struct {
 	Routes []Route `json:"routes,omitempty"`
 }
 
-// Route is one intercepted host, as data. This is the generic route: a bearer
-// token or a bare header, from a file -- the whole of it, or a field of its
-// JSON -- scoped by method and path prefix.
-// Tool-shaped routes are designed one tool at a time (PLAN.md, "Per-tool
-// routes") and none is expressed here.
+// Route is one intercepted host, as data: a bearer token, Basic with a fixed
+// user, or a bare header, from a file -- the whole of it, or a field of its
+// JSON -- or no credential at all; scoped by method and path prefix, and by
+// git's smart-HTTP protocol per repository.
 type Route struct {
 	Name string `json:"name"`
 	// Host is the name the sandbox connects to.
@@ -74,20 +73,34 @@ type Route struct {
 	UpstreamCA string `json:"upstreamCA,omitempty"`
 	// CredentialFile holds the token, alone, whitespace trimmed -- or, with
 	// CredentialJSON, a JSON document that names it. It is read by the
-	// daemon, on the host, and re-read when it is replaced.
-	CredentialFile string `json:"credentialFile"`
+	// daemon, on the host, and re-read when it is replaced. Empty is a route
+	// with no credential, which only holds requests to its scope, and then
+	// nothing else about a credential may be set.
+	CredentialFile string `json:"credentialFile,omitempty"`
 	// CredentialJSON reads CredentialFile as JSON: the token and its expiry
 	// at dotted paths. Nil is the bare token.
 	CredentialJSON *CredentialJSON `json:"credentialJSON,omitempty"`
 	// Header is the header the token goes in, bare. Empty means
 	// `Authorization: Bearer <token>`.
 	Header string `json:"header,omitempty"`
+	// BasicUser puts the token in `Authorization: Basic` as the password,
+	// under this user: git over HTTPS. Not with Header.
+	BasicUser string `json:"basicUser,omitempty"`
 	// Placeholder is what the sandbox holds in the credential's place, and
 	// the only value frisket replaces: anything else is sent on as it came.
-	Placeholder string `json:"placeholder"`
-	// Paths is the route's scope: requests with a listed method at or under a
-	// prefix, matched by segment. Nothing else is admitted.
-	Paths []PathRule `json:"paths"`
+	Placeholder string `json:"placeholder,omitempty"`
+	// Paths and Git are the route's scope: a request either admits goes
+	// upstream, and nothing else does.
+	Paths []PathRule `json:"paths,omitempty"`
+	Git   *GitRule   `json:"git,omitempty"`
+}
+
+// GitRule admits git's smart-HTTP protocol, as GitHub serves it, for some
+// repositories or all of them: clone and fetch, and push only if it says so.
+type GitRule struct {
+	// Repos are "owner/name", or "*" alone for every repository.
+	Repos []string `json:"repos"`
+	Push  bool     `json:"push,omitempty"`
 }
 
 // CredentialJSON is where a JSON credential file keeps its token, and when
@@ -310,23 +323,21 @@ func sessionCA(hosts []string, authority []byte) (*intercept.CA, []byte, error) 
 	return ca, b, err
 }
 
-// route builds one generic route and the watcher behind its credential.
+// route builds one route and the watcher behind its credential, if it has one.
 func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
-	if r.CredentialFile == "" {
-		return intercept.Route{}, nil, errors.New("no credential file")
+	if len(r.Paths) == 0 && r.Git == nil {
+		return intercept.Route{}, nil, errors.New("no paths and no git: a route with no scope admits nothing")
 	}
-	if len(r.Paths) == 0 {
-		return intercept.Route{}, nil, errors.New("no paths: a route with no scope admits nothing")
-	}
-	out := intercept.Route{Name: r.Name, Host: r.Host, Upstream: r.Upstream, Placeholder: r.Placeholder, Inject: intercept.Bearer()}
-	if r.Header != "" {
-		if strings.EqualFold(r.Header, "Authorization") {
-			return intercept.Route{}, nil, errors.New(`header "Authorization" is the default, with Bearer; name another header for a bare token`)
-		}
-		out.Inject = intercept.HeaderNamed(r.Header)
-	}
+	out := intercept.Route{Name: r.Name, Host: r.Host, Upstream: r.Upstream}
 	for _, p := range r.Paths {
 		out.Scope.Paths = append(out.Scope.Paths, intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix})
+	}
+	if g := r.Git; g != nil {
+		scope, err := gitScope(*g)
+		if err != nil {
+			return intercept.Route{}, nil, err
+		}
+		out.Scope.Git = scope
 	}
 	if r.UpstreamCA != "" {
 		pool, err := intercept.LoadCAs(r.UpstreamCA)
@@ -334,6 +345,32 @@ func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
 			return intercept.Route{}, nil, fmt.Errorf("upstream CA: %w", err)
 		}
 		out.UpstreamCAs = pool
+	}
+
+	if r.CredentialFile == "" {
+		// Scope only: what the client sends goes on as it came, if the scope
+		// admits it. Anything that would say otherwise is refused.
+		if r.Placeholder != "" || r.CredentialJSON != nil || r.Header != "" || r.BasicUser != "" {
+			return intercept.Route{}, nil, errors.New("no credential file, so no placeholder, credentialJSON, header or basicUser")
+		}
+		return out, func() error { return nil }, nil
+	}
+	out.Placeholder = r.Placeholder
+	switch {
+	case r.Header != "" && r.BasicUser != "":
+		return intercept.Route{}, nil, errors.New("header and basicUser: a token goes in one place")
+	case r.BasicUser != "":
+		if strings.ContainsAny(r.BasicUser, ":\r\n") {
+			return intercept.Route{}, nil, errors.New("basicUser holds a colon or a line break")
+		}
+		out.Inject = intercept.BasicUser(r.BasicUser)
+	case r.Header != "":
+		if strings.EqualFold(r.Header, "Authorization") {
+			return intercept.Route{}, nil, errors.New(`header "Authorization" is the default, with Bearer; name another header for a bare token, or basicUser for Basic`)
+		}
+		out.Inject = intercept.HeaderNamed(r.Header)
+	default:
+		out.Inject = intercept.Bearer()
 	}
 	extract := credential.Trimmed()
 	if j := r.CredentialJSON; j != nil {
@@ -348,6 +385,26 @@ func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
 	}
 	out.Credential = f
 	return out, f.Close, nil
+}
+
+// gitScope reads a git rule's repositories: "*" alone for all of them, or
+// each "owner/name".
+func gitScope(g GitRule) (*intercept.GitScope, error) {
+	if len(g.Repos) == 1 && g.Repos[0] == "*" {
+		return &intercept.GitScope{AnyRepo: true, Push: g.Push}, nil
+	}
+	s := &intercept.GitScope{Push: g.Push}
+	for _, name := range g.Repos {
+		repo, err := intercept.ParseRepo(name)
+		if err != nil {
+			return nil, fmt.Errorf("git: %w (or \"*\" alone, for every repository)", err)
+		}
+		s.Repos = append(s.Repos, repo)
+	}
+	if len(s.Repos) == 0 {
+		return nil, errors.New(`git lists no repositories: name them, or "*" for every one`)
+	}
+	return s, nil
 }
 
 // upstream is the configured servers, fixed, or with none configured whatever

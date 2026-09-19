@@ -474,6 +474,64 @@ func TestGitScopeByRepositorySegment(t *testing.T) {
 	}
 }
 
+// A route with no credential holds requests to its scope and changes nothing
+// on them: a token the client brought, even one shaped like a placeholder,
+// goes upstream as it came, and only for what the scope admits.
+func TestARouteWithNoCredentialOnlyHoldsItsScope(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	route := Route{
+		Name: "git", Host: gitHost, Upstream: up.URL, UpstreamCAs: up.pool(),
+		Scope: Scope{
+			Paths: []PathRule{{Methods: []string{"GET", "HEAD"}, Prefix: "/"}},
+			Git:   &GitScope{AnyRepo: true},
+		},
+	}
+	f := newFixture(t, j, route)
+	c := f.client(t, false)
+
+	for _, tc := range []struct {
+		method, target, auth, credential string
+		status                           int
+	}{
+		{"GET", "/owner/repo/releases/download/v1/x.tar.gz", "", CredentialNone, 200},
+		{"POST", "/anyone/anything.git/git-upload-pack", "", CredentialNone, 200},
+		{"POST", "/anyone/anything.git/git-upload-pack", "Bearer " + placeholder, CredentialPassed, 200},
+		{"GET", "/owner/repo.git/info/refs?service=git-upload-pack", "Bearer ghp_planted", CredentialPassed, 200},
+		{"POST", "/owner/repo.git/git-receive-pack", "Bearer ghp_planted", "", 403},
+		{"POST", "/gists", "Bearer ghp_planted", "", 403},
+	} {
+		before := len(up.requests())
+		req := newRequest(t, tc.method, "https://"+gitHost+tc.target, nil)
+		req.Header.Del("Authorization")
+		if tc.auth != "" {
+			req.Header.Set("Authorization", tc.auth)
+		}
+		res, _ := get(t, c, req)
+		if res.StatusCode != tc.status {
+			t.Errorf("%s %s: %d, want %d", tc.method, tc.target, res.StatusCode, tc.status)
+			continue
+		}
+		seen := up.requests()
+		if tc.status != 200 {
+			if len(seen) != before {
+				t.Errorf("%s %s: refused, but reached the upstream", tc.method, tc.target)
+			}
+			continue
+		}
+		if got := seen[len(seen)-1].Header.Get("Authorization"); got != tc.auth {
+			t.Errorf("%s %s: upstream Authorization = %q, want it as sent, %q", tc.method, tc.target, got, tc.auth)
+		}
+	}
+	// A refused request's line says why, and nothing about a credential.
+	want := []any{CredentialNone, CredentialNone, CredentialPassed, CredentialPassed, nil, nil}
+	for i, l := range j.waitLines(t, "request", len(want)) {
+		if l["credential"] != want[i] {
+			t.Errorf("log line %d: credential %v, want %v", i, l["credential"], want[i])
+		}
+	}
+}
+
 // A route whose credential cannot be produced fails the request, loudly, and
 // sends nothing upstream -- never the request without its credential.
 func TestMissingCredentialFailsLoudly(t *testing.T) {
@@ -1052,14 +1110,16 @@ func TestNewRefusesBadRoutes(t *testing.T) {
 		Scope: Scope{Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}}}}
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	for name, mutate := range map[string]func(r *Route){
-		"plain http upstream":  func(r *Route) { r.Upstream = "http://a.test" },
-		"no credential":        func(r *Route) { r.Credential = src },
-		"no injector":          func(r *Route) { r.Inject = nil },
-		"no placeholder":       func(r *Route) { r.Placeholder = "" },
-		"a spaced placeholder": func(r *Route) { r.Placeholder = "two words" },
-		"empty scope":          func(r *Route) { r.Scope = Scope{} },
-		"host with port":       func(r *Route) { r.Host = "a.test:443" },
-		"no name":              func(r *Route) { r.Name = "" },
+		"plain http upstream":                           func(r *Route) { r.Upstream = "http://a.test" },
+		"a placeholder and injector with no credential": func(r *Route) { r.Credential = src },
+		"a placeholder with no credential":              func(r *Route) { r.Credential = src; r.Inject = nil },
+		"an injector with no credential":                func(r *Route) { r.Credential = src; r.Placeholder = "" },
+		"no injector":                                   func(r *Route) { r.Inject = nil },
+		"no placeholder":                                func(r *Route) { r.Placeholder = "" },
+		"a spaced placeholder":                          func(r *Route) { r.Placeholder = "two words" },
+		"empty scope":                                   func(r *Route) { r.Scope = Scope{} },
+		"host with port":                                func(r *Route) { r.Host = "a.test:443" },
+		"no name":                                       func(r *Route) { r.Name = "" },
 	} {
 		r := good
 		mutate(&r)

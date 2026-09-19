@@ -40,6 +40,11 @@ func parseTarget(target string) (*url.URL, bool) {
 func TestScopeDecisions(t *testing.T) {
 	c := mustCompile(t, testScope)
 	push := mustCompile(t, Scope{Git: &GitScope{Repos: []Repo{ownerRepo}, Push: true}})
+	anyRepo := mustCompile(t, Scope{Git: &GitScope{AnyRepo: true}})
+	readOnly := mustCompile(t, Scope{
+		Paths: []PathRule{{Methods: []string{"GET", "HEAD"}, Prefix: "/"}},
+		Git:   &GitScope{AnyRepo: true},
+	})
 
 	for _, tc := range []struct {
 		scope  *compiled
@@ -108,6 +113,23 @@ func TestScopeDecisions(t *testing.T) {
 		{push, "GET", "/owner/repo.git/info/refs?service=git-receive-pack", true, "git"},
 		{push, "POST", "/owner/repo.git/git-receive-pack", true, "git"},
 		{push, "POST", "/owner/repo-evil.git/git-receive-pack", false, ReasonOutOfScope},
+
+		{anyRepo, "GET", "/someone/else.git/info/refs?service=git-upload-pack", true, "git"},
+		{anyRepo, "POST", "/someone/else/git-upload-pack", true, "git"},
+		{anyRepo, "GET", "/someone/else.git/info/refs?service=git-receive-pack", false, ReasonPush},
+		{anyRepo, "POST", "/someone/else.git/git-receive-pack", false, ReasonPush},
+		{anyRepo, "POST", "/someone/else.git/info/lfs/objects/batch", false, ReasonOutOfScope},
+		{anyRepo, "GET", "/someone/else", false, ReasonOutOfScope},
+		{anyRepo, "POST", "/someone/../else/git-upload-pack", false, ReasonBadPath},
+
+		// GET everywhere, and git without push: the git scope's refusal stands.
+		{readOnly, "GET", "/someone/else/releases/download/v1/x.tar.gz", true, "path"},
+		{readOnly, "GET", "/someone/else.git/info/refs?service=git-upload-pack", true, "git"},
+		{readOnly, "POST", "/someone/else.git/git-upload-pack", true, "git"},
+		{readOnly, "GET", "/someone/else.git/info/refs?service=git-receive-pack", false, ReasonPush},
+		{readOnly, "POST", "/someone/else.git/git-receive-pack", false, ReasonPush},
+		{readOnly, "POST", "/someone/else.git/info/lfs/objects/batch", false, ReasonOutOfScope},
+		{readOnly, "POST", "/graphql", false, ReasonOutOfScope},
 	} {
 		u, ok := parseTarget(tc.target)
 		if !ok {
@@ -132,14 +154,15 @@ func TestSplitPathRefusesBadEscapes(t *testing.T) {
 
 func TestScopeConfigurationRefusals(t *testing.T) {
 	for name, s := range map[string]Scope{
-		"empty":                {},
-		"path without methods": {Paths: []PathRule{{Prefix: "/v1"}}},
-		"relative prefix":      {Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "v1"}}},
-		"dotted prefix":        {Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/v1/../x"}}},
-		"git without repos":    {Git: &GitScope{}},
-		"api without methods":  {GitHubAPI: &GitHubAPIScope{Repos: []Repo{ownerRepo}}},
-		"repo of dots":         {Git: &GitScope{Repos: []Repo{{Owner: "owner", Name: ".."}}}},
-		"repo with slash":      {Git: &GitScope{Repos: []Repo{{Owner: "owner", Name: "a/b"}}}},
+		"empty":                 {},
+		"path without methods":  {Paths: []PathRule{{Prefix: "/v1"}}},
+		"relative prefix":       {Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "v1"}}},
+		"dotted prefix":         {Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/v1/../x"}}},
+		"git without repos":     {Git: &GitScope{}},
+		"git with any and some": {Git: &GitScope{AnyRepo: true, Repos: []Repo{ownerRepo}}},
+		"api without methods":   {GitHubAPI: &GitHubAPIScope{Repos: []Repo{ownerRepo}}},
+		"repo of dots":          {Git: &GitScope{Repos: []Repo{{Owner: "owner", Name: ".."}}}},
+		"repo with slash":       {Git: &GitScope{Repos: []Repo{{Owner: "owner", Name: "a/b"}}}},
 	} {
 		if _, err := compileScope(s); err == nil {
 			t.Errorf("%s: compiled, want a refusal", name)

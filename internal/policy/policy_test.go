@@ -87,13 +87,22 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"a route for a wildcard":                  func(p *Policy) { p.Routes[0].Host = "*.cdn.test" },
 		"a route for *":                           func(p *Policy) { p.Allow = []string{"*"}; p.Routes[0].Host = "*" },
 		"a route with no scope":                   func(p *Policy) { p.Routes[0].Paths = nil },
-		"a route with no credential":              func(p *Policy) { p.Routes[0].CredentialFile = "" },
-		"a JSON credential that names no token":   func(p *Policy) { p.Routes[0].CredentialJSON = &CredentialJSON{} },
-		"a route with no placeholder":             func(p *Policy) { p.Routes[0].Placeholder = "" },
-		"a plain-HTTP upstream":                   func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
-		"a * inside an allowlist name":            func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
-		"a * glued to an allowlist name":          func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
-		"Authorization named as a bare header":    func(p *Policy) { p.Routes[0].Header = "authorization" },
+		"a placeholder with no credential":        func(p *Policy) { p.Routes[0].CredentialFile = "" },
+		"basicUser with no credential": func(p *Policy) {
+			p.Routes[0].CredentialFile, p.Routes[0].Placeholder, p.Routes[0].BasicUser = "", "", "x-access-token"
+		},
+		"a header and basicUser":                       func(p *Policy) { p.Routes[0].Header = "X-Api-Key"; p.Routes[0].BasicUser = "u" },
+		"a basicUser with a colon":                     func(p *Policy) { p.Routes[0].BasicUser = "a:b" },
+		"git with no repositories":                     func(p *Policy) { p.Routes[0].Git = &GitRule{} },
+		"git with * among repositories":                func(p *Policy) { p.Routes[0].Git = &GitRule{Repos: []string{"*", "owner/repo"}} },
+		"git with a repository that is not owner/name": func(p *Policy) { p.Routes[0].Git = &GitRule{Repos: []string{"owner"}} },
+		"git with a wildcard owner":                    func(p *Policy) { p.Routes[0].Git = &GitRule{Repos: []string{"owner/*"}} },
+		"a JSON credential that names no token":        func(p *Policy) { p.Routes[0].CredentialJSON = &CredentialJSON{} },
+		"a route with no placeholder":                  func(p *Policy) { p.Routes[0].Placeholder = "" },
+		"a plain-HTTP upstream":                        func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
+		"a * inside an allowlist name":                 func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
+		"a * glued to an allowlist name":               func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
+		"Authorization named as a bare header":         func(p *Policy) { p.Routes[0].Header = "authorization" },
 	} {
 		p := valid(t)
 		mutate(&p)
@@ -105,6 +114,30 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 	if _, err := Build(&Config{Policies: map[string]Policy{"a:b": valid(t)}}, deps(t, &counting{})); err == nil {
 		t.Error("a policy name that cannot be a session's was accepted")
 	}
+}
+
+// git's routes: Basic with the token as the password, under a fixed user, and
+// a git scope; and a route with no credential, which only holds its scope.
+func TestGitRoutesBuild(t *testing.T) {
+	p := valid(t)
+	p.Allow = append(p.Allow, "git.test", "anon.test")
+	p.Routes = append(p.Routes,
+		Route{
+			Name: "git", Host: "git.test", Upstream: "https://git.test",
+			CredentialFile: p.Routes[0].CredentialFile, Placeholder: "proxy-injected", BasicUser: "x-access-token",
+			Git: &GitRule{Repos: []string{"owner/repo", "Owner/Other.js"}, Push: true},
+		},
+		Route{
+			Name: "anon", Host: "anon.test", Upstream: "https://anon.test",
+			Paths: []PathRule{{Methods: []string{"GET", "HEAD"}, Prefix: "/"}},
+			Git:   &GitRule{Repos: []string{"*"}},
+		},
+	)
+	set, err := Build(&Config{Policies: map[string]Policy{"p": p}}, deps(t, &counting{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = set.Close()
 }
 
 // A route for a wildcard is refused: every name it matched would resolve to

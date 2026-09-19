@@ -26,9 +26,13 @@ let
         routes = lib.mapAttrsToList
           (name: r: {
             inherit name;
-            inherit (r) host upstream credentialFile placeholder paths;
+            inherit (r) host upstream paths;
           } // lib.optionalAttrs (r.upstreamCA != null) { upstreamCA = "${r.upstreamCA}"; }
+          // lib.optionalAttrs (r.credentialFile != null) { inherit (r) credentialFile; }
+          // lib.optionalAttrs (r.placeholder != null) { inherit (r) placeholder; }
           // lib.optionalAttrs (r.header != null) { inherit (r) header; }
+          // lib.optionalAttrs (r.basicUser != null) { inherit (r) basicUser; }
+          // lib.optionalAttrs (r.git != null) { git = { inherit (r.git) repos push; }; }
           // lib.optionalAttrs (r.credentialJSON != null) {
             credentialJSON = { inherit (r.credentialJSON) token; }
               // lib.optionalAttrs (r.credentialJSON.expiresMillis != null) { inherit (r.credentialJSON) expiresMillis; };
@@ -83,14 +87,18 @@ let
         description = "A PEM bundle to verify the upstream with, instead of the host's roots.";
       };
       credentialFile = mkOption {
-        type = types.strMatching "/.*";
+        type = types.nullOr (types.strMatching "/.*");
+        default = null;
         example = "/run/secrets/example-token";
         description = ''
           The token, alone in a file on the host -- or, with `credentialJSON`,
           a JSON file that names it -- read by the daemon as
           `services.frisket.user` and re-read when it is replaced -- by rename
           too. A string and not a path, so it is never copied into the store.
-          Not under /tmp, which the daemon's PrivateTmp hides.
+          Not under /tmp, which the daemon's PrivateTmp hides. Null: a route
+          with no credential, which only holds requests to its scope and
+          sends them on as they came; it then has no placeholder, header or
+          basicUser.
         '';
       };
       credentialJSON = mkOption {
@@ -123,9 +131,20 @@ let
         example = "X-Api-Key";
         description = "The header the token goes in, bare. Null is `Authorization: Bearer <token>`.";
       };
+      basicUser = mkOption {
+        type = types.nullOr (types.strMatching "[^:[:space:]]+");
+        default = null;
+        example = "x-access-token";
+        description = ''
+          Put the token in `Authorization: Basic` as the password, under this
+          user: git over HTTPS, which GitHub accepts in no other form. Not with
+          `header`.
+        '';
+      };
       placeholder = mkOption {
-        type = types.strMatching "[^[:space:]]+";
-        example = "frisket-injects-the-real-one";
+        type = types.nullOr (types.strMatching "[^[:space:]]+");
+        default = null;
+        example = "proxy-injected";
         description = ''
           What the sandbox is given in the credential's place -- in the
           environment variable or file its client reads a token from. A request
@@ -135,8 +154,31 @@ let
         '';
       };
       paths = mkOption {
-        type = types.nonEmptyListOf pathRule;
-        description = "The route's scope. A request no rule admits is refused with a 403.";
+        type = types.listOf pathRule;
+        default = [ ];
+        description = "The route's scope, with `git`. A request neither admits is refused with a 403.";
+      };
+      git = mkOption {
+        type = types.nullOr (types.submodule {
+          options = {
+            repos = mkOption {
+              type = types.nonEmptyListOf types.str;
+              example = [ "owner/repo" ];
+              description = ''`owner/name`, or `"*"` alone for every repository.'';
+            };
+            push = mkOption {
+              type = types.bool;
+              default = false;
+              description = "Admit git-receive-pack. Without it a push is refused at its first request.";
+            };
+          };
+        });
+        default = null;
+        description = ''
+          Git's smart-HTTP protocol as GitHub serves it --
+          `/owner/name[.git]/info/refs` and `git-upload-pack`, and
+          `git-receive-pack` with `push` -- for these repositories.
+        '';
       };
     };
   };
@@ -290,7 +332,7 @@ in
           p.routes
         ++ lib.mapAttrsToList
           (rname: r: {
-            assertion = ! lib.hasPrefix builtins.storeDir r.credentialFile;
+            assertion = r.credentialFile == null || ! lib.hasPrefix builtins.storeDir r.credentialFile;
             message = "services.frisket.policies.${name}.routes.${rname}.credentialFile is in the Nix store, which every user can read.";
           })
           p.routes)

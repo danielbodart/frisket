@@ -658,7 +658,6 @@ inject.
 
 | Tool | Where it authenticates | To decide |
 |---|---|---|
-| git over HTTPS | `github.com` smart-HTTP | which credential, which repositories a session gets, whether it may push |
 | gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`, GraphQL |
 | codex | `chatgpt.com/backend-api/codex` | which endpoints, how `~/.codex/auth.json` is read, who refreshes; Claude Code's route is the template |
 | hf | `huggingface.co` | scope, which CDN and Xet hosts an allowlist needs, the token's source |
@@ -667,10 +666,9 @@ inject.
 | Postgres, Redis, MongoDB | — | nothing of frisket's in trusted; unreachable in strict |
 | npm, PyPI, crates, Go proxy | — | no credential; which names each allowlist needs |
 
-`internal/intercept` holds tool-shaped pieces written ahead of these designs —
-a git smart-HTTP scope by repository, a GitHub REST scope, and Basic with
-`x-access-token`. They are marked PROVISIONAL, no policy can name them, and none
-is an answer to its row until that row is designed.
+`internal/intercept` holds a GitHub REST scope by repository, written ahead of
+gh's design. It is marked PROVISIONAL, no policy can name it, and it is not an
+answer to gh's row until that row is designed.
 
 Several credentials have no source on this machine yet: there is no GitHub App,
 no gcloud installation, no Cloudflare login, and the hf token is outside sops.
@@ -691,6 +689,35 @@ offered as an intercepted, read-only route, whose scope is what stops it:
 
 A planted token still reaches GitHub, for those reads (decision 13): strict
 holds nothing private to read out through them.
+
+### git over HTTPS (decided)
+
+- **The credential** is `gh`'s own OAuth token, the one the gh route already
+  holds. GitHub's smart-HTTP takes it only as Basic auth's password, under any
+  user: measured, `Bearer` and `token` are 401. So a route has `basicUser`, and
+  the placeholder is recognised as Basic's password.
+- **The sandbox** keeps SSH remotes and never holds a key: `insteadOf` rewrites
+  `git@github.com:` and `ssh://git@github.com/` to HTTPS, and git's credential
+  helper hands out the placeholder. `~/.ssh` is no longer mounted.
+- **Scope** is a `git` rule: `info/refs`, `git-upload-pack`, and
+  `git-receive-pack` only with `push`, for listed repositories or `*`. It
+  decides every git-shaped request before any path rule, so `GET /` beside it
+  does not admit receive-pack's advertisement.
+- **Strict's route carries no credential.** A route may leave out
+  `credentialFile` and only hold its scope; strict's `github.com` is `GET` and
+  `HEAD` everywhere plus upload-pack for any repository, and its
+  `api.github.com` is `GET` and `HEAD`. Public clones work; gh does not
+  (GraphQL needs a login), and LFS is refused until it is measured.
+- **Trusted's route is the whole host, every method**, like its
+  `api.github.com`: a narrower `github.com` scope with the same token open on
+  the API buys nothing, and release and archive downloads go through the same
+  host.
+- **Not a GitHub App.** Minted, per-repository, read-only installation tokens
+  would narrow the credential itself, but push as a bot and need an App on
+  every owner. The route's scope is the boundary; that stays a later option.
+- **Not SSH.** Agent forwarding, destination-constrained keys and GitHub's SSH
+  CAs are all per-user, never per-repository or read-only; terminating SSH
+  would give what HTTPS already gives, with a second protocol to hold.
 
 ### Claude Code
 
@@ -861,7 +888,7 @@ payload does not start until the hook returns.
 - Define the policies and which sandbox gets which.
 - Drop its own CA variables (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_DIR`), which
   the adapter now sets.
-- Handpick what each tier mounts. `~/.ssh` goes once git is injected; the agent
+- Handpick what each tier mounts. `~/.ssh` is gone (git over HTTPS, above); the agent
   credential files go; `cc-socks` stays for trusted and goes for strict; the
   askpass script belongs to the host tier alone.
 

@@ -21,10 +21,10 @@ import (
 // to add the credential.
 type Scope struct {
 	// Paths admit a request whose method is listed and whose path is at or
-	// under Prefix. The generic scope, and the only one any policy uses.
+	// under Prefix.
 	Paths []PathRule
 	// Git admits git's smart-HTTP protocol, GitHub-shaped, for a set of
-	// repositories. PROVISIONAL: see GitScope.
+	// repositories or all of them.
 	Git *GitScope
 	// GitHubAPI admits GitHub REST calls under /repos/{owner}/{repo}.
 	// PROVISIONAL: see GitHubAPIScope.
@@ -45,12 +45,11 @@ type PathRule struct {
 // GitScope admits git over HTTPS as GitHub serves it: /{owner}/{repo}[.git]
 // followed by info/refs, git-upload-pack or git-receive-pack, and nothing
 // else -- no web UI, no LFS, no dumb protocol.
-//
-// PROVISIONAL. Shaped around one tool before that tool's route was designed;
-// git's route is an open question (PLAN.md, "Per-tool routes") and this is not
-// its answer until it is. No policy uses it.
 type GitScope struct {
-	Repos []Repo
+	// Repos are the repositories admitted, unless AnyRepo, and then none may
+	// be listed.
+	Repos   []Repo
+	AnyRepo bool
 	// Push admits git-receive-pack. Without it, fetch and clone work and a
 	// push is refused at its first request, the ref advertisement -- which is
 	// the one agents-container enforced by inspecting `git`'s command line.
@@ -66,7 +65,7 @@ type GitScope struct {
 // repository-scoped by their path and are refused unless a PathRule admits
 // them deliberately.
 //
-// PROVISIONAL, like GitScope: gh's route is an open question, and no policy
+// PROVISIONAL: gh's route is an open question, and no policy
 // uses this.
 type GitHubAPIScope struct {
 	Repos   []Repo
@@ -152,8 +151,8 @@ func compileScope(s Scope) (*compiled, error) {
 		c.paths = append(c.paths, compiledPath{methods: upper(p.Methods), prefix: segs})
 	}
 	if s.Git != nil {
-		if len(s.Git.Repos) == 0 {
-			return nil, errors.New("git scope lists no repositories")
+		if s.Git.AnyRepo != (len(s.Git.Repos) == 0) {
+			return nil, errors.New("git scope needs repositories, or any repository, and not both")
 		}
 		for _, r := range s.Git.Repos {
 			if err := r.validate(); err != nil {
@@ -200,6 +199,14 @@ func (c *compiled) allow(method string, u *url.URL) (bool, string) {
 	if err != nil {
 		return false, ReasonBadPath
 	}
+	// Git first, and its refusal stands: a route admitting GET everywhere
+	// beside a git scope without push still refuses receive-pack's ref
+	// advertisement, which is where a push is meant to stop.
+	if c.git != nil {
+		if ok, reason := c.git.allow(method, segs, u.RawQuery); ok || reason != "" {
+			return ok, reason
+		}
+	}
 	for _, p := range c.paths {
 		if slices.Contains(p.methods, method) && hasPrefix(segs, p.prefix) {
 			return true, "path"
@@ -208,11 +215,6 @@ func (c *compiled) allow(method string, u *url.URL) (bool, string) {
 	if c.api != nil && slices.Contains(c.api.Methods, method) &&
 		len(segs) >= 3 && segs[0] == "repos" && inRepos(c.api.Repos, segs[1], segs[2]) {
 		return true, "github-api"
-	}
-	if c.git != nil {
-		if ok, reason := c.git.allow(method, segs, u.RawQuery); ok || reason != "" {
-			return ok, reason
-		}
 	}
 	return false, ReasonOutOfScope
 }
@@ -225,7 +227,7 @@ func (g *GitScope) allow(method string, segs []string, rawQuery string) (bool, s
 		return false, ""
 	}
 	name, _ := cutSuffixFold(segs[1], ".git")
-	if !inRepos(g.Repos, segs[0], name) {
+	if !g.AnyRepo && !inRepos(g.Repos, segs[0], name) {
 		return false, ""
 	}
 	rest := segs[2:]

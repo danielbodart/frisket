@@ -132,7 +132,7 @@ Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
 |---|---|---|
 | `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
 | `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
-| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile`, `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `paths` |
+| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `paths`, `git` |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
 | `services.frisket.logLevel` | `info` | `debug` adds each intercepted request's headers and error bodies; credentials are described, never shown |
@@ -156,6 +156,39 @@ credentialJSON = {
   expiresMillis = "claudeAiOauth.expiresAt";  # past it, 503 rather than a stale token
 };
 ```
+
+## git
+
+GitHub takes a token for git only as Basic auth's password. With the
+sandbox's git sending the placeholder there:
+
+```nix
+routes.github = {
+  host = "github.com";
+  upstream = "https://github.com";
+  credentialFile = "/run/secrets/gh-token";
+  placeholder = "proxy-injected";
+  basicUser = "x-access-token";
+  git = { repos = [ "*" ]; push = true; };   # or [ "owner/repo" ... ]
+  paths = [ { methods = [ "GET" "HEAD" ]; prefix = "/"; } ];  # releases, archives
+};
+```
+
+```ini
+# the sandbox's /etc/gitconfig
+[url "https://github.com/"]
+	insteadOf = git@github.com:
+	insteadOf = ssh://git@github.com/
+[credential "https://github.com"]
+	helper = !gh auth git-credential   # GH_TOKEN=proxy-injected
+```
+
+`git` admits `info/refs`, `git-upload-pack` and, with `push`, `git-receive-pack`,
+for the listed repositories, matched by segment; it decides every git-shaped
+request, so without `push` a push is refused at its ref advertisement even
+where `paths` admits `GET`. Without `credentialFile`, the same route is
+read-only GitHub with nothing of yours on it: what the sandbox sends goes on as
+it came, for what the scope admits.
 
 ## Development
 

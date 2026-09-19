@@ -28,9 +28,10 @@ type Route struct {
 	Upstream string
 	// UpstreamCAs verifies the upstream. Nil means the host's roots.
 	UpstreamCAs *x509.CertPool
-	// Credential is what is injected. Required: a route that cannot produce
-	// its credential fails the request, and a route with no source has
-	// nothing to fail with.
+	// Credential is what is injected; a route that cannot produce it fails
+	// the request. Nil is a route that only holds requests to its scope, with
+	// no injector and no placeholder: what the client sends goes upstream as
+	// it came, and only if the scope admits it.
 	Credential credential.Source
 	// Inject puts the credential on the request.
 	Inject Injector
@@ -59,10 +60,7 @@ type Injector interface {
 func Bearer() Injector { return bearer{} }
 
 // BasicUser is `Authorization: Basic base64(user:<token>)`: git over HTTPS,
-// which GitHub accepts as x-access-token and an installation token.
-//
-// PROVISIONAL: shaped around git before git's route was designed, and used by
-// no policy.
+// the only form GitHub accepts a token in for git, under any user.
 func BasicUser(user string) Injector { return basic{user: user} }
 
 // HeaderNamed puts the token, bare, in a header of its own: `x-api-key`.
@@ -129,7 +127,12 @@ func (r *Route) validate() (*url.URL, error) {
 		return nil, fmt.Errorf("route %s: upstream %q must be https://host[:port][/path]", r.Name, r.Upstream)
 	}
 	if r.Credential == nil {
-		return nil, fmt.Errorf("route %s: no credential source", r.Name)
+		// A placeholder here would go upstream as it came: a configuration
+		// that says something frisket would not do.
+		if r.Inject != nil || r.Placeholder != "" {
+			return nil, fmt.Errorf("route %s: an injector or placeholder with no credential", r.Name)
+		}
+		return u, nil
 	}
 	if r.Inject == nil || r.Inject.Header() == "" {
 		return nil, fmt.Errorf("route %s: no injector", r.Name)
@@ -140,11 +143,23 @@ func (r *Route) validate() (*url.URL, error) {
 	return u, nil
 }
 
+// credentialHeader is where the log looks for a client's own credential:
+// Authorization, on a route that injects none.
+func (r *Route) credentialHeader() string {
+	if r.Inject == nil {
+		return "Authorization"
+	}
+	return r.Inject.Header()
+}
+
 // carries reports whether a request holds the placeholder, exactly, as the
 // whole of the credential header or after its scheme: `Bearer <placeholder>`,
 // gh's `token <placeholder>`, or git's Basic auth with it as the password. One value only -- two is not a request
 // frisket can put one credential on.
 func (r *Route) carries(h http.Header) bool {
+	if r.Credential == nil {
+		return false
+	}
 	vals := h.Values(r.Inject.Header())
 	if len(vals) != 1 {
 		return false

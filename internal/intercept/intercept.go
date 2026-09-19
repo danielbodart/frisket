@@ -377,8 +377,10 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if i.log.Enabled(r.Context(), slog.LevelDebug) {
 		// Before anything is replaced: what the client sent is the question.
 		ours := ""
-		if s, err := rt.Credential.Get(); err == nil {
-			ours = s.Value
+		if rt.Credential != nil {
+			if s, err := rt.Credential.Get(); err == nil {
+				ours = s.Value
+			}
 		}
 		rec.detail = &detail{reqHeader: describeHeaders(r.Header, ours), query: queryNames(r.URL.Query())}
 		// The request line comes when it finishes, which for a stream is
@@ -428,7 +430,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// credential, or none, goes upstream as it was sent. Nor does it need
 		// frisket's -- a stale or missing one is no reason to refuse it.
 		rec.credential = CredentialPassed
-		if r.Header.Get(rt.Inject.Header()) == "" {
+		if r.Header.Get(rt.credentialHeader()) == "" {
 			rec.credential = CredentialNone
 		}
 		rt.proxy.ServeHTTP(lw, r.WithContext(context.WithValue(r.Context(), recordKey{}, rec)))
