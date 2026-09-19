@@ -141,7 +141,7 @@ in
     # has no `dns` of its own, so it follows this too.
     networking.nameservers = [ upstream4 ];
 
-    # The host trusts the upstream's CA, so the bundle frisket makes from the
+    # The host trusts the upstream's CA, so the bundle steer makes from the
     # host's roots carries it: a spliced name then verifies through the same
     # file as an intercepted one, as a public host would in the field.
     security.pki.certificateFiles = [ "${certs}/ca.crt" ];
@@ -191,9 +191,11 @@ in
     # which is the one directory the test and the session share.
     environment.etc."frisket-long".source = pkgs.writeText "long.sh" ''
       curl -sS -m 5 http://allowed.test/ > before-restart
+      curl -sS -m 10 -H 'Authorization: Bearer frisket-placeholder' https://api.test/v1/models > api-before-restart 2>&1
       touch started
       while [ ! -e go ]; do sleep 0.1; done
       curl -sS -m 5 http://allowed.test/ > after-restart
+      curl -sS -m 10 -H 'Authorization: Bearer frisket-placeholder' https://api.test/v1/models > api-after-restart 2>&1
       touch done
       while [ ! -e release ]; do sleep 0.1; done
     '';
@@ -324,8 +326,7 @@ in
       networked = lib.getExe nodes.machine.flong.networked.launcher;
       trusted = lib.getExe nodes.machine.flong.trusted.launcher;
       frisket = lib.getExe nodes.machine.services.frisket.package;
-      ca = nodes.machine.services.frisket.caCertificate;
-      bundle = nodes.machine.services.frisket.caBundle;
+      roots = nodes.machine.security.pki.caBundle;
     in
     ''
       import json
@@ -449,6 +450,9 @@ in
           # Not even the daemon's own user.
           machine.fail("su alice -s /bin/sh -c '${frisket} sessions'")
           assert stored() == 0
+          # It keeps nothing on disk: a session's CA is made when it opens,
+          # and kept only in the daemon and the session's sealed record.
+          machine.fail("test -e /var/lib/frisket")
 
       with subtest("a session is steered, and every connection logged once with where it was going"):
           out = machine.succeed("${strict} 'curl -sS -m 5 -4 http://allowed.test/; curl -sS -m 5 -6 http://allowed.test/'")
@@ -602,40 +606,44 @@ in
       def upstream_saw(pattern):
           return upstream.execute(f"journalctl -u upstream-https -o cat | grep -E {shlex.quote(pattern)}")[1]
 
-      with subtest("the machine's CA is constrained to the intercepted hosts, critically"):
-          # Every policy's intercepted hosts, which here is api.test in both,
-          # and no IP address at all.
-          text = machine.succeed("openssl x509 -noout -text -in ${ca}")
+      inside = f"/proc/{leader}/root/etc/frisket"
+      # Kept on the host, to show a later session's CA is another.
+      machine.succeed(f"cp {inside}/ca.crt /tmp/first-session-ca.crt")
+
+      with subtest("the session's CA is constrained to its policy's route hosts, critically"):
+          # The test policy's one route, and no IP address at all.
+          text = machine.succeed(f"openssl x509 -noout -text -in {inside}/ca.crt")
           assert re.search(r"X509v3 Name Constraints: critical\n\s+Permitted:\n\s+DNS:api\.test\n\s+Excluded:\n"
                            r"\s+IP:0\.0\.0\.0/0\.0\.0\.0\n\s+IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0\n", text), text
 
-      with subtest("the public files are bound into the session, alone, and the workload cannot change them"):
-          # Bound by the container's declaration, which every session of it
-          # mounts: the certificate, and the host's roots with it after them.
-          # Nothing else -- the key above all.
-          inside = f"/proc/{leader}/root/etc/frisket"
+      with subtest("the CA is in the session alone, on a read-only tmpfs the workload cannot change"):
+          # The certificate, and the host's roots with it after them; nothing
+          # else, and no key.
           assert machine.succeed(f"ls -A {inside}").split() == ["ca-bundle.crt", "ca.crt"]
-          machine.succeed(f"cmp {inside}/ca.crt ${ca}")
-          machine.succeed(f"cmp {inside}/ca-bundle.crt ${bundle}")
-          machine.succeed("cat ${nodes.machine.security.pki.caBundle} ${ca} | cmp - ${bundle}")
-          # Public, so readable whatever uid the workload runs as: 0755 and
-          # 0644 though the daemon runs under UMask=0077, and read here by a
-          # uid that is not the daemon's.
-          assert machine.succeed(f"stat -c %a {inside} ${ca} ${bundle}").split() == ["755", "644", "644"]
+          machine.succeed(f"cat ${roots} {inside}/ca.crt | cmp - {inside}/ca-bundle.crt")
+          # A mount of the session's own: tmpfs, read-only, in its mount
+          # namespace and not the host's.
+          mnt = machine.succeed(f"grep ' /etc/frisket ' /proc/{leader}/mountinfo")
+          assert " - tmpfs " in mnt and " ro," in mnt, mnt
+          machine.fail("grep -q ' /etc/frisket ' /proc/self/mountinfo")
+          # Public, so readable whatever uid the workload runs as: root's,
+          # 0755 and 0644, and read here by a uid that is not the workload's.
+          assert machine.succeed(f"stat -c '%u %a' {inside} {inside}/ca.crt {inside}/ca-bundle.crt").split() == \
+              ["0", "755", "0", "644", "0", "644"]
           for f in ["ca.crt", "ca-bundle.crt"]:
               machine.succeed(f"nsenter --target={leader} --mount setpriv --reuid=1001 --regid=100 "
                               f"--clear-groups -- cat /etc/frisket/{f} | grep -q 'BEGIN CERTIFICATE'")
-          # The daemon's own directory, owned by the workload's uid: only the
-          # bind being read-only stops it, so that is what each attempt must
-          # hit.
-          assert machine.succeed(f"stat -c %u {inside} ${ca}").split() == ["1000", "1000"]
+          before = machine.succeed(f"cat {inside}/ca.crt {inside}/ca-bundle.crt")
           for cmd in ["echo forged >> /etc/frisket/ca.crt", "chmod u+w /etc/frisket/ca.crt",
                       "touch /etc/frisket/ca.crt", "echo forged > /etc/frisket/ca-bundle.crt",
                       "mv /etc/frisket/ca.crt /etc/frisket/old", "touch /etc/frisket/new"]:
               status, out = machine.execute(as_workload(leader, f"{{ {cmd}; }} 2>&1"))
-              assert status != 0 and "Read-only file system" in out, (cmd, status, out)
-          machine.succeed(f"cmp {inside}/ca.crt ${ca}")
-          machine.succeed(f"cmp {inside}/ca-bundle.crt ${bundle}")
+              assert status != 0 and ("Read-only file system" in out or "Permission denied" in out), (cmd, status, out)
+          for cmd in ["umount /etc/frisket", "mount -o remount,rw /etc/frisket",
+                      "unshare -Urm sh -c 'umount /etc/frisket || mount -o remount,rw,bind /etc/frisket || touch /etc/frisket/x'"]:
+              status, out = machine.execute(as_workload(leader, f"{{ {cmd}; }} 2>&1"))
+              assert status != 0, (cmd, status, out)
+          assert machine.succeed(f"cat {inside}/ca.crt {inside}/ca-bundle.crt") == before
 
       with subtest("the payload is told to trust the bundle, through every variable the common runtimes read"):
           env = machine.succeed("cat /srv/work/env-out")
@@ -792,6 +800,12 @@ in
           assert out.strip() == "upstream-api-ok", out
           [r] = wait_log("request", name, lambda m: m["path"] == "/v1/models", "the request")
           assert r["decision"] == "allowed" and r["status"] == 200 and r["route"] == "api", r
+
+      with subtest("every session has a CA of its own, and trusts no other session's"):
+          machine.fail(f"cmp /proc/{leader}/root/etc/frisket/ca.crt /tmp/first-session-ca.crt")
+          machine.succeed("cp /tmp/first-session-ca.crt /srv/work/other.crt")
+          status, out = machine.execute(as_workload(leader, "curl -sS -m 10 --cacert /srv/work/other.crt https://api.test/v1/models"))
+          assert status == 60, (status, out)
           release(name)
 
       with subtest("the host's resolv.conf rewritten mid-session: the next query reaches the new resolver"):
@@ -879,6 +893,10 @@ in
           machine.wait_until_succeeds("test -e /srv/work/done")
           assert "upstream-body" in machine.succeed("cat /srv/work/before-restart")
           assert "upstream-body" in machine.succeed("cat /srv/work/after-restart")
+          # Intercepted, through the CA the session was opened with: the
+          # restarted daemon has the same one, from the session's record.
+          assert machine.succeed("cat /srv/work/api-before-restart").strip() == "upstream-api-ok"
+          assert machine.succeed("cat /srv/work/api-after-restart").strip() == "upstream-api-ok"
           # One connection before the restarts, one after, both logged.
           assert len(lines_of("egress", name)) == 2, lines_of("egress", name)
 

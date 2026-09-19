@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/danielbodart/frisket/internal/control"
+	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/nsmount"
 	"github.com/danielbodart/frisket/internal/nsnet"
 )
 
@@ -106,12 +109,13 @@ func TestConnectBatchPutsTheRoutesLast(t *testing.T) {
 // fakeRoot records the steps a Steerer takes, in order, and fails the one it
 // is told to.
 type fakeRoot struct {
-	steps  []string
-	fail   string
-	held   []control.Status
-	links  string
-	rules  string
-	routes string
+	steps   []string
+	fail    string
+	held    []control.Status
+	links   string
+	rules   string
+	routes  string
+	mounted []nsmount.File
 }
 
 func (f *fakeRoot) steerer() *Steerer {
@@ -131,7 +135,16 @@ func (f *fakeRoot) steerer() *Steerer {
 			if f.fail == "daemon "+req.Op {
 				return control.Response{}, errors.New("refused")
 			}
-			return control.Response{Sessions: f.held, Closed: true}, nil
+			return control.Response{Sessions: f.held, Closed: true, CACert: []byte("the session's CA\n")}, nil
+		},
+		mount: func(mntns, dir string, files []nsmount.File) error {
+			step := "mount " + mntns + " " + dir
+			f.steps = append(f.steps, step)
+			if f.fail == "mount" {
+				return errors.New("failed")
+			}
+			f.mounted = files
+			return nil
 		},
 		run: func(_ context.Context, netns, stdin, program string, args ...string) (string, error) {
 			step := program + " " + strings.Join(args, " ")
@@ -152,14 +165,59 @@ func (f *fakeRoot) steerer() *Steerer {
 	}
 }
 
+// roots is a host CA bundle for a test: any certificate will do.
+func roots(t *testing.T) (path string, pem []byte) {
+	t.Helper()
+	ca, err := intercept.NewCA([]string{"root.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(t.TempDir(), "ca-bundle.crt")
+	if err := os.WriteFile(path, ca.CertPEM(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path, ca.CertPEM()
+}
+
+// The sandbox is given the CA the daemon made for its session, and the host's
+// roots with it; and without the roots nothing is made at all.
+func TestSteerGivesTheSandboxItsCAAndTheRootsWithIt(t *testing.T) {
+	p, _ := allFile().Plan()
+	rootsPath, rootsPEM := roots(t)
+	f := &fakeRoot{}
+	if err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, Session{Name: "s", Policy: "research", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		CACertFile:   "the session's CA\n",
+		CABundleFile: string(rootsPEM) + "the session's CA\n",
+	}
+	if len(f.mounted) != len(want) {
+		t.Fatalf("mounted %d files", len(f.mounted))
+	}
+	for _, m := range f.mounted {
+		if want[m.Name] != string(m.Data) {
+			t.Errorf("%s = %q, want %q", m.Name, m.Data, want[m.Name])
+		}
+	}
+
+	f = &fakeRoot{}
+	err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, Session{Name: "s", Policy: "research", Mntns: "/proc/1/ns/mnt", Roots: filepath.Join(t.TempDir(), "missing")})
+	if err == nil || len(f.steps) != 0 {
+		t.Fatalf("steer without the host's roots: %v, steps %v", err, f.steps)
+	}
+}
+
 func TestSteerInstallsRulesOnlyOnceTheDaemonHoldsTheListeners(t *testing.T) {
 	p, _ := allFile().Plan()
-	sess := Session{Name: "s", Policy: "research"}
+	rootsPath, _ := roots(t)
+	sess := Session{Name: "s", Policy: "research", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}
+	mount := "mount /proc/1/ns/mnt /etc/frisket"
 	for _, c := range []struct {
 		fail string
 		want []string
 	}{
-		{"", []string{"listeners", "daemon open", "ip -4 -batch -", "ip -6 -batch -", "nft -f -"}},
+		{"", []string{"listeners", "daemon open", "ip -4 -batch -", "ip -6 -batch -", "nft -f -", mount}},
 		// A workload that took the port first: no listener, so no rules.
 		{"listeners", []string{"listeners"}},
 		// The daemon refused (an unknown policy, say): no rules either.
@@ -167,6 +225,8 @@ func TestSteerInstallsRulesOnlyOnceTheDaemonHoldsTheListeners(t *testing.T) {
 		// The routing or the rules failed: the session they were for is closed.
 		{"ip -6 -batch -", []string{"listeners", "daemon open", "ip -4 -batch -", "ip -6 -batch -", "daemon close"}},
 		{"nft -f -", []string{"listeners", "daemon open", "ip -4 -batch -", "ip -6 -batch -", "nft -f -", "daemon close"}},
+		// A sandbox that cannot be given its CA is closed, not run without it.
+		{"mount", []string{"listeners", "daemon open", "ip -4 -batch -", "ip -6 -batch -", "nft -f -", mount, "daemon close"}},
 	} {
 		f := &fakeRoot{fail: c.fail}
 		err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, sess)
@@ -176,7 +236,7 @@ func TestSteerInstallsRulesOnlyOnceTheDaemonHoldsTheListeners(t *testing.T) {
 		if strings.Join(f.steps, ", ") != strings.Join(c.want, ", ") {
 			t.Errorf("failing %q: steps = %v, want %v", c.fail, f.steps, c.want)
 		}
-		if err != nil && c.fail != "nft -f -" && c.fail != "ip -6 -batch -" && !strings.Contains(err.Error(), "no rules were installed") {
+		if err != nil && c.fail != "nft -f -" && c.fail != "ip -6 -batch -" && c.fail != "mount" && !strings.Contains(err.Error(), "no rules were installed") {
 			t.Errorf("failing %q: the error does not say no rules were installed: %v", c.fail, err)
 		}
 	}

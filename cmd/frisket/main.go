@@ -19,7 +19,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -27,7 +26,6 @@ import (
 	"time"
 
 	"github.com/danielbodart/frisket/internal/control"
-	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/internal/nsnet"
 	"github.com/danielbodart/frisket/internal/policy"
 	"github.com/danielbodart/frisket/internal/sdnotify"
@@ -41,22 +39,22 @@ var version = "dev"
 
 const usage = `frisket -- credentials on the wire, never in the sandbox
 
-  frisket serve -config FILE -state DIR -roots BUNDLE [-control PATH]
+  frisket serve -config FILE [-control PATH]
         The daemon. Holds every session's listeners from the host and serves
         each connection and query steered to them under the session's policy:
         DNS against the allowlist, egress to what that DNS resolved, and
-        interception for the routes' hosts. FILE holds the policies; DIR holds
-        the machine's CA, constrained to the intercepted hosts and made anew
-        when they change, and in DIR/public what a sandbox is given: the CA's
-        certificate, and ca-bundle.crt, BUNDLE with the CA after it. Under
-        systemd it is socket-activated, and keeps its sessions across a
-        restart in the service's file-descriptor store.
+        interception for the routes' hosts, with a CA of the session's own.
+        FILE holds the policies. Under systemd it is socket-activated, and
+        keeps its sessions -- and their CAs -- across a restart in the
+        service's file-descriptor store.
 
-  frisket steer -netns PATH -steering FILE -name NAME -policy POLICY [-param K=V]...
+  frisket steer -netns PATH -mntns PATH -roots BUNDLE -steering FILE -name NAME -policy POLICY [-param K=V]...
         Root's first step, from a launcher's hook: create the session's
-        listeners inside the network namespace at PATH, hand them to the daemon,
-        then install the policy routing and load the ruleset that steers to
-        them. Provisions NO egress.
+        listeners inside the network namespace, hand them to the daemon, then
+        install the policy routing and load the ruleset that steers to them.
+        Then mount the session's CA read-only at /etc/frisket in the mount
+        namespace: ca.crt, and ca-bundle.crt, BUNDLE with the CA after it.
+        Provisions NO egress.
 
   frisket connect -netns PATH -steering FILE -name NAME
         Root's second step: the service address on lo, and for the "all" set
@@ -137,15 +135,13 @@ func runServe(argv []string) error {
 	uid := fs.Int("control-uid", 0, "the only uid the control socket answers")
 	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
 	configPath := fs.String("config", "", "the policies, as the NixOS module writes them")
-	state := fs.String("state", "", "the daemon's state directory; the CA is made in ca/ inside it, and what sandboxes are given in public/")
-	roots := fs.String("roots", "", "the host's CA bundle, which public/ca-bundle.crt is made from")
 	var level slog.Level
 	fs.TextVar(&level, "log-level", slog.LevelInfo, "debug adds each intercepted request's headers, credentials described and never shown")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if *configPath == "" || *state == "" || *roots == "" {
-		return errors.New("-config, -state and -roots are all required")
+	if *configPath == "" {
+		return errors.New("-config is required")
 	}
 	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, &slog.HandlerOptions{Level: level}))
 
@@ -157,31 +153,11 @@ func runServe(argv []string) error {
 	if err != nil {
 		return err
 	}
-	// Constrained to every policy's intercepted hosts, and made anew when they
-	// change.
-	hosts, err := cfg.Intercepted()
-	if err != nil {
-		return err
-	}
-	ca, err := intercept.LoadOrCreateCA(filepath.Join(*state, "ca"), hosts)
-	if err != nil {
-		return err
-	}
-	if ca.Replaced() {
-		log.Warn("CA replaced: the intercepted hosts changed; sessions started before now trust the old CA until they are relaunched",
-			"hosts", ca.Hosts())
-	}
-	// Written before the daemon reports ready, as the CA is: a sandbox
-	// started after that finds both.
-	public := filepath.Join(*state, "public")
-	if err := intercept.WritePublic(public, ca.CertPEM(), *roots); err != nil {
-		return err
-	}
 	classifier, dialer, err := policy.Dialer()
 	if err != nil {
 		return err
 	}
-	policies, err := policy.Build(cfg, policy.Deps{CA: ca, Classifier: classifier, Dialer: dialer, Log: log})
+	policies, err := policy.Build(cfg, policy.Deps{Classifier: classifier, Dialer: dialer, Log: log})
 	if err != nil {
 		return err
 	}
@@ -232,7 +208,7 @@ func runServe(argv []string) error {
 	}
 	sort.Strings(names)
 	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored),
-		"policies", names, "public", public, "ca_hosts", ca.Hosts())
+		"policies", names)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -292,13 +268,15 @@ func runSteer(argv []string) error {
 	fs := flag.NewFlagSet("steer", flag.ContinueOnError)
 	s, netns, file, name := rootFlags(fs)
 	policy := fs.String("policy", "", "the policy the daemon applies to the session")
+	mntns := fs.String("mntns", "", "the sandbox's mount namespace, where the session's CA is put: /proc/<pid>/ns/mnt")
+	roots := fs.String("roots", "", "the host's CA bundle, which the session's bundle is made from")
 	ps := params{}
 	fs.Var(ps, "param", "a policy parameter, key=value; repeatable")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if *netns == "" || *file == "" || *name == "" || *policy == "" {
-		return errors.New("-netns, -steering, -name and -policy are all required")
+	if *netns == "" || *mntns == "" || *roots == "" || *file == "" || *name == "" || *policy == "" {
+		return errors.New("-netns, -mntns, -roots, -steering, -name and -policy are all required")
 	}
 	plan, err := steering.Load(*file)
 	if err != nil {
@@ -306,7 +284,7 @@ func runSteer(argv []string) error {
 	}
 	ctx, cancel := root(context.Background())
 	defer cancel()
-	return s.Steer(ctx, *netns, plan, steering.Session{Name: *name, Policy: *policy, Params: ps})
+	return s.Steer(ctx, *netns, plan, steering.Session{Name: *name, Policy: *policy, Params: ps, Mntns: *mntns, Roots: *roots})
 }
 
 func runConnect(argv []string) error {

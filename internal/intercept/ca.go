@@ -1,6 +1,7 @@
 package intercept
 
 import (
+	"bytes"
 	"container/list"
 	"crypto"
 	"crypto/ecdsa"
@@ -12,31 +13,20 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/fs"
 	"math/big"
 	"net"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
-// The CA's files, inside the directory LoadOrCreateCA is given.
 const (
-	CAKeyFile  = "ca.key"
-	CACertFile = "ca.crt"
-)
-
-// CABundleFile is the host's roots and the CA in one file, beside CACertFile
-// in the directory WritePublic writes.
-const CABundleFile = "ca-bundle.crt"
-
-const (
-	caLifetime = 10 * 365 * 24 * time.Hour
+	// A session's CA lasts longer than any session does. It is never written
+	// anywhere but the session's record, dies with the session, and caps its
+	// leaves' lifetimes -- so a CA that ended first would end the session's
+	// interception with it.
+	caLifetime = 365 * 24 * time.Hour
 	// A leaf lives a week and is re-minted a day before it ends, so no
 	// connection is ever handed a certificate about to expire under it.
 	leafLifetime = 7 * 24 * time.Hour
@@ -52,22 +42,22 @@ const (
 	DefaultLeafCacheSize = 256
 )
 
-// CA is the per-machine certificate authority sandboxes trust, and the leaf
-// certificates minted from it.
+// CA is one session's certificate authority, and the leaf certificates minted
+// from it.
 //
-// IT IS NAME-CONSTRAINED to the intercepted hosts (PLAN.md, decision 4): a
-// critical X.509 Name Constraints extension (RFC 5280, 4.2.1.10) permits
-// those DNS names and no IP address at all. So a stolen key can impersonate
-// only those hosts, and only to a sandbox -- it is generated here, never
-// leaves this machine, and is trusted nowhere else -- and a client rejects a
-// leaf frisket mints for any other name by its own mistake.
+// ONE PER SESSION (PLAN.md, decision 4). It is made when the session is
+// opened, trusted by that session alone, and its key exists in the daemon's
+// memory and the session's sealed record in systemd's fd store -- never in a
+// file. So a stolen key impersonates to one sandbox, for as long as it runs.
+//
+// IT IS NAME-CONSTRAINED to the session's intercepted hosts: a critical X.509
+// Name Constraints extension (RFC 5280, 4.2.1.10) permits those DNS names and
+// no IP address at all, so a client rejects a leaf frisket mints for any other
+// name by its own mistake.
 type CA struct {
 	cert    *x509.Certificate
 	certPEM []byte
 	key     crypto.Signer
-	// replaced is whether this start made a new CA in place of one for other
-	// hosts.
-	replaced bool
 
 	// Now is the clock leaves are minted against; tests move it.
 	Now func() time.Time
@@ -84,66 +74,128 @@ type leaf struct {
 	notAfter time.Time
 }
 
-// LoadOrCreateCA loads the CA from dir, constrained to hosts: creating it the
-// first time, and making a new one in its place when the one there is
-// constrained to any other set of hosts.
-//
-// A NEW CA IS A CHANGE OF TRUST FOR EVERY SANDBOX. A session already running
-// trusts the CA it was started with and fails verification against the new
-// one until it is relaunched -- accepted, because sessions are short-lived and
-// the set only changes when a policy intercepts a different host. The
-// certificate is the record of the set: it sits beside the key and carries the
-// constraints, so there is no second copy to disagree with it.
-//
-// It never regenerates a CA it cannot load. A CA that silently changed for
-// that reason would break trust for nothing, and the most likely reason a load
-// fails -- a key with permissions nobody set on purpose, one file of the two
-// missing -- is one the operator needs to see rather than have papered over.
-func LoadOrCreateCA(dir string, hosts []string) (*CA, error) {
-	dir = filepath.Clean(dir)
+// NewCA makes a CA constrained to hosts.
+func NewCA(hosts []string) (*CA, error) {
 	names, err := constrainedNames(hosts)
 	if err != nil {
 		return nil, err
 	}
-	// A replacement interrupted after the swap leaves the old CA here. Its key
-	// must not outlive it.
-	if err := os.RemoveAll(nextDir(dir)); err != nil {
-		return nil, fmt.Errorf("intercept: removing a previous CA: %w", err)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
 	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: serial(),
+		Subject: pkix.Name{
+			Organization: []string{"frisket"},
+			CommonName:   "frisket sandbox CA",
+		},
+		NotBefore:             now.Add(-backdate),
+		NotAfter:              now.Add(caLifetime),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		// It signs leaves and nothing else: no intermediate can be made under
+		// it, so the key is the only thing that can mint for a sandbox.
+		MaxPathLen:     0,
+		MaxPathLenZero: true,
+		KeyUsage:       x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	constrain(tmpl, names)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
+	}
+	return newCA(cert, key), nil
+}
 
-	keyPath := filepath.Join(dir, CAKeyFile)
-	certPath := filepath.Join(dir, CACertFile)
-	_, keyErr := os.Lstat(keyPath)
-	_, certErr := os.Lstat(certPath)
-	switch {
-	case keyErr == nil && certErr == nil:
-		ca, err := loadCA(keyPath, certPath)
-		if err != nil {
-			return nil, err
-		}
-		if constrainedTo(ca.cert, names) {
-			return ca, nil
-		}
-		return replaceCA(dir, names)
-	case errors.Is(keyErr, fs.ErrNotExist) && errors.Is(certErr, fs.ErrNotExist):
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("intercept: CA directory: %w", err)
-		}
-		if err := writeCA(dir, names); err != nil {
-			return nil, err
-		}
-		return loadCA(keyPath, certPath)
-	case keyErr != nil && !errors.Is(keyErr, fs.ErrNotExist):
-		return nil, fmt.Errorf("intercept: CA key: %w", keyErr)
-	case certErr != nil && !errors.Is(certErr, fs.ErrNotExist):
-		return nil, fmt.Errorf("intercept: CA certificate: %w", certErr)
-	default:
-		return nil, fmt.Errorf("intercept: %s has one of %s and %s but not the other; refusing to guess which to trust",
-			dir, CAKeyFile, CACertFile)
+func newCA(cert *x509.Certificate, key crypto.Signer) *CA {
+	return &CA{
+		cert:    cert,
+		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}),
+		key:     key,
+		Now:     time.Now,
+		max:     DefaultLeafCacheSize,
+		lru:     list.New(),
+		byKey:   map[string]*list.Element{},
 	}
 }
 
-func nextDir(dir string) string { return dir + ".next" }
+// Marshal is the CA as ParseCA reads it: the key and the certificate, PEM.
+// It is the key, so it goes where the key may go -- the session's record --
+// and nowhere else.
+func (ca *CA) Marshal() ([]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(ca.key)
+	if err != nil {
+		return nil, err
+	}
+	return append(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), ca.certPEM...), nil
+}
+
+// ParseCA reads back what Marshal wrote, for a session restored across a
+// restart: the same CA, so the sandbox's trust in it still holds.
+//
+// It refuses what could only mint leaves the sandbox rejects -- an expired
+// certificate, a certificate for another key -- because that failure would
+// surface in the sandbox, as a handshake error pointing nowhere near here.
+func ParseCA(b []byte) (*CA, error) {
+	kb, rest := pem.Decode(b)
+	if kb == nil || kb.Type != "PRIVATE KEY" {
+		return nil, errors.New("intercept: CA: no PEM PKCS#8 private key")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(kb.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("intercept: CA key: %w", err)
+	}
+	key, ok := parsed.(crypto.Signer)
+	if !ok {
+		return nil, errors.New("intercept: CA key cannot sign")
+	}
+	cb, rest := pem.Decode(rest)
+	if cb == nil || cb.Type != "CERTIFICATE" {
+		return nil, errors.New("intercept: CA: no PEM certificate after the key")
+	}
+	if len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("intercept: CA: trailing data after the certificate")
+	}
+	cert, err := x509.ParseCertificate(cb.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("intercept: CA certificate: %w", err)
+	}
+	if !cert.IsCA {
+		return nil, errors.New("intercept: CA certificate is not a CA")
+	}
+	if now := time.Now(); now.After(cert.NotAfter) {
+		return nil, fmt.Errorf("intercept: CA certificate expired at %s", cert.NotAfter.UTC().Format(time.RFC3339))
+	}
+	if !publicKeysEqual(cert.PublicKey, key.Public()) {
+		return nil, errors.New("intercept: CA certificate is not the key's")
+	}
+	return newCA(cert, key), nil
+}
+
+// Bundle is roots with the CA certificate after them: the one file of roots a
+// runtime whose setting REPLACES its own (SSL_CERT_FILE, REQUESTS_CA_BUNDLE)
+// is pointed at. Pointed at the CA alone, such a client trusts the
+// intercepted hosts and nothing else.
+func Bundle(roots, certPEM []byte) ([]byte, error) {
+	// A file of no certificates would make a bundle that trusts only the
+	// intercepted hosts, and every other name would fail inside the sandbox
+	// with an error that points nowhere near here.
+	if !x509.NewCertPool().AppendCertsFromPEM(roots) {
+		return nil, errors.New("intercept: the roots hold no PEM certificates")
+	}
+	out := make([]byte, 0, len(roots)+1+len(certPEM))
+	out = append(out, roots...)
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		out = append(out, '\n')
+	}
+	return append(out, certPEM...), nil
+}
 
 // constrainedNames is hosts normalised, without duplicates, in order: the
 // set's one spelling, so the same set always gives the same certificate
@@ -182,309 +234,13 @@ func constrain(tmpl *x509.Certificate, names []string) {
 	}
 }
 
-// constrainedTo reports whether cert carries exactly the constraints names
-// would give it, critical. A CA made before constraints, or for other hosts,
-// does not.
-func constrainedTo(cert *x509.Certificate, names []string) bool {
-	var want x509.Certificate
-	constrain(&want, names)
-	nets := func(ns []*net.IPNet) []string {
-		out := make([]string, len(ns))
-		for i, n := range ns {
-			out[i] = n.String()
-		}
-		return out
-	}
-	return cert.PermittedDNSDomainsCritical &&
-		slices.Equal(cert.PermittedDNSDomains, want.PermittedDNSDomains) &&
-		slices.Equal(cert.ExcludedDNSDomains, want.ExcludedDNSDomains) &&
-		slices.Equal(nets(cert.ExcludedIPRanges), nets(want.ExcludedIPRanges)) &&
-		len(cert.PermittedIPRanges) == 0 &&
-		len(cert.PermittedEmailAddresses)+len(cert.ExcludedEmailAddresses) == 0 &&
-		len(cert.PermittedURIDomains)+len(cert.ExcludedURIDomains) == 0
-}
-
-// replaceCA makes a CA for names beside dir and swaps it in whole.
-//
-// RENAME_EXCHANGE, so at every instant dir holds one complete CA -- the old
-// or the new, never the key of one and the certificate of the other, which a
-// crash between two renames of files would leave, and which the next start
-// would rightly refuse. The old CA ends up beside it and is removed; if that
-// is interrupted, the next start removes it.
-func replaceCA(dir string, names []string) (*CA, error) {
-	next := nextDir(dir)
-	if err := os.Mkdir(next, 0o700); err != nil {
-		return nil, fmt.Errorf("intercept: new CA directory: %w", err)
-	}
-	err := writeCA(next, names)
-	if err == nil {
-		err = syncDir(next)
-	}
-	if err != nil {
-		_ = os.RemoveAll(next)
-		return nil, err
-	}
-	if err := unix.Renameat2(unix.AT_FDCWD, next, unix.AT_FDCWD, dir, unix.RENAME_EXCHANGE); err != nil {
-		_ = os.RemoveAll(next)
-		return nil, fmt.Errorf("intercept: swapping in the new CA: %w", err)
-	}
-	if err := syncDir(filepath.Dir(dir)); err != nil {
-		return nil, fmt.Errorf("intercept: new CA: %w", err)
-	}
-	if err := os.RemoveAll(next); err != nil {
-		return nil, fmt.Errorf("intercept: removing the old CA: %w", err)
-	}
-	ca, err := loadCA(filepath.Join(dir, CAKeyFile), filepath.Join(dir, CACertFile))
-	if err != nil {
-		return nil, err
-	}
-	ca.replaced = true
-	return ca, nil
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
-
-// writeCA makes a new CA for names in dir, which exists and holds neither
-// file.
-func writeCA(dir string, names []string) error {
-	keyPath := filepath.Join(dir, CAKeyFile)
-	certPath := filepath.Join(dir, CACertFile)
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return err
-	}
-	host, _ := os.Hostname()
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber: serial(),
-		Subject: pkix.Name{
-			Organization: []string{"frisket"},
-			CommonName:   "frisket sandbox CA " + host,
-		},
-		NotBefore:             now.Add(-backdate),
-		NotAfter:              now.Add(caLifetime),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		// It signs leaves and nothing else: no intermediate can be made under
-		// it, so the key is the only thing that can mint for a sandbox.
-		MaxPathLen:     0,
-		MaxPathLenZero: true,
-		KeyUsage:       x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-	}
-	constrain(tmpl, names)
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
-	if err != nil {
-		return err
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		return err
-	}
-
-	// The key first, created exclusively and 0600 from the start -- never
-	// written and then chmodded, which leaves a window where it is readable.
-	// If the certificate write then fails, the key is removed, so the next
-	// start sees neither file rather than the half a CA refused above.
-	if err := writeExclusive(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		return fmt.Errorf("intercept: CA key: %w", err)
-	}
-	if err := writeExclusive(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
-		_ = os.Remove(keyPath)
-		return fmt.Errorf("intercept: CA certificate: %w", err)
-	}
-	return nil
-}
-
-// writeExclusive creates path with exactly mode, whatever the umask: the
-// daemon's unit sets UMask=0077, which would leave the certificate 0600 and
-// unreadable by a sandbox whose uid is not the daemon's. The chmod narrows
-// nothing and widens only to mode, before anything is written.
-func writeExclusive(path string, data []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-	if err != nil {
-		return err
-	}
-	if err := f.Chmod(mode); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	return f.Close()
-}
-
-// WritePublic writes what a sandbox is given into dir: the CA certificate,
-// and CABundleFile -- the roots at rootsPath with the CA after them, for a
-// runtime whose setting REPLACES its roots rather than adding to them
-// (SSL_CERT_FILE, REQUESTS_CA_BUNDLE), which with the CA alone would trust
-// nothing but the intercepted hosts.
-//
-// dir IS BOUND WHOLE INTO SANDBOXES, so it holds these two files and nothing
-// else, and is never the CA's own directory: a directory with the key in it is
-// refused. Each file is replaced by rename, so a sandbox reading it through
-// the bind sees the old file or the new one, never half of either.
-func WritePublic(dir string, certPEM []byte, rootsPath string) error {
-	roots, err := os.ReadFile(rootsPath)
-	if err != nil {
-		return fmt.Errorf("intercept: roots: %w", err)
-	}
-	// A file of no certificates would make a bundle that trusts only the
-	// intercepted hosts, and every other name would fail inside the sandbox
-	// with an error that points nowhere near here.
-	if !x509.NewCertPool().AppendCertsFromPEM(roots) {
-		return fmt.Errorf("intercept: roots %s holds no PEM certificates", rootsPath)
-	}
-	if len(roots) > 0 && roots[len(roots)-1] != '\n' {
-		roots = append(roots, '\n')
-	}
-
-	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("intercept: public directory: %w", err)
-	}
-	st, err := os.Lstat(dir)
-	if err != nil {
-		return fmt.Errorf("intercept: public directory: %w", err)
-	}
-	if !st.IsDir() {
-		return fmt.Errorf("intercept: public directory %s is not a directory", dir)
-	}
-	if _, err := os.Lstat(filepath.Join(dir, CAKeyFile)); !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("intercept: %s has %s in it, and is bound into sandboxes; it must be a directory of its own", dir, CAKeyFile)
-	}
-	// 0755 whatever the umask, as the files are 0644: a workload of any uid
-	// reads them through the bind.
-	if err := os.Chmod(dir, 0o755); err != nil {
-		return fmt.Errorf("intercept: public directory: %w", err)
-	}
-
-	for _, f := range []struct {
-		name string
-		data []byte
-	}{
-		{CABundleFile, append(roots, certPEM...)},
-		{CACertFile, certPEM},
-	} {
-		if err := replaceFile(dir, f.name, f.data, 0o644); err != nil {
-			return fmt.Errorf("intercept: %s: %w", f.name, err)
-		}
-	}
-	return syncDir(dir)
-}
-
-// replaceFile writes data to name in dir through a temporary beside it and a
-// rename. The temporary has a fixed name, so one left by an interrupted write
-// is removed by the next rather than accumulating.
-func replaceFile(dir, name string, data []byte, mode os.FileMode) error {
-	tmp := filepath.Join(dir, "."+name+".tmp")
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	if err := writeExclusive(tmp, data, mode); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
-}
-
-func loadCA(keyPath, certPath string) (*CA, error) {
-	// Refuse a key anyone else can read, as ssh does, rather than use it:
-	// a readable CA key is every sandbox's trust handed to whoever read it.
-	// Lstat, so a symlink to somewhere else is refused too rather than
-	// followed to a file whose permissions were never checked.
-	st, err := os.Lstat(keyPath)
-	if err != nil {
-		return nil, fmt.Errorf("intercept: CA key: %w", err)
-	}
-	if !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("intercept: CA key %s is not a regular file", keyPath)
-	}
-	if perm := st.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("intercept: CA key %s has mode %04o; it must not be readable or writable by group or others", keyPath, perm)
-	}
-
-	keyPEM, err := os.ReadFile(keyPath)
-	if err != nil {
-		return nil, fmt.Errorf("intercept: CA key: %w", err)
-	}
-	kb, _ := pem.Decode(keyPEM)
-	if kb == nil || kb.Type != "PRIVATE KEY" {
-		return nil, fmt.Errorf("intercept: CA key %s is not a PEM PKCS#8 private key", keyPath)
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(kb.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("intercept: CA key %s: %w", keyPath, err)
-	}
-	key, ok := parsed.(crypto.Signer)
-	if !ok {
-		return nil, fmt.Errorf("intercept: CA key %s cannot sign", keyPath)
-	}
-
-	certPEM, err := os.ReadFile(certPath)
-	if err != nil {
-		return nil, fmt.Errorf("intercept: CA certificate: %w", err)
-	}
-	cb, _ := pem.Decode(certPEM)
-	if cb == nil || cb.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("intercept: CA certificate %s is not a PEM certificate", certPath)
-	}
-	cert, err := x509.ParseCertificate(cb.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("intercept: CA certificate %s: %w", certPath, err)
-	}
-	if !cert.IsCA {
-		return nil, fmt.Errorf("intercept: CA certificate %s is not a CA", certPath)
-	}
-	// An expired CA would load and mint leaves that every sandbox refuses.
-	// Replacing it is a decision -- every sandbox's trust changes -- so it is
-	// refused here, where it can be seen, and not regenerated.
-	if now := time.Now(); now.After(cert.NotAfter) {
-		return nil, fmt.Errorf("intercept: CA certificate %s expired at %s; remove both files to generate a new CA, and redistribute it",
-			certPath, cert.NotAfter.UTC().Format(time.RFC3339))
-	}
-	// The pair must be a pair. A certificate for some other key would load,
-	// mint leaves no sandbox can verify, and fail every connection with an
-	// error that points at the sandbox instead of here.
-	if !publicKeysEqual(cert.PublicKey, key.Public()) {
-		return nil, fmt.Errorf("intercept: %s is not the certificate for %s", certPath, keyPath)
-	}
-
-	return &CA{
-		cert:    cert,
-		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}),
-		key:     key,
-		Now:     time.Now,
-		max:     DefaultLeafCacheSize,
-		lru:     list.New(),
-		byKey:   map[string]*list.Element{},
-	}, nil
-}
-
 func publicKeysEqual(a, b crypto.PublicKey) bool {
 	ae, ok := a.(interface{ Equal(crypto.PublicKey) bool })
 	return ok && ae.Equal(b)
 }
 
-// CertPEM is the CA certificate, for distribution to sandboxes. It is the one
-// thing a sandbox is told (PLAN.md): which authority to trust.
+// CertPEM is the CA certificate, for the sandbox. It is the one thing a
+// sandbox is told (PLAN.md): which authority to trust.
 func (ca *CA) CertPEM() []byte { return append([]byte(nil), ca.certPEM...) }
 
 // Certificate is the parsed CA certificate.
@@ -494,14 +250,10 @@ func (ca *CA) Certificate() *x509.Certificate { return ca.cert }
 func (ca *CA) Hosts() []string { return slices.Clone(ca.cert.PermittedDNSDomains) }
 
 // Permits reports whether host is one of the names the CA was made for. A
-// route for any other host would get a leaf every client rejects.
+// leaf for any other host is one every client rejects.
 func (ca *CA) Permits(host string) bool {
 	return slices.Contains(ca.cert.PermittedDNSDomains, normaliseHost(host))
 }
-
-// Replaced reports whether this start made the CA in place of one for other
-// hosts: sessions started before it trust the old one until relaunched.
-func (ca *CA) Replaced() bool { return ca.replaced }
 
 // SetCacheSize changes the bound on minted leaves held.
 func (ca *CA) SetCacheSize(n int) {

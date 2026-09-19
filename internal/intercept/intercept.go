@@ -4,7 +4,7 @@
 // The sandbox connected to what it believes is, say, api.github.com: frisket's
 // DNS answered that name with the session's service address, and the kernel
 // steered the connection here. frisket completes the handshake AS that name,
-// with a leaf minted from the per-machine CA the sandbox trusts, reads the
+// with a leaf minted from the session's own CA, the one it trusts, reads the
 // request, checks it against the route's scope, replaces whatever credential
 // the sandbox sent with the real one, and forwards it over a fresh TLS
 // connection to the real upstream, verified as any client would verify it.
@@ -69,6 +69,7 @@ const (
 const (
 	ReasonNoSNI           = "no SNI"
 	ReasonUnknownName     = "not a route"
+	ReasonNotInCA         = "not in the session's CA"
 	ReasonMisdirected     = "Host does not match SNI"
 	ReasonNoCredential    = "credential unavailable"
 	ReasonStaleCredential = "credential expired"
@@ -76,9 +77,6 @@ const (
 
 // Config is everything an Interceptor needs.
 type Config struct {
-	// CA mints the certificates sandboxes see. Shared across sessions, so a
-	// name is minted once per machine rather than once per sandbox.
-	CA *CA
 	// Routes are the hosts intercepted. A name not here is refused at the
 	// handshake.
 	Routes []Route
@@ -93,10 +91,10 @@ type Config struct {
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// Interceptor is a steer.Handler for connections to the service address's
-// HTTPS port.
+// Interceptor is one policy's routes and the HTTP server behind them. For
+// gives each session the steer.Handler for its connections to the service
+// address's HTTPS port.
 type Interceptor struct {
-	ca     *CA
 	routes map[string]*route
 	log    *slog.Logger
 	now    func() time.Time
@@ -118,13 +116,10 @@ type route struct {
 	tr       *http.Transport
 }
 
-var _ steer.Handler = (*Interceptor)(nil)
+var _ steer.Handler = sessionHandler{}
 
 // New builds an Interceptor and starts its HTTP server. Close stops it.
 func New(cfg Config) (*Interceptor, error) {
-	if cfg.CA == nil {
-		return nil, errors.New("intercept: no CA")
-	}
 	if cfg.Log == nil {
 		return nil, errors.New("intercept: no logger")
 	}
@@ -137,7 +132,6 @@ func New(cfg Config) (*Interceptor, error) {
 	}
 
 	i := &Interceptor{
-		ca:      cfg.CA,
 		routes:  map[string]*route{},
 		log:     cfg.Log,
 		now:     cfg.Now,
@@ -153,9 +147,6 @@ func New(cfg Config) (*Interceptor, error) {
 			return nil, fmt.Errorf("intercept: %w", err)
 		}
 		host := normaliseHost(r.Host)
-		if !cfg.CA.Permits(host) {
-			return nil, fmt.Errorf("intercept: route %s: the CA is not constrained to %s, so every client would reject its certificate", r.Name, host)
-		}
 		if _, dup := i.routes[host]; dup {
 			return nil, fmt.Errorf("intercept: two routes for %s", host)
 		}
@@ -259,14 +250,33 @@ func (i *Interceptor) Close() error {
 	return err
 }
 
-// CACertPEM is the certificate sandboxes must trust.
-func (i *Interceptor) CACertPEM() []byte { return i.ca.CertPEM() }
+// Hosts is the routes' hosts: what a session's CA is constrained to.
+func (i *Interceptor) Hosts() []string {
+	out := make([]string, 0, len(i.routes))
+	for h := range i.routes {
+		out = append(out, h)
+	}
+	return out
+}
 
-// ServeConn terminates TLS on a steered connection and hands it to the HTTP
+// For is the handler for one session's connections: the routes are the
+// policy's, the certificates are minted from ca, the session's own.
+func (i *Interceptor) For(ca *CA) steer.Handler {
+	return sessionHandler{i: i, ca: ca}
+}
+
+type sessionHandler struct {
+	i  *Interceptor
+	ca *CA
+}
+
+func (h sessionHandler) ServeConn(ctx context.Context, c *steer.Conn) { h.i.serveConn(ctx, c, h.ca) }
+
+// serveConn terminates TLS on a steered connection and hands it to the HTTP
 // server, returning when the connection is finished. The session's slot is
 // held for exactly that long.
-func (i *Interceptor) ServeConn(ctx context.Context, c *steer.Conn) {
-	ic := &interceptedConn{Conn: c, session: c.Session, id: c.ID, dst: c.Orig, done: make(chan struct{})}
+func (i *Interceptor) serveConn(ctx context.Context, c *steer.Conn, ca *CA) {
+	ic := &interceptedConn{Conn: c, session: c.Session, id: c.ID, dst: c.Orig, ca: ca, done: make(chan struct{})}
 	defer ic.Close()
 
 	tc := tls.Server(ic, i.tlsConfig)
@@ -313,7 +323,17 @@ func (i *Interceptor) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certifica
 	if _, ok := i.routes[name]; !ok {
 		return nil, &refusal{name: name, reason: ReasonUnknownName}
 	}
-	return i.ca.Leaf(name)
+	// The connection the handshake is on is the session's, and so is the CA
+	// it carries. One made before a route was added does not permit its
+	// host, and a leaf from it is one the client would reject.
+	ic, ok := hello.Conn.(*interceptedConn)
+	if !ok {
+		return nil, fmt.Errorf("intercept: a handshake on a %T, not a session's connection", hello.Conn)
+	}
+	if !ic.ca.Permits(name) {
+		return nil, &refusal{name: name, reason: ReasonNotInCA}
+	}
+	return ic.ca.Leaf(name)
 }
 
 type refusal struct{ name, reason string }
@@ -677,6 +697,7 @@ type interceptedConn struct {
 	session  string
 	id       uint64
 	dst      netip.AddrPort
+	ca       *CA
 	route    *route
 	requests atomic.Int64
 	done     chan struct{}

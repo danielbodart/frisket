@@ -24,6 +24,13 @@ type Handlers struct {
 	Intercept steer.Handler
 	// DNS gets every steered datagram, and every TCP connection to port 53.
 	DNS DNSHandler
+	// Authority is the session's CA as the policy serialises it: kept in the
+	// session's record, and given back to Handlers when the session is
+	// restored, so a restored session keeps the CA its sandbox trusts. It is
+	// the key, so it goes nowhere else.
+	Authority []byte
+	// CACert is that CA's certificate, PEM: what root puts in the sandbox.
+	CACert []byte
 }
 
 // DNSHandler answers DNS over both transports.
@@ -36,14 +43,20 @@ type DNSHandler interface {
 // a handler needs to know about its session -- the policy's parameters, the
 // service address, the session's name for its log lines -- is in s, fixed by
 // root at creation and never asserted by the client (PLAN.md decision 8).
+//
+// authority is nil for a new session, and the policy makes it a CA; for a
+// session restored across a restart it is the Authority an earlier call
+// returned, and the policy uses that CA again.
 type Policy interface {
-	Handlers(s control.Session, log *slog.Logger) (Handlers, error)
+	Handlers(s control.Session, authority []byte, log *slog.Logger) (Handlers, error)
 }
 
 // PolicyFunc adapts a function to Policy.
-type PolicyFunc func(s control.Session, log *slog.Logger) (Handlers, error)
+type PolicyFunc func(s control.Session, authority []byte, log *slog.Logger) (Handlers, error)
 
-func (f PolicyFunc) Handlers(s control.Session, log *slog.Logger) (Handlers, error) { return f(s, log) }
+func (f PolicyFunc) Handlers(s control.Session, authority []byte, log *slog.Logger) (Handlers, error) {
+	return f(s, authority, log)
+}
 
 // Dispatch is the one routing rule, and it routes by DESTINATION alone -- the
 // address the client dialled, which TPROXY left on the packet and the kernel

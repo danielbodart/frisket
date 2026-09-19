@@ -162,9 +162,11 @@ func (d *Daemon) handle(c *net.UnixConn) {
 			resp.Error = "open without a session"
 			break
 		}
-		if err := d.Open(*req.Session, files); err != nil {
+		cert, err := d.Open(*req.Session, files)
+		if err != nil {
 			resp.Error = err.Error()
 		}
+		resp.CACert = cert
 	case control.OpClose:
 		control.CloseAll(files)
 		closed, err := d.Close(req.Name)
@@ -213,7 +215,10 @@ func (d *Daemon) checkPeer(c *net.UnixConn) error {
 // Stored in the fd store BEFORE it is served and before the caller is told it
 // exists -- so the caller's next step, the rules, never lands on a session a
 // crash could lose.
-func (d *Daemon) Open(info control.Session, files []*os.File) (err error) {
+//
+// Returns the certificate of the session's CA, made here, for the caller to
+// put in the sandbox.
+func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, err error) {
 	defer func() {
 		if err != nil {
 			control.CloseAll(files)
@@ -221,28 +226,28 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (err error) {
 		}
 	}()
 	if err := info.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 	policy, ok := d.Policies[info.Policy]
 	if !ok {
-		return fmt.Errorf("session %s: no policy named %q", info.Name, info.Policy)
+		return nil, fmt.Errorf("session %s: no policy named %q", info.Name, info.Policy)
 	}
 	specs, err := parseSpecs(info.Listeners)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(files) != len(specs) {
-		return fmt.Errorf("session %s: %d descriptors for %d listeners", info.Name, len(files), len(specs))
+		return nil, fmt.Errorf("session %s: %d descriptors for %d listeners", info.Name, len(files), len(specs))
 	}
 
 	d.mu.Lock()
 	if d.sessions == nil {
 		d.mu.Unlock()
-		return errors.New("frisket is stopping")
+		return nil, errors.New("frisket is stopping")
 	}
 	if _, dup := d.sessions[info.Name]; dup {
 		d.mu.Unlock()
-		return fmt.Errorf("session %s is already open", info.Name)
+		return nil, fmt.Errorf("session %s is already open", info.Name)
 	}
 	// Reserved while it is being built, so two opens of one name cannot both
 	// get past the check above.
@@ -264,25 +269,31 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (err error) {
 	infos := make([]sockInfo, len(specs))
 	for i, spec := range specs {
 		if infos[i], err = inspect(files[i]); err != nil {
-			return fmt.Errorf("session %s: %s: %w", info.Name, spec, err)
+			return nil, fmt.Errorf("session %s: %s: %w", info.Name, spec, err)
 		}
 		if err := infos[i].matches(spec); err != nil {
-			return fmt.Errorf("session %s: %w", info.Name, err)
+			return nil, fmt.Errorf("session %s: %w", info.Name, err)
 		}
 	}
 	if err := sameForeignNamespace(specs, infos, d.own); err != nil {
-		return fmt.Errorf("session %s: %w", info.Name, err)
+		return nil, fmt.Errorf("session %s: %w", info.Name, err)
 	}
 
-	meta, err := newRecord(info)
+	// The handlers before the record, because the record carries the CA the
+	// policy makes with them.
+	h, err := d.handlers(info, policy, nil)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	meta, err := newRecord(info, h.Authority)
+	if err != nil {
+		return nil, err
 	}
 	stored := false
 	if d.Notify != nil {
 		if err := d.Notify.Store(info.Name, append(append([]*os.File{}, files...), meta)...); err != nil {
 			meta.Close()
-			return fmt.Errorf("session %s: storing its listeners with systemd: %w", info.Name, err)
+			return nil, fmt.Errorf("session %s: storing its listeners with systemd: %w", info.Name, err)
 		}
 		stored = true
 	}
@@ -294,15 +305,15 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (err error) {
 		if stored {
 			_ = d.Notify.Remove(info.Name)
 		}
-		return fmt.Errorf("session %s: %w", info.Name, err)
+		return nil, fmt.Errorf("session %s: %w", info.Name, err)
 	}
 	s := &session{info: info, log: d.Log, socks: socks, meta: meta}
-	if err := d.serve(s, policy); err != nil {
+	if err := d.serve(s, h); err != nil {
 		s.closeAll(closeWait)
 		if stored {
 			_ = d.Notify.Remove(info.Name)
 		}
-		return err
+		return nil, err
 	}
 	d.Log.Info("session opened",
 		"session", info.Name,
@@ -312,18 +323,26 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (err error) {
 		"listeners", info.Listeners,
 		"stored", stored,
 	)
-	return nil
+	return h.CACert, nil
 }
 
-// serve builds the session's handlers and starts it.
-func (d *Daemon) serve(s *session, policy Policy) error {
-	h, err := policy.Handlers(s.info, d.Log)
+// handlers asks the policy for the session's handlers and its CA.
+func (d *Daemon) handlers(info control.Session, policy Policy, authority []byte) (Handlers, error) {
+	h, err := policy.Handlers(info, authority, d.Log)
 	if err != nil {
-		return fmt.Errorf("session %s: policy %s: %w", s.info.Name, s.info.Policy, err)
+		return Handlers{}, fmt.Errorf("session %s: policy %s: %w", info.Name, info.Policy, err)
 	}
 	if h.Egress == nil || h.Intercept == nil || h.DNS == nil {
-		return fmt.Errorf("session %s: policy %s has no handler for egress, interception or DNS", s.info.Name, s.info.Policy)
+		return Handlers{}, fmt.Errorf("session %s: policy %s has no handler for egress, interception or DNS", info.Name, info.Policy)
 	}
+	if len(h.Authority) == 0 || len(h.CACert) == 0 {
+		return Handlers{}, fmt.Errorf("session %s: policy %s gave the session no CA", info.Name, info.Policy)
+	}
+	return h, nil
+}
+
+// serve starts the session with its handlers.
+func (d *Daemon) serve(s *session, h Handlers) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.sessions == nil {
@@ -433,7 +452,7 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 	if meta == nil {
 		return errors.New("no session record")
 	}
-	info, err := readRecord(meta)
+	info, authority, err := readRecord(meta)
 	if err != nil {
 		meta.Close()
 		return err
@@ -483,6 +502,19 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 	for i := range files {
 		files[i] = nil
 	}
+	// A record from before sessions had CAs of their own: the sandbox trusts
+	// a CA this daemon does not have, so the policy makes a new one that
+	// nothing in the sandbox trusts. Everything but interception still works,
+	// and the session is kept rather than cut off.
+	if len(authority) == 0 {
+		d.Log.Warn("session restored without its CA: its intercepted hosts fail until it is relaunched", "session", name)
+	}
+	h, err := d.handlers(info, policy, authority)
+	if err != nil {
+		control.CloseAll(ordered)
+		meta.Close()
+		return err
+	}
 	socksHeld, err := adoptSockets(specs, ordered, d.own)
 	if err != nil {
 		meta.Close()
@@ -492,7 +524,7 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 	d.mu.Lock()
 	d.sessions[name] = nil
 	d.mu.Unlock()
-	if err := d.serve(s, policy); err != nil {
+	if err := d.serve(s, h); err != nil {
 		s.closeAll(closeWait)
 		d.mu.Lock()
 		delete(d.sessions, name)

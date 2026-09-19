@@ -109,6 +109,9 @@ type Response struct {
 	Error    string   `json:"error,omitempty"`
 	Closed   bool     `json:"closed,omitempty"` // OpClose: false means there was nothing to close
 	Sessions []Status `json:"sessions,omitempty"`
+	// CACert is the session's CA certificate, PEM (OpOpen): what root puts in
+	// the sandbox for it to trust. Public; the key never leaves the daemon.
+	CACert []byte `json:"caCert,omitempty"`
 }
 
 // ValidName refuses a name that cannot be an fd store name or a log field:

@@ -120,40 +120,41 @@ the wire. No per-tool base URL, no placeholder token, no `insteadOf`, no
 `HF_ENDPOINT`, no undocumented environment variables, and no gap for the
 endpoints a tool hard-codes.
 
-- The certificate authority is generated per machine, held by frisket, and
-  trusted only inside sandboxes. It is name-constrained: a critical X.509 Name
-  Constraints extension (RFC 5280 §4.2.1.10) permits the hosts intercepted
-  across all policies and no IP address — X.509 admits the names below a
-  permitted name too, and cannot say less. That limits a stolen key to
-  impersonating those hosts, to a sandbox, and it makes a client reject a leaf
-  frisket mints for any other name by its own mistake. The daemon makes it on
-  first start in its state directory, and makes a new one, swapped in whole, on
-  the first start after the set of intercepted hosts changes; the certificate
-  carries the set, so it is the record the change is detected against. A
-  process that has already loaded the old CA fails verification of its
-  intercepted hosts until it restarts — accepted, because sessions are
-  short-lived and the set changes only when a policy does. The key is
-  `0600`, created exclusively, and never leaves the state directory.
-- What a sandbox is given is a directory of its own, `public/` beside the CA's,
-  holding nothing else: `ca.crt`, and `ca-bundle.crt`, the host's
-  `security.pki.caBundle` with the CA appended. The bundle is frisket's to
-  make because the CA exists only at runtime, and it is needed because most
-  runtimes' settings (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`)
-  replace their roots rather than add to them: pointed at the CA alone, a
-  client trusts the intercepted hosts and nothing else. The daemon rewrites
-  both on every start, before it reports ready, each by rename; the directory
-  is `0755` and the files `0644` whatever its umask, so a workload of any uid
-  reads them, and it refuses a directory with the key in it. The flong adapter
-  binds the directory at `/etc/frisket`, read-only, through the container's
-  declared `bindMounts` — the files belong to the user whose uid the workload
-  usually shares, and a read-only bind is what stops that uid rewriting them.
-  A directory rather than the files, so a replacement by rename reaches a
-  running session. A session started before the daemon ever has finds nothing
-  at the bind's source, and nspawn refuses to start it. Because trusting the
-  CA is part of the mechanism, not a choice, the adapter also exports every
-  variable the common runtimes read their roots from, pointing at the bundle —
-  the set a Claude Code web session exports — each a default a container can
-  override. Java, which wants a PKCS#12 truststore, is not covered.
+- Every session has a certificate authority of its own, made by the daemon
+  when the session opens and trusted by that sandbox alone. It is
+  name-constrained: a critical X.509 Name Constraints extension (RFC 5280
+  §4.2.1.10) permits the session's policy's route hosts and no IP address —
+  X.509 admits the names below a permitted name too, and cannot say less. So a
+  stolen key impersonates those hosts, to one sandbox, while it runs; and a
+  client rejects a leaf frisket mints for any other name by its own mistake.
+  The key is in the daemon's memory and in the session's sealed record in
+  systemd's fd store, and nowhere else — never on disk. The record is how a
+  session keeps its CA across a restart of the daemon, and the CA ends with
+  the session. A route added to a policy is intercepted in sessions opened
+  after the change; one already running has a CA that cannot vouch for the new
+  host, and its handshakes for it are refused and logged until it is
+  relaunched.
+- The CA reaches the sandbox as a mount. `frisket steer`, root in the
+  launcher's hook, takes the certificate from the daemon's answer to its
+  open, builds a tmpfs from the host — `ca.crt`, and `ca-bundle.crt`, the
+  host's roots with the CA appended — makes it read-only, enters the
+  sandbox's mount namespace and attaches it at `/etc/frisket`. The bundle is
+  needed because most runtimes' settings (`SSL_CERT_FILE`,
+  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`) replace their roots rather than add
+  to them: pointed at the CA alone, a client trusts the intercepted hosts and
+  nothing else. Nothing is written on the host, so there is nothing to clean
+  up: the mount goes with the namespace, however the session ends. It is
+  made after nspawn has built the container's filesystem and before the
+  payload starts — measured, the mount tree is complete by the time the hook
+  finds the leader — by root, in a namespace the initial user namespace owns,
+  so the workload can neither write through it nor unmount or remount it,
+  and a user namespace of its own gets it locked. A sandbox that cannot be
+  given its CA is closed rather than run distrusting it. Because trusting
+  the CA is part of the mechanism, not a choice, the flong adapter also
+  exports every variable the common runtimes read their roots from, pointing
+  at the bundle — the set a Claude Code web session exports — each a default
+  a container can override. Java, which wants a PKCS#12 truststore, is not
+  covered.
 - Which hosts are intercepted is decided by frisket's DNS: an intercepted name
   resolves to frisket's service address. There is no second list to keep.
 - Clients that pin certificates are spliced through, by name, and get no
@@ -450,12 +451,12 @@ host                                         sandbox network namespace
 ----                                         -------------------------
 frisket serve                                nftables and policy routing
   control.sock <-- root: open, close           (root, from the host, after start)
-  /var/lib/frisket/ca/  (key never leaves)     mark, route to lo, tproxy --> 127.0.0.1
-  /var/lib/frisket/public/  -- bound ro ------> /etc/frisket: ca.crt, ca-bundle.crt
-  per session, in systemd's fd store:                             ^         ^
+  per session, in systemd's fd store:          mark, route to lo, tproxy --> 127.0.0.1
     listeners  -------- held from here, created in there ---------+---------+
-    record (sealed memfd)                        (one TCP, one DNS; the workload
+    record (sealed memfd), with its CA's key     (one TCP, one DNS; the workload
                                                   has nothing of ours to talk to)
+frisket steer (root)  -- tmpfs, ro ----------> /etc/frisket: ca.crt, ca-bundle.crt
+                                               (sandbox mount namespace)
 ```
 
 ### Components
@@ -720,8 +721,9 @@ holds nothing private to read out through them.
 **Built: the base capability, proven end to end.** Steering both sets with
 TPROXY, the daemon and its sessions across restarts, and the flong adapter;
 egress with the structural classifier, `Dialer.Control` and the session's
-resolved set; DNS with the allowlist; and interception with the per-machine CA,
-name-constrained to the intercepted hosts, leaves minted per name, and one generic route adding a credential from a host
+resolved set; DNS with the allowlist; and interception with a CA per session,
+name-constrained to its policy's route hosts and mounted into the sandbox,
+leaves minted per name, and one generic route adding a credential from a host
 file on the wire. The VM test shows the credential reach the upstream and
 appear nowhere in the sandbox.
 
@@ -844,14 +846,15 @@ node's address can be used.
 **flong** — generic, agent-agnostic, with a plan of its own in that
 repository. What frisket uses from it: `postStart`, a root hook that runs
 after the namespace exists with the ordering contract above; `postStop`, called
-from both the clean and the killed path; the container declaration's
-`bindMounts`, which flong reads as data, for the public directory, read-only
-at a destination unlike its source; the container's `environment.variables`,
-which the payload inherits, for the variables that point at the bundle; `path`, for the tools the hooks run; the capability flags as defence in depth; and
-`network` — pasta for a private session.
+from both the clean and the killed path; `$leader`, whose mount namespace the
+CA is mounted into; the container's `environment.variables`, which the
+payload inherits, for the variables that point at the bundle; `path`, for the
+tools the hooks run; the capability flags as defence in depth; and `network` —
+pasta for a private session.
 
-Two properties frisket depends on that are flong's to keep: the namespace is
-owned by the initial user namespace, and egress is provisioned last.
+Three properties frisket depends on that are flong's to keep: the namespace is
+owned by the initial user namespace, egress is provisioned last, and the
+payload does not start until the hook returns.
 
 **nix-config** — policy, and the mounts the target state removes:
 

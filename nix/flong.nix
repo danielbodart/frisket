@@ -19,12 +19,11 @@
 # Each frisket step refuses to run out of turn, so a snippet that gets this
 # wrong fails the launch rather than leaving a session unsteered.
 #
-# And the daemon's public files -- the CA certificate and the bundle, the
-# host's roots with the CA after them -- are bound at /etc/frisket, read-only,
-# into every session of the launcher's container, through the container's own
-# declaration because the path is known at evaluation. The container exports
-# every variable the common runtimes read their roots from, pointing at the
-# bundle, so a client trusts the intercepted hosts and every other host alike.
+# `frisket steer` also puts the session's own CA at /etc/frisket, on a
+# read-only tmpfs in the session's mount namespace: ca.crt, and ca-bundle.crt,
+# the host's roots with the CA after them. The container exports every
+# variable the common runtimes read their roots from, pointing at the bundle,
+# so a client trusts the intercepted hosts and every other host alike.
 self:
 { config, lib, pkgs, ... }:
 
@@ -117,25 +116,11 @@ in
   config = lib.mkIf (cfg.flong != { }) {
     services.frisket.enable = lib.mkDefault true;
 
-    # The daemon's own directory, read-only: the workload cannot write it
-    # through the bind, and a read-only bind cannot be made writable from
-    # inside. It holds the public files and nothing else -- never the key --
-    # 0755 and 0644, so a workload of any uid can read them. The directory
-    # and not the files, so a file the daemon replaces by rename is replaced
-    # in a running session too.
-    #
-    # The daemon writes it before it tells systemd it is ready, and keeps it
-    # across restarts; a session started before the daemon ever has -- so
-    # with nothing at the source -- is refused by nspawn, not started without.
-    #
     # The variables are defaults: a container that wants a runtime pointed
-    # elsewhere says so in its own declaration.
+    # elsewhere says so in its own declaration. They name /etc/frisket, which
+    # steer mounts in every session before its payload starts.
     containers = lib.mapAttrs'
       (name: _: lib.nameValuePair config.flong.${name}.container {
-        bindMounts."/etc/frisket" = {
-          hostPath = dirOf (toString cfg.caCertificate);
-          isReadOnly = true;
-        };
         config.environment.variables = lib.mapAttrs (_: lib.mkDefault) caVariables;
       })
       cfg.flong;
@@ -146,11 +131,13 @@ in
           # frisket itself, and the nft and ip it runs inside the namespace,
           # resolved on the host before it enters.
           path = [ cfg.package pkgs.nftables pkgs.iproute2 ];
-          # Listeners, handed over, and the rules. A failure here ends the
-          # session: flong kills the scope of a hook that exits non-zero.
+          # Listeners, handed over, the rules, and the session's CA in its
+          # mount namespace. A failure here ends the session: flong kills the
+          # scope of a hook that exits non-zero.
           postStart = lib.mkMerge [
             (lib.mkBefore ''
-              frisket steer ${control} -netns "$netns" -steering ${file} \
+              frisket steer ${control} -netns "$netns" -mntns "/proc/$leader/ns/mnt" \
+                -roots ${config.security.pki.caBundle} -steering ${file} \
                 -name "$machine" -policy ${lib.escapeShellArg s.policy} \
                 -param workspace="$workspace" ${paramFlags s}
             '')

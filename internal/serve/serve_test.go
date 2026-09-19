@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -152,11 +153,28 @@ type recorder struct {
 	egress    []netip.AddrPort
 	intercept []netip.AddrPort
 	block     chan struct{} // if set, egress holds the connection until closed
+	// authorities is what each Handlers call was given: nil for a new
+	// session, the stored CA for a restored one.
+	authorities [][]byte
+}
+
+func (r *recorder) given() [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.authorities)
 }
 
 func (r *recorder) policy() Policy {
-	return PolicyFunc(func(control.Session, *slog.Logger) (Handlers, error) {
+	return PolicyFunc(func(s control.Session, authority []byte, _ *slog.Logger) (Handlers, error) {
+		r.mu.Lock()
+		r.authorities = append(r.authorities, authority)
+		r.mu.Unlock()
+		if authority == nil {
+			authority = []byte("ca-of-" + s.Name)
+		}
 		return Handlers{
+			Authority: authority,
+			CACert:    []byte("cert-of-" + string(authority)),
 			Egress: steer.HandlerFunc(func(ctx context.Context, c *steer.Conn) {
 				r.mu.Lock()
 				r.egress = append(r.egress, c.Orig)
@@ -340,10 +358,16 @@ func TestASessionIsServedStoredAndClosedCompletely(t *testing.T) {
 	info, files, ln := listeners(t, "netless-1-2")
 	addr := ln.Addr().String()
 	_ = ln.Close() // the File is a dup; the daemon gets that one
-	if _, err := control.Call(context.Background(), f.path, control.Request{Op: control.OpOpen, Session: &info}, files); err != nil {
+	resp, err := control.Call(context.Background(), f.path, control.Request{Op: control.OpOpen, Session: &info}, files)
+	if err != nil {
 		t.Fatal(err)
 	}
 	control.CloseAll(files)
+	// The session's CA, made by the policy, and its certificate is the
+	// answer: what root puts in the sandbox.
+	if string(resp.CACert) != "cert-of-ca-of-netless-1-2" {
+		t.Errorf("open answered with CA certificate %q", resp.CACert)
+	}
 
 	if got := sd.held("netless-1-2"); got != 3 {
 		t.Errorf("systemd holds %d descriptors for the session, want its 2 listeners and its record", got)
@@ -393,7 +417,7 @@ func TestASessionIsServedStoredAndClosedCompletely(t *testing.T) {
 		return err == nil && len(st.Sessions) == 1 && st.Sessions[0].Descriptors == 4
 	})
 
-	resp, err := control.Call(context.Background(), f.path, control.Request{Op: control.OpClose, Name: "netless-1-2"}, nil)
+	resp, err = control.Call(context.Background(), f.path, control.Request{Op: control.OpClose, Name: "netless-1-2"}, nil)
 	if err != nil || !resp.Closed {
 		t.Fatalf("close: %+v %v", resp, err)
 	}
@@ -536,6 +560,34 @@ func TestARestartAdoptsTheStoredSessions(t *testing.T) {
 	if n := len(second.journal.lines(t, "session restored")); n != 1 {
 		t.Errorf("%d 'session restored' lines", n)
 	}
+	// And under the CA it was opened with, which is what its sandbox trusts.
+	if got := rec.given(); len(got) != 2 || got[0] != nil || string(got[1]) != "ca-of-netless-7-8" {
+		t.Errorf("the policy was given authorities %q, want none and then the session's own", got)
+	}
+}
+
+// A record from before sessions had CAs of their own is still restored --
+// everything but interception works -- and says what it lacks.
+func TestARecordWithoutACAIsRestoredAndSaysSo(t *testing.T) {
+	sd := newFakeSystemd()
+	info, files, ln := listeners(t, "netless-11-12")
+	_ = ln.Close()
+	meta, err := newRecord(info, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sd.Store("netless-11-12", append(files, meta)...); err != nil {
+		t.Fatal(err)
+	}
+	control.CloseAll(append(files, meta))
+
+	f := startDaemon(t, sd, &recorder{}, nil, sd.passed(t))
+	if st := f.d.List(); len(st) != 1 || !st[0].Restored {
+		t.Errorf("held %+v", st)
+	}
+	if n := len(f.journal.lines(t, "session restored without its CA: its intercepted hosts fail until it is relaunched")); n != 1 {
+		t.Errorf("%d lines saying so, want 1", n)
+	}
 }
 
 // A stored entry that does not add up -- here, a record whose listeners are
@@ -546,7 +598,7 @@ func TestAStoredSessionThatDoesNotAddUpIsDropped(t *testing.T) {
 	info, files, ln := listeners(t, "netless-9-10")
 	_ = ln.Close()
 	info.Listeners[0] = "tcp4:127.0.0.1:1"
-	meta, err := newRecord(info)
+	meta, err := newRecord(info, []byte("ca"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +620,7 @@ func TestAStoredSessionThatDoesNotAddUpIsDropped(t *testing.T) {
 }
 
 func TestTheRecordIsSealed(t *testing.T) {
-	f, err := newRecord(control.Session{Name: "a", Policy: "p"})
+	f, err := newRecord(control.Session{Name: "a", Policy: "p"}, []byte("the CA"))
 	if err != nil {
 		t.Skipf("no memfd here: %v", err)
 	}
@@ -576,8 +628,8 @@ func TestTheRecordIsSealed(t *testing.T) {
 	if _, err := f.WriteAt([]byte("x"), 0); err == nil {
 		t.Error("a sealed record was written to")
 	}
-	got, err := readRecord(f)
-	if err != nil || got.Name != "a" {
-		t.Errorf("read back %+v, %v", got, err)
+	got, authority, err := readRecord(f)
+	if err != nil || got.Name != "a" || string(authority) != "the CA" {
+		t.Errorf("read back %+v, %q, %v", got, authority, err)
 	}
 }

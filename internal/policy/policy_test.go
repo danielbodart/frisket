@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,15 +51,11 @@ func (c *counting) Exchange(_ context.Context, q dnsmessage.Question) (*dnsmessa
 
 func deps(t *testing.T, up dns.Exchanger) Deps {
 	t.Helper()
-	ca, err := intercept.LoadOrCreateCA(filepath.Join(t.TempDir(), "ca"), []string{"api.test"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	c, err := egress.NewClassifier(nil, egress.StaticHostAddrs())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Deps{CA: ca, Classifier: c, Dialer: &egress.Dialer{Classifier: c}, Upstream: up, Log: slog.New(slog.NewJSONHandler(&journal{}, nil))}
+	return Deps{Classifier: c, Dialer: &egress.Dialer{Classifier: c}, Upstream: up, Log: slog.New(slog.NewJSONHandler(&journal{}, nil))}
 }
 
 func valid(t *testing.T) Policy {
@@ -97,10 +94,6 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"a * inside an allowlist name":            func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
 		"a * glued to an allowlist name":          func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
 		"Authorization named as a bare header":    func(p *Policy) { p.Routes[0].Header = "authorization" },
-		"a route for a host the CA does not permit": func(p *Policy) {
-			p.Allow = append(p.Allow, "other.test")
-			p.Routes[0].Host, p.Routes[0].Upstream = "other.test", "https://other.test"
-		},
 	} {
 		p := valid(t)
 		mutate(&p)
@@ -114,22 +107,12 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 	}
 }
 
-// The CA is made for every policy's intercepted hosts: each once, normalised,
-// in order -- and never for a wildcard.
-func TestInterceptedIsEveryPolicysHosts(t *testing.T) {
-	c := &Config{Policies: map[string]Policy{
-		"a": {Routes: []Route{{Name: "api", Host: "API.test."}, {Name: "git", Host: "git.test"}}},
-		"b": {Routes: []Route{{Name: "api", Host: "api.test"}, {Name: "b", Host: "b.test"}}},
-		"c": {},
-	}}
-	got, err := c.Intercepted()
-	if err != nil || strings.Join(got, ",") != "api.test,b.test,git.test" {
-		t.Fatalf("Intercepted = %v, %v", got, err)
-	}
+// A route for a wildcard is refused: every name it matched would resolve to
+// the service address and fail at the handshake.
+func TestARouteIsForOneHost(t *testing.T) {
 	for _, bad := range []string{"*", "*.test", "a.*.test"} {
-		c := &Config{Policies: map[string]Policy{"a": {Routes: []Route{{Name: "r", Host: bad}}}}}
-		if got, err := c.Intercepted(); err == nil {
-			t.Errorf("Intercepted with %q = %v", bad, got)
+		if _, err := interceptHosts(Policy{Routes: []Route{{Name: "r", Host: bad}}}); err == nil {
+			t.Errorf("a route for %q was accepted", bad)
 		}
 	}
 }
@@ -191,7 +174,7 @@ func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 	defer set.Close()
 	var log journal
 	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2")}
-	h, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, slog.New(slog.NewJSONHandler(&log, nil)))
+	h, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, nil, slog.New(slog.NewJSONHandler(&log, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,15 +199,36 @@ func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 
 	// A second session's handlers are its own: nothing resolved for one is a
 	// permission for the other.
-	h2, err := set.Policies["p"].Handlers(control.Session{Name: "s2", Policy: "p", Service: svc}, slog.New(slog.NewJSONHandler(&log, nil)))
+	h2, err := set.Policies["p"].Handlers(control.Session{Name: "s2", Policy: "p", Service: svc}, nil, slog.New(slog.NewJSONHandler(&log, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if h2.DNS == h.DNS || h2.Egress == h.Egress {
 		t.Error("two sessions share a DNS server or an egress handler")
 	}
-	if h2.Intercept != h.Intercept {
-		t.Error("two sessions of one policy have different interceptors; routes and their credentials are the policy's")
+
+	// And its own CA, constrained to the policy's route hosts: one
+	// sandbox's trust vouches for nothing another is served.
+	for _, h := range []serve.Handlers{h, h2} {
+		ca, err := intercept.ParseCA(h.Authority)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(ca.CertPEM(), h.CACert) || !slices.Equal(ca.Hosts(), []string{"api.test"}) {
+			t.Fatalf("the session's CA is constrained to %v", ca.Hosts())
+		}
+	}
+	if bytes.Equal(h.CACert, h2.CACert) || bytes.Equal(h.Authority, h2.Authority) {
+		t.Error("two sessions share a CA")
+	}
+
+	// Restored, a session is given its own CA back, not a new one.
+	again, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, h.Authority, slog.New(slog.NewJSONHandler(&log, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again.CACert, h.CACert) || !bytes.Equal(again.Authority, h.Authority) {
+		t.Error("a restored session was given a CA its sandbox does not trust")
 	}
 }
 
@@ -258,7 +262,7 @@ func TestEveryNameCanBeAllowedWhileSomeAreIntercepted(t *testing.T) {
 	}
 	defer set.Close()
 	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2")}
-	h, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, slog.New(slog.NewJSONHandler(&journal{}, nil)))
+	h, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, nil, slog.New(slog.NewJSONHandler(&journal{}, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

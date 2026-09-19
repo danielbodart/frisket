@@ -6,9 +6,9 @@
 // the names among them that are intercepted, and the routes that say what an
 // intercepted name's requests may do and which credential they carry. Every
 // session of a policy gets its own DNS server and its own resolved set --
-// an answer given to one sandbox is not a permission for another -- and
-// shares the policy's interceptor, its credential watchers and the daemon's
-// CA.
+// an answer given to one sandbox is not a permission for another -- and its
+// own CA, constrained to the policy's route hosts, and shares the policy's
+// interceptor and its credential watchers.
 package policy
 
 import (
@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 
@@ -124,22 +123,6 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// Intercepted is every policy's intercepted hosts, normalised, once each, in
-// order: what the machine's CA is constrained to. Each is checked as Build
-// checks it, so the CA is never made for a name no route could serve.
-func (c *Config) Intercepted() ([]string, error) {
-	var out []string
-	for name, p := range c.Policies {
-		hosts, err := interceptHosts(p)
-		if err != nil {
-			return nil, fmt.Errorf("policy %s: %w", name, err)
-		}
-		out = append(out, hosts...)
-	}
-	sort.Strings(out)
-	return slices.Compact(out), nil
-}
-
 // interceptHosts is a policy's intercepted names -- its routes' hosts -- each
 // an exact name.
 func interceptHosts(p Policy) ([]string, error) {
@@ -160,12 +143,9 @@ func interceptHosts(p Policy) ([]string, error) {
 	return hosts, nil
 }
 
-// Deps is what every policy shares: the machine's CA, and the one classifier
-// and dialer every upstream connection goes through.
+// Deps is what every policy shares: the one classifier and dialer every
+// upstream connection goes through.
 type Deps struct {
-	// CA is constrained to Config.Intercepted; a route for a host it does not
-	// permit is refused.
-	CA         *intercept.CA
 	Classifier *egress.Classifier
 	Dialer     *egress.Dialer
 	// Upstream answers the names sessions are allowed. Nil builds one from
@@ -197,8 +177,8 @@ func (s *Set) Close() error {
 // it is valid: a daemon with half its policies is one whose sessions are
 // refused for reasons nobody configured.
 func Build(c *Config, d Deps) (_ *Set, err error) {
-	if d.CA == nil || d.Classifier == nil || d.Dialer == nil || d.Log == nil {
-		return nil, errors.New("policy: a CA, a classifier, a dialer and a logger are all required")
+	if d.Classifier == nil || d.Dialer == nil || d.Log == nil {
+		return nil, errors.New("policy: a classifier, a dialer and a logger are all required")
 	}
 	set := &Set{Policies: map[string]serve.Policy{}}
 	defer func() {
@@ -260,7 +240,6 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 	}
 
 	ic, err := intercept.New(intercept.Config{
-		CA:     d.CA,
 		Routes: routes,
 		Log:    d.Log,
 		// The upstream is dialled through the same structural check as every
@@ -273,7 +252,20 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 	}
 	set.closers = append(set.closers, ic.Close)
 
-	return serve.PolicyFunc(func(s control.Session, log *slog.Logger) (serve.Handlers, error) {
+	return serve.PolicyFunc(func(s control.Session, authority []byte, log *slog.Logger) (serve.Handlers, error) {
+		ca, authority, err := sessionCA(hosts, authority)
+		if err != nil {
+			return serve.Handlers{}, err
+		}
+		// Restored, under a policy that has gained a route since: the
+		// sandbox trusts a CA that cannot vouch for the new host, so its
+		// handshakes are refused, and said so, until it is relaunched.
+		for _, h := range hosts {
+			if !ca.Permits(h) {
+				log.Warn("session CA does not cover a route's host: relaunch the session to intercept it",
+					"session", s.Name, "policy", s.Policy, "host", h)
+			}
+		}
 		resolved := egress.NewResolved(egress.ResolvedConfig{})
 		srv, err := dns.New(dns.Config{
 			Session:   s.Name,
@@ -295,10 +287,27 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 				PolicyName: s.Policy,
 				Log:        log,
 			},
-			Intercept: ic,
+			Intercept: ic.For(ca),
 			DNS:       srv,
+			Authority: authority,
+			CACert:    ca.CertPEM(),
 		}, nil
 	}), nil
+}
+
+// sessionCA is a new session's CA, constrained to hosts, or a restored
+// session's own, read back from its record -- with what to keep in the record.
+func sessionCA(hosts []string, authority []byte) (*intercept.CA, []byte, error) {
+	if authority != nil {
+		ca, err := intercept.ParseCA(authority)
+		return ca, authority, err
+	}
+	ca, err := intercept.NewCA(hosts)
+	if err != nil {
+		return nil, nil, err
+	}
+	b, err := ca.Marshal()
+	return ca, b, err
 }
 
 // route builds one generic route and the watcher behind its credential.

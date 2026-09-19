@@ -322,10 +322,21 @@ func sameForeignNamespace(specs []nsnet.Spec, infos []sockInfo, own uint64) erro
 
 // ---------------------------------------------------------------- the record
 
-// newRecord writes s into a sealed memfd: once written it cannot be changed,
-// by us or by anything that later holds a copy.
-func newRecord(s control.Session) (*os.File, error) {
-	b, err := json.Marshal(s)
+// record is what the session's memfd holds: the session, and its CA.
+//
+// THE CA'S KEY IS HERE, and so in systemd's fd store as well as in the
+// daemon's memory -- which is how a session keeps its CA across a restart, and
+// the only place the key is ever written. The memfd is the daemon's and PID
+// 1's, and it goes with the session.
+type record struct {
+	control.Session
+	Authority []byte `json:"authority,omitempty"`
+}
+
+// newRecord writes s and its authority into a sealed memfd: once written it
+// cannot be changed, by us or by anything that later holds a copy.
+func newRecord(s control.Session, authority []byte) (*os.File, error) {
+	b, err := json.Marshal(record{Session: s, Authority: authority})
 	if err != nil {
 		return nil, err
 	}
@@ -346,16 +357,17 @@ func newRecord(s control.Session) (*os.File, error) {
 	return f, nil
 }
 
-// readRecord reads a session record back from the store.
-func readRecord(f *os.File) (control.Session, error) {
+// readRecord reads a session record back from the store. One written before
+// sessions had CAs of their own has no authority.
+func readRecord(f *os.File) (control.Session, []byte, error) {
 	buf := make([]byte, 64<<10)
 	n, err := f.ReadAt(buf, 0)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return control.Session{}, err
+		return control.Session{}, nil, err
 	}
-	var s control.Session
-	if err := json.Unmarshal(buf[:n], &s); err != nil {
-		return control.Session{}, fmt.Errorf("session record: %w", err)
+	var r record
+	if err := json.Unmarshal(buf[:n], &r); err != nil {
+		return control.Session{}, nil, fmt.Errorf("session record: %w", err)
 	}
-	return s, nil
+	return r.Session, r.Authority, nil
 }

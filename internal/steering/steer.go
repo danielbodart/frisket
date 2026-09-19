@@ -11,7 +11,17 @@ import (
 	"strings"
 
 	"github.com/danielbodart/frisket/internal/control"
+	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/nsmount"
 	"github.com/danielbodart/frisket/internal/nsnet"
+)
+
+// Where a session's CA is, inside the sandbox: a read-only tmpfs of its own
+// at CADir, holding the certificate and the bundle.
+const (
+	CADir        = "/etc/frisket"
+	CACertFile   = "ca.crt"
+	CABundleFile = "ca-bundle.crt"
 )
 
 // Steerer runs root's steps. The zero value's seams are the real ones; tests
@@ -22,9 +32,17 @@ type Steerer struct {
 	Nft     string // nft, by name or path, resolved on the host
 	IP      string // ip, likewise
 
-	open func(ctx context.Context, args nsnet.HelperArgs) (*nsnet.Set, error)
-	call func(ctx context.Context, req control.Request, files []*os.File) (control.Response, error)
-	run  func(ctx context.Context, netns, stdin, program string, args ...string) (string, error)
+	open  func(ctx context.Context, args nsnet.HelperArgs) (*nsnet.Set, error)
+	call  func(ctx context.Context, req control.Request, files []*os.File) (control.Response, error)
+	run   func(ctx context.Context, netns, stdin, program string, args ...string) (string, error)
+	mount func(mntns, dir string, files []nsmount.File) error
+}
+
+func (s *Steerer) mountIn(mntns, dir string, files []nsmount.File) error {
+	if s.mount != nil {
+		return s.mount(mntns, dir, files)
+	}
+	return nsmount.Attach(mntns, dir, files)
 }
 
 func (s *Steerer) openSet(ctx context.Context, args nsnet.HelperArgs) (*nsnet.Set, error) {
@@ -72,16 +90,22 @@ func or(s, def string) string {
 	return s
 }
 
-// Session is what steer is asked to create.
+// Session is what steer is asked to create, and where its CA goes.
 type Session struct {
 	Name   string
 	Policy string
 	Params map[string]string
+	// Mntns is the sandbox's mount namespace, /proc/<pid>/ns/mnt, where the
+	// session's CA is put.
+	Mntns string
+	// Roots is the host's CA bundle, which the session's bundle is made from.
+	Roots string
 }
 
 // Steer creates the session's listeners inside the namespace at netns, hands
 // them to the daemon, and only then installs the policy routing and loads the
-// ruleset that steers to them. It does NOT provision egress: that is Connect,
+// ruleset that steers to them -- and then puts the CA the daemon made for the
+// session into the sandbox. It does NOT provision egress: that is Connect,
 // and it is the caller's next step.
 //
 // Every failure before the rules is a session with no rules, which with no
@@ -89,6 +113,12 @@ type Session struct {
 // loading the rules closes the session it had just created, so nothing is left
 // holding listeners for a namespace that was never steered to them.
 func (s *Steerer) Steer(ctx context.Context, netns string, p *Plan, sess Session) error {
+	// Read first, so a missing file is refused before anything exists.
+	roots, err := os.ReadFile(sess.Roots)
+	if err != nil {
+		return fmt.Errorf("session %s: the host's roots: %w; no rules were installed", sess.Name, err)
+	}
+
 	// 1. Listeners, inside, from a namespace that has no egress yet.
 	set, err := s.openSet(ctx, nsnet.HelperArgs{Netns: netns, Specs: p.Listeners, Isolated: true})
 	if err != nil {
@@ -122,7 +152,8 @@ func (s *Steerer) Steer(ctx context.Context, netns string, p *Plan, sess Session
 		Listeners: listeners,
 		Netns:     set.Netns,
 	}}
-	if _, err := s.callDaemon(ctx, req, files); err != nil {
+	opened, err := s.callDaemon(ctx, req, files)
+	if err != nil {
 		return fmt.Errorf("handing session %s's listeners to frisket: %w; no rules were installed", sess.Name, err)
 	}
 	// Ours are copies now, and every copy pins the namespace: closed before
@@ -148,6 +179,24 @@ func (s *Steerer) Steer(ctx context.Context, netns string, p *Plan, sess Session
 	}
 	if _, err := s.runIn(ctx, netns, p.Ruleset, or(s.Nft, "nft"), "-f", "-"); err != nil {
 		return closeOnFailure("loading the ruleset", err)
+	}
+
+	// 4. The session's CA, in the sandbox: the certificate the daemon made
+	// for it, and the host's roots with it, on a read-only tmpfs of their own.
+	// Before the payload starts, which waits for this hook; a sandbox that
+	// cannot be given its CA is closed rather than run distrusting it.
+	if len(opened.CACert) == 0 {
+		return closeOnFailure("putting the CA in the sandbox", errors.New("frisket made the session no CA"))
+	}
+	bundle, err := intercept.Bundle(roots, opened.CACert)
+	if err != nil {
+		return closeOnFailure("putting the CA in the sandbox", fmt.Errorf("%s: %w", sess.Roots, err))
+	}
+	if err := s.mountIn(sess.Mntns, CADir, []nsmount.File{
+		{Name: CACertFile, Data: opened.CACert},
+		{Name: CABundleFile, Data: bundle},
+	}); err != nil {
+		return closeOnFailure("putting the CA in the sandbox", err)
 	}
 	return nil
 }

@@ -197,36 +197,41 @@ func newFixtureAt(t *testing.T, j *journal, level slog.Level, routes ...Route) *
 	for i, r := range routes {
 		hosts[i] = r.Host
 	}
-	ca, err := LoadOrCreateCA(t.TempDir(), hosts)
+	ca, err := NewCA(hosts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ic, err := New(Config{CA: ca, Routes: routes, Log: slog.New(slog.NewJSONHandler(j, &slog.HandlerOptions{Level: level}))})
+	ic, err := New(Config{Routes: routes, Log: slog.New(slog.NewJSONHandler(j, &slog.HandlerOptions{Level: level}))})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ic.Close() })
+	return &fixture{ca: ca, journal: j, addr: listen(t, j, "sess-test", ic.For(ca)), ic: ic}
+}
 
+// listen serves h as a session's listener would, and says where.
+func listen(t *testing.T, j *journal, session string, h steer.Handler) string {
+	t.Helper()
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("no loopback to listen on: %v", err)
 	}
-	sess := steer.New("sess-test", j)
+	sess := steer.New(session, j)
 	// The kernel's answer, as the steering would give it: this connection
 	// was going to the service address's HTTPS port.
 	sess.Dst = func(*net.TCPConn) netip.AddrPort { return serviceAddr443 }
 
 	// Cleanups run last-registered-first: cancel, then wait for the accept
-	// loop, then close the interceptor (registered above).
+	// loop, then close the interceptor (registered before this).
 	done := make(chan struct{})
 	t.Cleanup(func() { <-done })
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() {
 		defer close(done)
-		_ = sess.Serve(ctx, ln, ic)
+		_ = sess.Serve(ctx, ln, h)
 	}()
-	return &fixture{ca: ca, journal: j, addr: ln.Addr().String(), ic: ic}
+	return ln.Addr().String()
 }
 
 func (f *fixture) roots() *x509.CertPool {
@@ -888,6 +893,61 @@ func TestHandshakeRefusesNoSNIAndUnknownNames(t *testing.T) {
 	}
 }
 
+// EACH SESSION IS SERVED FROM ITS OWN CA, through the one interceptor its
+// policy shares: a client that trusts one session's CA verifies that
+// session's leaves and not another's.
+func TestEachSessionIsServedFromItsOwnCA(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	cred, _ := tokenFile(t, j, realToken)
+	f := newFixture(t, j, apiRoute(up, cred))
+	other, err := NewCA([]string{apiHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAddr := listen(t, j, "sess-other", f.ic.For(other))
+
+	c, err := tls.Dial("tcp", f.addr, &tls.Config{RootCAs: f.roots(), ServerName: apiHost})
+	if err != nil {
+		t.Fatalf("a session's own CA did not verify its leaf: %v", err)
+	}
+	c.Close()
+	if c, err := tls.Dial("tcp", otherAddr, &tls.Config{RootCAs: f.roots(), ServerName: apiHost}); err == nil {
+		c.Close()
+		t.Fatal("one session's CA verified another session's leaf")
+	}
+	otherRoots := x509.NewCertPool()
+	otherRoots.AddCert(other.Certificate())
+	c, err = tls.Dial("tcp", otherAddr, &tls.Config{RootCAs: otherRoots, ServerName: apiHost})
+	if err != nil {
+		t.Fatalf("the other session's own CA did not verify its leaf: %v", err)
+	}
+	c.Close()
+}
+
+// A route's host that the session's CA does not permit -- a route added
+// since the session was opened -- is refused at the handshake, and said so,
+// rather than served a leaf the client can only reject.
+func TestAHostOutsideTheSessionsCAIsRefused(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	cred, _ := tokenFile(t, j, realToken)
+	f := newFixture(t, j, apiRoute(up, cred))
+	older, err := NewCA([]string{"other.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listen(t, j, "sess-older", f.ic.For(older))
+	if c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true, ServerName: apiHost}); err == nil {
+		c.Close()
+		t.Fatal("a handshake for a host outside the session's CA completed")
+	}
+	l := f.journal.waitLines(t, "tls", 1)[0]
+	if l["decision"] != DecisionRefused || l["reason"] != ReasonNotInCA || l["sni"] != apiHost {
+		t.Fatalf("tls line: %v", l)
+	}
+}
+
 // A client that does not trust frisket's CA fails the handshake, and that is
 // logged too: it is what a sandbox missing the CA looks like from here.
 func TestUntrustingClientIsLogged(t *testing.T) {
@@ -986,10 +1046,6 @@ func TestOneLinePerRequest(t *testing.T) {
 }
 
 func TestNewRefusesBadRoutes(t *testing.T) {
-	ca, err := LoadOrCreateCA(t.TempDir(), []string{"a.test"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	src := credential.Source(nil)
 	cred, _ := tokenFile(t, &journal{}, realToken)
 	good := Route{Name: "r", Host: "a.test", Upstream: "https://a.test", Credential: cred, Inject: Bearer(), Placeholder: placeholder,
@@ -1004,20 +1060,19 @@ func TestNewRefusesBadRoutes(t *testing.T) {
 		"empty scope":          func(r *Route) { r.Scope = Scope{} },
 		"host with port":       func(r *Route) { r.Host = "a.test:443" },
 		"no name":              func(r *Route) { r.Name = "" },
-		"host outside the CA":  func(r *Route) { r.Host, r.Upstream = "b.test", "https://b.test" },
 	} {
 		r := good
 		mutate(&r)
-		if ic, err := New(Config{CA: ca, Routes: []Route{r}, Log: log}); err == nil {
+		if ic, err := New(Config{Routes: []Route{r}, Log: log}); err == nil {
 			_ = ic.Close()
 			t.Errorf("%s: built, want a refusal", name)
 		}
 	}
-	if ic, err := New(Config{CA: ca, Routes: []Route{good, good}, Log: log}); err == nil {
+	if ic, err := New(Config{Routes: []Route{good, good}, Log: log}); err == nil {
 		_ = ic.Close()
 		t.Error("two routes for one host: built, want a refusal")
 	}
-	ic, err := New(Config{CA: ca, Routes: []Route{good}, Log: log})
+	ic, err := New(Config{Routes: []Route{good}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

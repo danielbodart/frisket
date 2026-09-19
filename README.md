@@ -55,7 +55,7 @@ launcher:
 ```
 
 A session `flong.agent` starts resolves `api.example.com` to frisket, which
-terminates its TLS with the machine's CA, checks each request against the
+terminates its TLS with the session's own CA, checks each request against the
 route's paths, replaces the placeholder with `Bearer <token>` from the file,
 and forwards it upstream. Only the placeholder, exactly: a request carrying any
 other credential, or none, goes upstream as it was sent. `proxy-injected` is
@@ -67,9 +67,12 @@ answered NXDOMAIN, without an upstream lookup, and every address frisket did
 not resolve for the session is refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
 and the host's own addresses, whatever resolved to them.
 
-Every session of the launcher's container has `/etc/frisket` bound read-only:
-`ca.crt`, the machine's CA, and `ca-bundle.crt`, the host's
-`security.pki.caBundle` with the CA appended. The container exports
+Every session gets a CA of its own, made when it starts and name-constrained to
+its policy's route hosts. It is mounted read-only at `/etc/frisket` in the
+session, on a tmpfs nothing else sees: `ca.crt`, and `ca-bundle.crt`, the
+host's `security.pki.caBundle` with the CA appended. The key never leaves the
+daemon and never touches disk; the CA survives a restart of the daemon and ends
+with the session. The container exports
 `SSL_CERT_FILE`, `NIX_SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
 `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`, `PIP_CERT`, `AWS_CA_BUNDLE`,
 `CARGO_HTTP_CAINFO`, `DENO_CERT`, `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`,
@@ -83,10 +86,8 @@ declaration:
 containers.agent.config.environment.variables.PIP_CERT = "/etc/ssl/certs/ca-certificates.crt";
 ```
 
-The CA is name-constrained to the hosts the policies intercept, so clients
-reject it for any other name. The daemon makes a new one when that set changes;
-a process that already loaded the old one fails on intercepted hosts until it
-restarts.
+A route added to a policy is intercepted in sessions started after the change;
+one already running fails on that host until it is relaunched.
 
 ## Sets
 
@@ -111,17 +112,19 @@ Run as root, in this order, from a hook that has the sandbox's network
 namespace before anything gives it egress:
 
 ```console
-# frisket steer   -netns /proc/$leader/ns/net -steering $file -name $session -policy research
+# frisket steer   -netns /proc/$leader/ns/net -mntns /proc/$leader/ns/mnt \
+                  -roots /etc/ssl/certs/ca-certificates.crt \
+                  -steering $file -name $session -policy research
 # frisket connect -netns /proc/$leader/ns/net -steering $file -name $session
 # frisket close   -name $session
 ```
 
 `$file` is `(frisket.lib.steering { set = "all"; }).json`: the ruleset and the
 listener specification from one attrset. `frisket steering $file` prints what
-it will do. `steer` creates the listeners inside the namespace and installs the
-routing and the ruleset; `connect` gives the namespace its egress. Each refuses
-to run out of turn. Bind `/var/lib/frisket/public` read-only into the sandbox,
-and point its runtimes at `ca-bundle.crt` in it.
+it will do. `steer` creates the listeners inside the namespace, installs the
+routing and the ruleset, and mounts the session's CA at `/etc/frisket`;
+`connect` gives the namespace its egress. Each refuses to run out of turn.
+Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
 
 ## Options
 
@@ -131,8 +134,6 @@ and point its runtimes at `ca-bundle.crt` in it.
 | `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
 | `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile`, `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `paths` |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
-| `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host; constrained to every policy's route hosts |
-| `services.frisket.caBundle` | *read-only* | `security.pki.caBundle` with the CA appended, beside `caCertificate` |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
 | `services.frisket.logLevel` | `info` | `debug` adds each intercepted request's headers and error bodies; credentials are described, never shown |
 | `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
