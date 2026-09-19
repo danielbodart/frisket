@@ -41,15 +41,16 @@ var version = "dev"
 
 const usage = `frisket -- credentials on the wire, never in the sandbox
 
-  frisket serve -config FILE -state DIR [-control PATH]
+  frisket serve -config FILE -state DIR -roots BUNDLE [-control PATH]
         The daemon. Holds every session's listeners from the host and serves
         each connection and query steered to them under the session's policy:
         DNS against the allowlist, egress to what that DNS resolved, and
         interception for the routes' hosts. FILE holds the policies; DIR holds
         the machine's CA, constrained to the intercepted hosts and made anew
-        when they change. Under systemd it is
-        socket-activated, and keeps its sessions across a restart in the
-        service's file-descriptor store.
+        when they change, and in DIR/public what a sandbox is given: the CA's
+        certificate, and ca-bundle.crt, BUNDLE with the CA after it. Under
+        systemd it is socket-activated, and keeps its sessions across a
+        restart in the service's file-descriptor store.
 
   frisket steer -netns PATH -steering FILE -name NAME -policy POLICY [-param K=V]...
         Root's first step, from a launcher's hook: create the session's
@@ -136,14 +137,15 @@ func runServe(argv []string) error {
 	uid := fs.Int("control-uid", 0, "the only uid the control socket answers")
 	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
 	configPath := fs.String("config", "", "the policies, as the NixOS module writes them")
-	state := fs.String("state", "", "the daemon's state directory; the CA is made in ca/ inside it")
+	state := fs.String("state", "", "the daemon's state directory; the CA is made in ca/ inside it, and what sandboxes are given in public/")
+	roots := fs.String("roots", "", "the host's CA bundle, which public/ca-bundle.crt is made from")
 	var level slog.Level
 	fs.TextVar(&level, "log-level", slog.LevelInfo, "debug adds each intercepted request's headers, credentials described and never shown")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if *configPath == "" || *state == "" {
-		return errors.New("-config and -state are both required")
+	if *configPath == "" || *state == "" || *roots == "" {
+		return errors.New("-config, -state and -roots are all required")
 	}
 	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, &slog.HandlerOptions{Level: level}))
 
@@ -168,6 +170,12 @@ func runServe(argv []string) error {
 	if ca.Replaced() {
 		log.Warn("CA replaced: the intercepted hosts changed; sessions started before now trust the old CA until they are relaunched",
 			"hosts", ca.Hosts())
+	}
+	// Written before the daemon reports ready, as the CA is: a sandbox
+	// started after that finds both.
+	public := filepath.Join(*state, "public")
+	if err := intercept.WritePublic(public, ca.CertPEM(), *roots); err != nil {
+		return err
 	}
 	classifier, dialer, err := policy.Dialer()
 	if err != nil {
@@ -224,7 +232,7 @@ func runServe(argv []string) error {
 	}
 	sort.Strings(names)
 	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored),
-		"policies", names, "ca", filepath.Join(*state, "ca", intercept.CACertFile), "ca_hosts", ca.Hosts())
+		"policies", names, "public", public, "ca_hosts", ca.Hosts())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

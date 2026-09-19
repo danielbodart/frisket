@@ -19,10 +19,12 @@
 # Each frisket step refuses to run out of turn, so a snippet that gets this
 # wrong fails the launch rather than leaving a session unsteered.
 #
-# And the machine's CA certificate is bound at /etc/frisket/ca.crt, read-only,
-# into every session of the launcher's container -- through the container's
-# own declaration, because it is known at evaluation. Which runtimes are told
-# to trust it, and how, is the consumer's business.
+# And the daemon's public files -- the CA certificate and the bundle, the
+# host's roots with the CA after them -- are bound at /etc/frisket, read-only,
+# into every session of the launcher's container, through the container's own
+# declaration because the path is known at evaluation. The container exports
+# every variable the common runtimes read their roots from, pointing at the
+# bundle, so a client trusts the intercepted hosts and every other host alike.
 self:
 { config, lib, pkgs, ... }:
 
@@ -30,6 +32,35 @@ let
   cfg = config.services.frisket;
   inherit (lib) mkOption types;
   control = "-control ${cfg.controlSocket}";
+
+  # Where the common runtimes read their roots from, all of them the bundle.
+  # Each of these REPLACES a runtime's roots, bar NODE_EXTRA_CA_CERTS, which
+  # adds to Node's own and takes the bundle as readily as the CA alone. The
+  # set a Claude Code web session exports.
+  caVariables =
+    lib.genAttrs [
+      "AWS_CA_BUNDLE"
+      "CARGO_HTTP_CAINFO"
+      "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE"
+      "CURL_CA_BUNDLE"
+      "DENO_CERT"
+      "GIT_SSL_CAINFO"
+      "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"
+      "HEX_CACERTS_PATH"
+      "HTTPLIB2_CA_CERTS"
+      "NIX_SSL_CERT_FILE"
+      "NODE_EXTRA_CA_CERTS"
+      "PIP_CERT"
+      "REQUESTS_CA_BUNDLE"
+      "SSL_CERT_FILE"
+    ]
+      (_: "/etc/frisket/ca-bundle.crt")
+    // {
+      DENO_TLS_CA_STORE = "system,mozilla";
+      # uv's roots are compiled in; this makes it read the system's, which
+      # SSL_CERT_FILE names.
+      UV_NATIVE_TLS = "true";
+    };
 
   steeringFile = name: s: pkgs.writeText "frisket-steering-${name}.json"
     (self.lib.steering ({ inherit (s) set; } // s.steering)).json;
@@ -86,19 +117,26 @@ in
   config = lib.mkIf (cfg.flong != { }) {
     services.frisket.enable = lib.mkDefault true;
 
-    # The daemon's own file, read-only: the workload cannot write it through
-    # the bind, and a read-only bind cannot be made writable from inside. The
-    # certificate is public and 0644, so a workload of any uid can read it.
+    # The daemon's own directory, read-only: the workload cannot write it
+    # through the bind, and a read-only bind cannot be made writable from
+    # inside. It holds the public files and nothing else -- never the key --
+    # 0755 and 0644, so a workload of any uid can read them. The directory
+    # and not the files, so a file the daemon replaces by rename is replaced
+    # in a running session too.
     #
     # The daemon writes it before it tells systemd it is ready, and keeps it
     # across restarts; a session started before the daemon ever has -- so
     # with nothing at the source -- is refused by nspawn, not started without.
+    #
+    # The variables are defaults: a container that wants a runtime pointed
+    # elsewhere says so in its own declaration.
     containers = lib.mapAttrs'
       (name: _: lib.nameValuePair config.flong.${name}.container {
-        bindMounts."/etc/frisket/ca.crt" = {
-          hostPath = toString cfg.caCertificate;
+        bindMounts."/etc/frisket" = {
+          hostPath = dirOf (toString cfg.caCertificate);
           isReadOnly = true;
         };
+        config.environment.variables = lib.mapAttrs (_: lib.mkDefault) caVariables;
       })
       cfg.flong;
 

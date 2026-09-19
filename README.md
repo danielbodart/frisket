@@ -65,18 +65,26 @@ answered NXDOMAIN, without an upstream lookup, and every address frisket did
 not resolve for the session is refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
 and the host's own addresses, whatever resolved to them.
 
-The CA is at `/etc/frisket/ca.crt` in every session of the launcher's
-container, read-only, bound through the container's own `bindMounts`. It is
-name-constrained to the hosts the policies intercept, so clients reject it for
-any other name, and the daemon makes a new one when that set changes: a session
-already running keeps the old one and fails on its intercepted hosts until it
-is relaunched. Telling each runtime to trust it is yours to do, and each has
-its own way — Node's, for one, adds it to the roots it already has, from a
-variable the container exports to its payload:
+Every session of the launcher's container has `/etc/frisket` bound read-only:
+`ca.crt`, the machine's CA, and `ca-bundle.crt`, the host's
+`security.pki.caBundle` with the CA appended. The container exports
+`SSL_CERT_FILE`, `NIX_SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
+`NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`, `PIP_CERT`, `AWS_CA_BUNDLE`,
+`CARGO_HTTP_CAINFO`, `DENO_CERT`, `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`,
+`HEX_CACERTS_PATH`, `HTTPLIB2_CA_CERTS` and `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`
+pointing at the bundle, plus `UV_NATIVE_TLS=true` and
+`DENO_TLS_CA_STORE=system,mozilla`, so a client trusts intercepted and spliced
+hosts alike. Each is a default; override one in the container's own
+declaration:
 
 ```nix
-containers.agent.config.environment.variables.NODE_EXTRA_CA_CERTS = "/etc/frisket/ca.crt";
+containers.agent.config.environment.variables.PIP_CERT = "/etc/ssl/certs/ca-certificates.crt";
 ```
+
+The CA is name-constrained to the hosts the policies intercept, so clients
+reject it for any other name. The daemon makes a new one when that set changes;
+a process that already loaded the old one fails on intercepted hosts until it
+restarts.
 
 ## Sets
 
@@ -110,7 +118,8 @@ namespace before anything gives it egress:
 listener specification from one attrset. `frisket steering $file` prints what
 it will do. `steer` creates the listeners inside the namespace and installs the
 routing and the ruleset; `connect` gives the namespace its egress. Each refuses
-to run out of turn.
+to run out of turn. Bind `/var/lib/frisket/public` read-only into the sandbox,
+and point its runtimes at `ca-bundle.crt` in it.
 
 ## Options
 
@@ -122,6 +131,7 @@ to run out of turn.
 | `services.frisket.policies.<name>.routes.<route>` | `{ }` | `host`, `upstream`, `upstreamCA`, `credentialFile`, `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `paths` |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
 | `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host; constrained to every policy's `intercept` |
+| `services.frisket.caBundle` | *read-only* | `security.pki.caBundle` with the CA appended, beside `caCertificate` |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
 | `services.frisket.logLevel` | `info` | `debug` adds each intercepted request's headers and error bodies; credentials are described, never shown |
 | `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |

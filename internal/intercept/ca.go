@@ -31,6 +31,10 @@ const (
 	CACertFile = "ca.crt"
 )
 
+// CABundleFile is the host's roots and the CA in one file, beside CACertFile
+// in the directory WritePublic writes.
+const CABundleFile = "ca-bundle.crt"
+
 const (
 	caLifetime = 10 * 365 * 24 * time.Hour
 	// A leaf lives a week and is re-minted a day before it ends, so no
@@ -323,6 +327,82 @@ func writeExclusive(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return f.Close()
+}
+
+// WritePublic writes what a sandbox is given into dir: the CA certificate,
+// and CABundleFile -- the roots at rootsPath with the CA after them, for a
+// runtime whose setting REPLACES its roots rather than adding to them
+// (SSL_CERT_FILE, REQUESTS_CA_BUNDLE), which with the CA alone would trust
+// nothing but the intercepted hosts.
+//
+// dir IS BOUND WHOLE INTO SANDBOXES, so it holds these two files and nothing
+// else, and is never the CA's own directory: a directory with the key in it is
+// refused. Each file is replaced by rename, so a sandbox reading it through
+// the bind sees the old file or the new one, never half of either.
+func WritePublic(dir string, certPEM []byte, rootsPath string) error {
+	roots, err := os.ReadFile(rootsPath)
+	if err != nil {
+		return fmt.Errorf("intercept: roots: %w", err)
+	}
+	// A file of no certificates would make a bundle that trusts only the
+	// intercepted hosts, and every other name would fail inside the sandbox
+	// with an error that points nowhere near here.
+	if !x509.NewCertPool().AppendCertsFromPEM(roots) {
+		return fmt.Errorf("intercept: roots %s holds no PEM certificates", rootsPath)
+	}
+	if len(roots) > 0 && roots[len(roots)-1] != '\n' {
+		roots = append(roots, '\n')
+	}
+
+	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("intercept: public directory: %w", err)
+	}
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("intercept: public directory: %w", err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("intercept: public directory %s is not a directory", dir)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, CAKeyFile)); !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("intercept: %s has %s in it, and is bound into sandboxes; it must be a directory of its own", dir, CAKeyFile)
+	}
+	// 0755 whatever the umask, as the files are 0644: a workload of any uid
+	// reads them through the bind.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return fmt.Errorf("intercept: public directory: %w", err)
+	}
+
+	for _, f := range []struct {
+		name string
+		data []byte
+	}{
+		{CABundleFile, append(roots, certPEM...)},
+		{CACertFile, certPEM},
+	} {
+		if err := replaceFile(dir, f.name, f.data, 0o644); err != nil {
+			return fmt.Errorf("intercept: %s: %w", f.name, err)
+		}
+	}
+	return syncDir(dir)
+}
+
+// replaceFile writes data to name in dir through a temporary beside it and a
+// rename. The temporary has a fixed name, so one left by an interrupted write
+// is removed by the next rather than accumulating.
+func replaceFile(dir, name string, data []byte, mode os.FileMode) error {
+	tmp := filepath.Join(dir, "."+name+".tmp")
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := writeExclusive(tmp, data, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func loadCA(keyPath, certPath string) (*CA, error) {

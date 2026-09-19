@@ -141,6 +141,11 @@ in
     # has no `dns` of its own, so it follows this too.
     networking.nameservers = [ upstream4 ];
 
+    # The host trusts the upstream's CA, so the bundle frisket makes from the
+    # host's roots carries it: a spliced name then verifies through the same
+    # file as an intercepted one, as a public host would in the field.
+    security.pki.certificateFiles = [ "${certs}/ca.crt" ];
+
     # The daemon runs as the user whose credentials it holds: a person, not a
     # DynamicUser. The token is theirs, in a directory only they can read.
     users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; };
@@ -322,6 +327,7 @@ in
       trusted = lib.getExe nodes.machine.flong.trusted.launcher;
       frisket = lib.getExe nodes.machine.services.frisket.package;
       ca = nodes.machine.services.frisket.caCertificate;
+      bundle = nodes.machine.services.frisket.caBundle;
     in
     ''
       import json
@@ -582,15 +588,18 @@ in
 
       release(name)
 
-      # Interception, end to end, in a session of its own. The first request
-      # is the payload's, inside the session, through the CA the adapter bound
-      # at /etc/frisket/ca.crt, carrying the placeholder the sandbox is given
-      # in the credential's place. The rest are made as the workload from
-      # outside.
-      api = ("curl -sS -m 10 --cacert /etc/frisket/ca.crt "
-             f"-H 'Authorization: Bearer {placeholder}' https://api.test/v1/models > api-out 2>&1")
+      # Interception, end to end, in a session of its own. The first requests
+      # are the payload's, inside the session, with no CA named: curl finds
+      # the bundle the adapter bound at /etc/frisket through the variables the
+      # container exports, and the intercepted name and the spliced one both
+      # verify through it. The intercepted one carries the placeholder the
+      # sandbox is given in the credential's place. The rest are made as the
+      # workload from outside.
+      api = (f"curl -sS -m 10 -H 'Authorization: Bearer {placeholder}' https://api.test/v1/models > api-out 2>&1; "
+             "curl -sS -m 10 https://allowed.test/ > allowed-out 2>&1; env > env-out")
       name, leader = hold("${strict}", "ip link show frisket0", api)
       machine.wait_until_succeeds("grep -q upstream-api-ok /srv/work/api-out")
+      machine.wait_until_succeeds("grep -q upstream-api-ok /srv/work/allowed-out")
 
       def upstream_saw(pattern):
           return upstream.execute(f"journalctl -u upstream-https -o cat | grep -E {shlex.quote(pattern)}")[1]
@@ -602,24 +611,40 @@ in
           assert re.search(r"X509v3 Name Constraints: critical\n\s+Permitted:\n\s+DNS:api\.test\n\s+Excluded:\n"
                            r"\s+IP:0\.0\.0\.0/0\.0\.0\.0\n\s+IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0\n", text), text
 
-      with subtest("the machine's CA is bound into the session, and the workload cannot change it"):
+      with subtest("the public files are bound into the session, alone, and the workload cannot change them"):
           # Bound by the container's declaration, which every session of it
-          # mounts.
-          machine.succeed(f"cmp /proc/{leader}/root/etc/frisket/ca.crt ${ca}")
-          # Public, so readable whatever uid the workload runs as: 0644 though
-          # the daemon runs under UMask=0077, and read here by a uid that is
-          # not the daemon's.
-          assert machine.succeed("stat -c %a ${ca}").strip() == "644"
-          machine.succeed(f"nsenter --target={leader} --mount setpriv --reuid=1001 --regid=100 "
-                          "--clear-groups -- cat /etc/frisket/ca.crt | grep -q 'BEGIN CERTIFICATE'")
-          # The daemon's own file, owned by the workload's uid: only the bind
-          # being read-only stops it, so that is what each attempt must hit.
-          assert machine.succeed("stat -c %u ${ca}").strip() == "1000"
+          # mounts: the certificate, and the host's roots with it after them.
+          # Nothing else -- the key above all.
+          inside = f"/proc/{leader}/root/etc/frisket"
+          assert machine.succeed(f"ls -A {inside}").split() == ["ca-bundle.crt", "ca.crt"]
+          machine.succeed(f"cmp {inside}/ca.crt ${ca}")
+          machine.succeed(f"cmp {inside}/ca-bundle.crt ${bundle}")
+          machine.succeed("cat ${nodes.machine.security.pki.caBundle} ${ca} | cmp - ${bundle}")
+          # Public, so readable whatever uid the workload runs as: 0755 and
+          # 0644 though the daemon runs under UMask=0077, and read here by a
+          # uid that is not the daemon's.
+          assert machine.succeed(f"stat -c %a {inside} ${ca} ${bundle}").split() == ["755", "644", "644"]
+          for f in ["ca.crt", "ca-bundle.crt"]:
+              machine.succeed(f"nsenter --target={leader} --mount setpriv --reuid=1001 --regid=100 "
+                              f"--clear-groups -- cat /etc/frisket/{f} | grep -q 'BEGIN CERTIFICATE'")
+          # The daemon's own directory, owned by the workload's uid: only the
+          # bind being read-only stops it, so that is what each attempt must
+          # hit.
+          assert machine.succeed(f"stat -c %u {inside} ${ca}").split() == ["1000", "1000"]
           for cmd in ["echo forged >> /etc/frisket/ca.crt", "chmod u+w /etc/frisket/ca.crt",
-                      "touch /etc/frisket/ca.crt"]:
+                      "touch /etc/frisket/ca.crt", "echo forged > /etc/frisket/ca-bundle.crt",
+                      "mv /etc/frisket/ca.crt /etc/frisket/old", "touch /etc/frisket/new"]:
               status, out = machine.execute(as_workload(leader, f"{{ {cmd}; }} 2>&1"))
               assert status != 0 and "Read-only file system" in out, (cmd, status, out)
-          machine.succeed(f"cmp /proc/{leader}/root/etc/frisket/ca.crt ${ca}")
+          machine.succeed(f"cmp {inside}/ca.crt ${ca}")
+          machine.succeed(f"cmp {inside}/ca-bundle.crt ${bundle}")
+
+      with subtest("the payload is told to trust the bundle, through every variable the common runtimes read"):
+          env = machine.succeed("cat /srv/work/env-out")
+          for var in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+                      "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO", "PIP_CERT", "AWS_CA_BUNDLE"]:
+              assert f"{var}=/etc/frisket/ca-bundle.crt\n" in env, (var, env)
+          assert "UV_NATIVE_TLS=true\n" in env, env
 
       with subtest("the intercepted name resolves to the service address, and only that name does"):
           for qtype, want in [("A", "192.0.2.2"), ("AAAA", "2001:db8::2")]:
@@ -688,8 +713,9 @@ in
           # Its certificate is the upstream's own: frisket's CA cannot verify it.
           status, out = machine.execute(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt https://allowed.test/"))
           assert status == 60, (status, out)
+          # These two and the payload's own, through the bundle.
           spliced = [m for m in lines_of("egress", name) if m.get("name") == "allowed.test" and m["dst"].endswith(":443")]
-          assert len(spliced) == 2 and all(m["decision"] == "accepted" for m in spliced), spliced
+          assert len(spliced) == 3 and all(m["decision"] == "accepted" for m in spliced), spliced
           assert [m for m in lines_of("request", name) if m.get("host") == "allowed.test"] == []
 
       with subtest("a name not on the allowlist is NXDOMAIN, without an upstream lookup"):

@@ -130,21 +130,30 @@ endpoints a tool hard-codes.
   first start in its state directory, and makes a new one, swapped in whole, on
   the first start after the set of intercepted hosts changes; the certificate
   carries the set, so it is the record the change is detected against. A
-  session already running trusts the CA it started with and fails verification
-  of its intercepted hosts until it is relaunched — accepted, because sessions
-  are short-lived and the set changes only when a policy does. The key is
-  `0600`, created exclusively, and never leaves the state directory. The
-  certificate is `0644` whatever the daemon's umask, so a workload of any uid
-  can read it. The NixOS module exposes the certificate's path, and the flong
-  adapter binds the daemon's own file at `/etc/frisket/ca.crt`, read-only, into
-  every session of the launcher's container, through that container's declared
-  `bindMounts` — the file belongs to the user whose uid the workload usually
-  shares, and a read-only bind is what stops that uid rewriting it. The daemon
-  writes it before it reports ready and keeps it across restarts; a session
-  started before the daemon ever has finds nothing at the bind's source, and
-  nspawn refuses to start it. Telling each runtime to trust it
-  (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, a system
-  bundle) is the consumer's policy, not frisket's.
+  process that has already loaded the old CA fails verification of its
+  intercepted hosts until it restarts — accepted, because sessions are
+  short-lived and the set changes only when a policy does. The key is
+  `0600`, created exclusively, and never leaves the state directory.
+- What a sandbox is given is a directory of its own, `public/` beside the CA's,
+  holding nothing else: `ca.crt`, and `ca-bundle.crt`, the host's
+  `security.pki.caBundle` with the CA appended. The bundle is frisket's to
+  make because the CA exists only at runtime, and it is needed because most
+  runtimes' settings (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`)
+  replace their roots rather than add to them: pointed at the CA alone, a
+  client trusts the intercepted hosts and nothing else. The daemon rewrites
+  both on every start, before it reports ready, each by rename; the directory
+  is `0755` and the files `0644` whatever its umask, so a workload of any uid
+  reads them, and it refuses a directory with the key in it. The flong adapter
+  binds the directory at `/etc/frisket`, read-only, through the container's
+  declared `bindMounts` — the files belong to the user whose uid the workload
+  usually shares, and a read-only bind is what stops that uid rewriting them.
+  A directory rather than the files, so a replacement by rename reaches a
+  running session. A session started before the daemon ever has finds nothing
+  at the bind's source, and nspawn refuses to start it. Because trusting the
+  CA is part of the mechanism, not a choice, the adapter also exports every
+  variable the common runtimes read their roots from, pointing at the bundle —
+  the set a Claude Code web session exports — each a default a container can
+  override. Java, which wants a PKCS#12 truststore, is not covered.
 - Which hosts are intercepted is decided by frisket's DNS: an intercepted name
   resolves to frisket's service address. There is no second list to keep.
 - Clients that pin certificates are spliced through, by name, and get no
@@ -442,6 +451,7 @@ host                                         sandbox network namespace
 frisket serve                                nftables and policy routing
   control.sock <-- root: open, close           (root, from the host, after start)
   /var/lib/frisket/ca/  (key never leaves)     mark, route to lo, tproxy --> 127.0.0.1
+  /var/lib/frisket/public/  -- bound ro ------> /etc/frisket: ca.crt, ca-bundle.crt
   per session, in systemd's fd store:                             ^         ^
     listeners  -------- held from here, created in there ---------+---------+
     record (sealed memfd)                        (one TCP, one DNS; the workload
@@ -693,7 +703,7 @@ holds nothing private to read out through them.
   `claudeAiOauth.expiresAt`. Past that, 503 (decision 10).
 - **The sandbox** holds a placeholder with the same shape and an expiry far in
   the future, so its Claude Code never tries a refresh of its own, and trusts
-  frisket's CA through `NODE_EXTRA_CA_CERTS`.
+  frisket's CA through `NODE_EXTRA_CA_CERTS`, which the adapter exports.
 - **Its `~/.claude` is its own.** The host's cannot be mounted with the
   credential covered by a bind: a host session refreshes by temp-file and
   rename, and a rename over a mountpoint detaches the mount in every other
@@ -835,8 +845,9 @@ node's address can be used.
 repository. What frisket uses from it: `postStart`, a root hook that runs
 after the namespace exists with the ordering contract above; `postStop`, called
 from both the clean and the killed path; the container declaration's
-`bindMounts`, which flong reads as data, for the CA, read-only at a
-destination unlike its source; `path`, for the tools the hooks run; the capability flags as defence in depth; and
+`bindMounts`, which flong reads as data, for the public directory, read-only
+at a destination unlike its source; the container's `environment.variables`,
+which the payload inherits, for the variables that point at the bundle; `path`, for the tools the hooks run; the capability flags as defence in depth; and
 `network` — pasta for a private session.
 
 Two properties frisket depends on that are flong's to keep: the namespace is
@@ -845,7 +856,8 @@ owned by the initial user namespace, and egress is provisioned last.
 **nix-config** — policy, and the mounts the target state removes:
 
 - Define the policies and which sandbox gets which.
-- Distribute frisket's CA to the runtimes in each container.
+- Drop its own CA variables (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_DIR`), which
+  the adapter now sets.
 - Handpick what each tier mounts. `~/.ssh` goes once git is injected; the agent
   credential files go; `cc-socks` stays for trusted and goes for strict; the
   askpass script belongs to the host tier alone.

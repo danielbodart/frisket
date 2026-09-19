@@ -15,6 +15,8 @@ let
   perSession = 5;
 
   stateDir = "/var/lib/frisket";
+  # What a sandbox is given, and nothing else: bound whole into sessions.
+  publicDir = "${stateDir}/public";
 
   # THE POLICIES ARE DATA, read by the daemon at start and checked there in
   # full: a configuration that does not hold stops the daemon, loudly, rather
@@ -272,16 +274,28 @@ in
     caCertificate = mkOption {
       type = types.path;
       readOnly = true;
-      default = "${stateDir}/ca/ca.crt";
+      default = "${publicDir}/ca.crt";
       description = ''
         The machine's CA certificate, made by the daemon on its first start:
         what a sandbox must trust for interception. It is name-constrained to
         every policy's intercepted hosts, and made anew on the first start
-        after they change; a session already running trusts the old one until
-        it is relaunched. The key beside it never leaves the state directory.
-        How each runtime inside is told to trust it -- NODE_EXTRA_CA_CERTS,
-        SSL_CERT_FILE, REQUESTS_CA_BUNDLE, a system bundle -- is the consumer's
-        to decide.
+        after they change. The file is replaced by rename, so a session that
+        binds its directory sees the new one; a process that has already read
+        the old one trusts it until it restarts. The key never leaves the
+        state directory: this is a copy, in a directory of public files that
+        is safe to bind whole.
+      '';
+    };
+
+    caBundle = mkOption {
+      type = types.path;
+      readOnly = true;
+      default = "${publicDir}/ca-bundle.crt";
+      description = ''
+        `security.pki.caBundle` with the CA after it, beside `caCertificate`
+        and rewritten on every start: for a runtime whose setting replaces
+        its roots (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`) rather than adding
+        to them.
       '';
     };
 
@@ -359,10 +373,11 @@ in
 
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve -log-level ${cfg.logLevel} -control ${cfg.controlSocket}"
-          + " -config ${configFile} -state ${stateDir}"
+          + " -config ${configFile} -state ${stateDir} -roots ${config.security.pki.caBundle}"
           + lib.optionalString (cfg.maxConnections > 0) " -max-conns ${toString cfg.maxConnections}";
         # The CA key lives here, 0600 inside a 0700 directory. A new CA is
-        # made beside the old and swapped in with RENAME_EXCHANGE.
+        # made beside the old and swapped in with RENAME_EXCHANGE. public/,
+        # 0755, holds only the certificate and the bundle.
         StateDirectory = "frisket";
         StateDirectoryMode = "0700";
         User = cfg.user;
