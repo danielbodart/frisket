@@ -154,7 +154,6 @@ in
       group = "users";
       policies.test = {
         allow = [ "allowed.test" "api.test" ];
-        intercept = [ "api.test" ];
         routes.api = {
           host = "api.test";
           upstream = "https://api.test";
@@ -167,7 +166,6 @@ in
       # The trusted shape: every name, and the same route still intercepted.
       policies.trusted = {
         allow = [ "*" ];
-        intercept = [ "api.test" ];
         routes.api = config.services.frisket.policies.test.routes.api;
       };
     };

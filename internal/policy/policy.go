@@ -48,14 +48,14 @@ type Policy struct {
 	// answered NXDOMAIN without an upstream lookup, and so has no address
 	// egress would accept.
 	Allow []string `json:"allow"`
-	// Intercept names are answered with the session's service address, so
-	// their connections reach interception. Each must also be allowed --
-	// interception is how an allowed host gets its credential, not a way round
-	// the allowlist -- and each must have a route, or its TLS is refused at
-	// the handshake and the name is a dead end. Exact names only: a route
-	// serves one host.
-	Intercept []string `json:"intercept,omitempty"`
-	// Routes are the intercepted hosts' credentials and scopes.
+	// Routes are the intercepted hosts' credentials and scopes, and a route's
+	// host is what makes a name intercepted: it is answered with the session's
+	// service address, so its connections reach interception. There is no
+	// second list of intercepted names -- one would only repeat the routes'
+	// hosts, since a name with no route is a dead end at the handshake and a
+	// route for a name not intercepted is never reached. Each host must also
+	// be allowed: interception is how an allowed host gets its credential, not
+	// a way round the allowlist. Exact names only: a route serves one host.
 	Routes []Route `json:"routes,omitempty"`
 }
 
@@ -140,19 +140,20 @@ func (c *Config) Intercepted() ([]string, error) {
 	return slices.Compact(out), nil
 }
 
-// interceptHosts is a policy's intercepted names, each an exact name.
+// interceptHosts is a policy's intercepted names -- its routes' hosts -- each
+// an exact name.
 func interceptHosts(p Policy) ([]string, error) {
-	hosts := make([]string, 0, len(p.Intercept))
-	for _, s := range p.Intercept {
-		pat, err := dns.ParsePattern(s)
+	hosts := make([]string, 0, len(p.Routes))
+	for _, r := range p.Routes {
+		pat, err := dns.ParsePattern(r.Host)
 		if err != nil {
-			return nil, fmt.Errorf("intercept: %w", err)
+			return nil, fmt.Errorf("route %s: %w", r.Name, err)
 		}
 		// One name per route, so a wildcard could never be served: every name
 		// it matched would resolve to the service address and fail at the
 		// handshake.
 		if pat.Any || pat.Wildcard {
-			return nil, fmt.Errorf("intercept %s: a wildcard, and a route is for one host", pat)
+			return nil, fmt.Errorf("route %s: %s is a wildcard, and a route is for one host", r.Name, pat)
 		}
 		hosts = append(hosts, pat.Name)
 	}
@@ -242,25 +243,14 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 	if err != nil {
 		return nil, fmt.Errorf("intercept: %w", err)
 	}
-	routed := map[string]bool{}
-	for _, r := range p.Routes {
-		routed[dns.Normalize(r.Host)] = true
-	}
 	for _, h := range hosts {
 		if !allow.Match(h) {
-			return nil, fmt.Errorf("intercept %s is not on the allowlist; interception is how an allowed host gets its credential, not a way round the allowlist", h)
-		}
-		if !routed[h] {
-			return nil, fmt.Errorf("intercept %s has no route", h)
+			return nil, fmt.Errorf("route for %s: not on the allowlist; interception is how an allowed host gets its credential, not a way round the allowlist", h)
 		}
 	}
 
 	routes := make([]intercept.Route, 0, len(p.Routes))
 	for _, r := range p.Routes {
-		host := dns.Normalize(r.Host)
-		if !icpt.Match(host) {
-			return nil, fmt.Errorf("route %s: %s is not intercepted, so no connection would ever reach it", r.Name, r.Host)
-		}
 		ir, closer, err := route(r, d.Log)
 		if err != nil {
 			return nil, fmt.Errorf("route %s: %w", r.Name, err)

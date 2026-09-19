@@ -34,12 +34,11 @@ launcher:
     user = "alice";                     # whose credentials it holds
     policies.research = {
       allow = [ "api.example.com" "*.pkg.example.org" ];
-      intercept = [ "api.example.com" ];
       routes.example = {
         host = "api.example.com";
         upstream = "https://api.example.com";
         credentialFile = "/run/secrets/example-token";
-        placeholder = "frisket-injects-the-real-one";   # what the sandbox holds instead
+        placeholder = "proxy-injected";   # what the sandbox holds instead
         paths = [ { methods = [ "GET" "POST" ]; prefix = "/v1"; } ];
       };
     };
@@ -59,7 +58,10 @@ A session `flong.agent` starts resolves `api.example.com` to frisket, which
 terminates its TLS with the machine's CA, checks each request against the
 route's paths, replaces the placeholder with `Bearer <token>` from the file,
 and forwards it upstream. Only the placeholder, exactly: a request carrying any
-other credential, or none, goes upstream as it was sent. `*.pkg.example.org`
+other credential, or none, goes upstream as it was sent. `proxy-injected` is
+what Claude Code on the web uses, and Claude Code keeps a variable holding
+exactly that when it scrubs credentials from a subprocess's environment.
+`*.pkg.example.org`
 resolves as usual and is spliced through untouched. Every other name is
 answered NXDOMAIN, without an upstream lookup, and every address frisket did
 not resolve for the session is refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
@@ -93,12 +95,12 @@ restarts.
 - `service` — the sandbox has its own network (flong's `network`). Only DNS and
   frisket's service address, `192.0.2.2` and `2001:db8::2`, are steered;
   everything else goes direct. DNS is still held to the policy, so a policy
-  that should resolve everything allows `*` and intercepts as usual:
+  that should resolve everything allows `*`, and its routes are intercepted as
+  usual:
 
   ```nix
   services.frisket.policies.trusted = {
     allow = [ "*" ];
-    intercept = [ "api.example.com" ];
     routes.example = { /* as above */ };
   };
   ```
@@ -127,10 +129,9 @@ and point its runtimes at `ca-bundle.crt` in it.
 |---|---|---|
 | `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
 | `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
-| `services.frisket.policies.<name>.intercept` | `[ ]` | exact names answered with frisket's address; each must be allowed and have a route |
-| `services.frisket.policies.<name>.routes.<route>` | `{ }` | `host`, `upstream`, `upstreamCA`, `credentialFile`, `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `paths` |
+| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile`, `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `paths` |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
-| `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host; constrained to every policy's `intercept` |
+| `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host; constrained to every policy's route hosts |
 | `services.frisket.caBundle` | *read-only* | `security.pki.caBundle` with the CA appended, beside `caCertificate` |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
 | `services.frisket.logLevel` | `info` | `debug` adds each intercepted request's headers and error bodies; credentials are described, never shown |

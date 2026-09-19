@@ -68,10 +68,9 @@ func valid(t *testing.T) Policy {
 		t.Fatal(err)
 	}
 	return Policy{
-		Allow:     []string{"allowed.test", "api.test", "*.cdn.test"},
-		Intercept: []string{"api.test"},
+		Allow: []string{"allowed.test", "api.test", "*.cdn.test"},
 		Routes: []Route{{
-			Name: "api", Host: "api.test", Upstream: "https://api.test", CredentialFile: token, Placeholder: "frisket-injects-the-real-one",
+			Name: "api", Host: "api.test", Upstream: "https://api.test", CredentialFile: token, Placeholder: "proxy-injected",
 			Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/v1"}},
 		}},
 	}
@@ -87,22 +86,19 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 	for name, mutate := range map[string]func(*Policy){
 		// Interception is how an allowed host gets its credential, not a way
 		// round the allowlist.
-		"an intercepted name not on the allowlist": func(p *Policy) { p.Allow = []string{"allowed.test"} },
-		"an intercepted name with no route":        func(p *Policy) { p.Intercept = append(p.Intercept, "allowed.test") },
-		"a wildcard intercept":                     func(p *Policy) { p.Intercept = append(p.Intercept, "*.cdn.test") },
-		"a bare * intercept":                       func(p *Policy) { p.Allow = []string{"*"}; p.Intercept = append(p.Intercept, "*") },
-		"a route for a name not intercepted":       func(p *Policy) { p.Intercept = nil },
-		"a route with no scope":                    func(p *Policy) { p.Routes[0].Paths = nil },
-		"a route with no credential":               func(p *Policy) { p.Routes[0].CredentialFile = "" },
-		"a JSON credential that names no token":    func(p *Policy) { p.Routes[0].CredentialJSON = &CredentialJSON{} },
-		"a route with no placeholder":              func(p *Policy) { p.Routes[0].Placeholder = "" },
-		"a plain-HTTP upstream":                    func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
-		"a * inside an allowlist name":             func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
-		"a * glued to an allowlist name":           func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
-		"Authorization named as a bare header":     func(p *Policy) { p.Routes[0].Header = "authorization" },
+		"a route for a name not on the allowlist": func(p *Policy) { p.Allow = []string{"allowed.test"} },
+		"a route for a wildcard":                  func(p *Policy) { p.Routes[0].Host = "*.cdn.test" },
+		"a route for *":                           func(p *Policy) { p.Allow = []string{"*"}; p.Routes[0].Host = "*" },
+		"a route with no scope":                   func(p *Policy) { p.Routes[0].Paths = nil },
+		"a route with no credential":              func(p *Policy) { p.Routes[0].CredentialFile = "" },
+		"a JSON credential that names no token":   func(p *Policy) { p.Routes[0].CredentialJSON = &CredentialJSON{} },
+		"a route with no placeholder":             func(p *Policy) { p.Routes[0].Placeholder = "" },
+		"a plain-HTTP upstream":                   func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
+		"a * inside an allowlist name":            func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
+		"a * glued to an allowlist name":          func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
+		"Authorization named as a bare header":    func(p *Policy) { p.Routes[0].Header = "authorization" },
 		"a route for a host the CA does not permit": func(p *Policy) {
 			p.Allow = append(p.Allow, "other.test")
-			p.Intercept = []string{"other.test"}
 			p.Routes[0].Host, p.Routes[0].Upstream = "other.test", "https://other.test"
 		},
 	} {
@@ -122,8 +118,8 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 // in order -- and never for a wildcard.
 func TestInterceptedIsEveryPolicysHosts(t *testing.T) {
 	c := &Config{Policies: map[string]Policy{
-		"a": {Intercept: []string{"API.test.", "git.test"}},
-		"b": {Intercept: []string{"api.test", "b.test"}},
+		"a": {Routes: []Route{{Name: "api", Host: "API.test."}, {Name: "git", Host: "git.test"}}},
+		"b": {Routes: []Route{{Name: "api", Host: "api.test"}, {Name: "b", Host: "b.test"}}},
 		"c": {},
 	}}
 	got, err := c.Intercepted()
@@ -131,7 +127,7 @@ func TestInterceptedIsEveryPolicysHosts(t *testing.T) {
 		t.Fatalf("Intercepted = %v, %v", got, err)
 	}
 	for _, bad := range []string{"*", "*.test", "a.*.test"} {
-		c := &Config{Policies: map[string]Policy{"a": {Intercept: []string{bad}}}}
+		c := &Config{Policies: map[string]Policy{"a": {Routes: []Route{{Name: "r", Host: bad}}}}}
 		if got, err := c.Intercepted(); err == nil {
 			t.Errorf("Intercepted with %q = %v", bad, got)
 		}
@@ -159,7 +155,7 @@ func TestARouteReadsItsCredentialFromJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(config, []byte(`{"policies":{"p":{"allow":["api.test"],"intercept":["api.test"],"routes":[{
+	if err := os.WriteFile(config, []byte(`{"policies":{"p":{"allow":["api.test"],"routes":[{
 		"name":"claude","host":"api.test","upstream":"https://api.test","credentialFile":`+strconv.Quote(creds)+`,"placeholder":"p",
 		"credentialJSON":{"token":"claudeAiOauth.accessToken","expiresMillis":"claudeAiOauth.expiresAt"},
 		"paths":[{"methods":["POST"],"prefix":"/v1"}]}]}}}`), 0o600); err != nil {

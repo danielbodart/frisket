@@ -463,8 +463,8 @@ frisket serve                                nftables and policy routing
 **`frisket serve`** — the host daemon. A root-only control socket opens a
 session with a named policy and parameters, and closes it; closing one means
 closing its descriptors, or its namespace stays pinned. Its policies are data,
-written by the NixOS module: the allowlist, the intercepted names, and the
-routes.
+written by the NixOS module: the allowlist and the routes, whose hosts are the
+intercepted names.
 
 **`frisket steer`** and **`frisket connect`** — the privileged half, run by
 root from a launcher's hook, in that order. `steer` enters the namespace,
@@ -562,8 +562,8 @@ depth and not the name itself; and `*` alone, every name. A `*` anywhere else �
 `**.name`, `*name`, `a.*.name`, `name.*` — is refused when the configuration
 loads, because a `*` that loads silently into a restrictive list is the bug
 ottergate has. `*` is how a trusted policy leaves names unfiltered and still
-intercepts its credential hosts. Intercepted names are exact: a route serves one
-host.
+intercepts its credential hosts. The intercepted names are the routes' hosts,
+with no list of their own to repeat them, and exact: a route serves one host.
 
 Upstream queries get 0x20 encoding, a fresh random transaction id and a
 connected socket per query, and a response is dropped unless its question

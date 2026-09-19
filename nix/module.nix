@@ -25,7 +25,7 @@ let
     inherit (cfg) dns;
     policies = lib.mapAttrs
       (_: p: {
-        inherit (p) allow intercept;
+        inherit (p) allow;
         routes = lib.mapAttrsToList
           (name: r: {
             inherit name;
@@ -73,7 +73,7 @@ let
       host = mkOption {
         type = types.str;
         example = "api.example.com";
-        description = "The name the sandbox connects to. It must be in the policy's `intercept`.";
+        description = "The name the sandbox connects to, intercepted because this route is for it. It must be on the policy's `allow`.";
       };
       upstream = mkOption {
         type = types.strMatching "https://.*";
@@ -229,7 +229,6 @@ in
         {
           research = {
             allow = [ "api.example.com" "*.pkg.example.org" ];
-            intercept = [ "api.example.com" ];
             routes.example = {
               host = "api.example.com";
               upstream = "https://api.example.com";
@@ -252,20 +251,16 @@ in
               accepts only addresses DNS resolved for a name that is.
             '';
           };
-          intercept = mkOption {
-            type = types.listOf types.str;
-            default = [ ];
-            description = ''
-              Names answered with the session's service address, so their TLS
-              is terminated by frisket and their requests carry a route's
-              credential. Exact names only; each must be on `allow` and have a
-              route.
-            '';
-          };
           routes = mkOption {
             type = types.attrsOf route;
             default = { };
-            description = "The intercepted hosts' credentials and scopes, by a name for the log.";
+            description = ''
+              The intercepted hosts' credentials and scopes, by a name for the
+              log. A route's host is what makes a name intercepted: it is
+              answered with the session's service address, so its TLS is
+              terminated by frisket and its requests carry the route's
+              credential. Each host must be on `allow`.
+            '';
           };
         };
       });
@@ -318,16 +313,10 @@ in
             message = "services.frisket.policies.${name}.allow has ${w}: a `*` is allowed only alone, meaning every name, or as a leading `*.`.";
           })
           p.allow
-        ++ map
-          (n: {
-            assertion = allowed p.allow n;
-            message = "services.frisket.policies.${name}.intercept names ${n}, which is not on its allowlist: interception is how an allowed host gets its credential, not a way round the allowlist.";
-          })
-          p.intercept
         ++ lib.mapAttrsToList
           (rname: r: {
-            assertion = lib.elem r.host p.intercept;
-            message = "services.frisket.policies.${name}.routes.${rname} is for ${r.host}, which is not in the policy's intercept list, so no connection would ever reach it.";
+            assertion = allowed p.allow r.host;
+            message = "services.frisket.policies.${name}.routes.${rname} is for ${r.host}, which is not on its allowlist: interception is how an allowed host gets its credential, not a way round the allowlist.";
           })
           p.routes
         ++ lib.mapAttrsToList
