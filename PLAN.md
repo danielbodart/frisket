@@ -10,8 +10,9 @@ the wire, where the sandbox cannot reach them. For a sandbox with no network of
 its own it is also the only way out, and every connection it sees is logged.
 
 Nothing in a sandbox is configured to use it. The kernel steers connections to
-it: no proxy variables, no hosts file, no per-tool settings for egress. The one
-thing a sandbox is told is which certificate authority to trust.
+it: no proxy variables, no hosts file, no per-tool settings for egress. A
+sandbox is told which certificate authority to trust, and holds a placeholder
+wherever a client insists on a credential of its own.
 
 Its first consumer is the agent containers in
 [nix-config](https://github.com/danielbodart/nix-config), which run Claude Code
@@ -19,11 +20,11 @@ and codex inside [flong](https://github.com/danielbodart/flong). frisket itself
 knows nothing about nspawn, flong or agents.
 
 Status: the base capability is built and tested end to end in a VM — steering,
-the daemon and its sessions across restarts, egress policy, DNS, and one
-generic intercepted route adding a credential on the wire. Claude Code's route
-is built on it; every other tool's is designed on its own (see "Per-tool
-routes"). Everything below
-that says *measured* was run on this machine.
+the daemon and its sessions across restarts, egress policy, DNS, and
+intercepted routes adding a credential on the wire. Claude Code's and git's
+routes are built on them; every other tool's is designed on its own (see
+"Per-tool routes"). Everything below that says *measured* was run on this
+machine.
 
 ---
 
@@ -116,9 +117,11 @@ to its original destination.
 
 This is what makes the rest of the design simple. Tools keep their ordinary
 configuration and talk to their real endpoints; frisket adds the credential on
-the wire. No per-tool base URL, no placeholder token, no `insteadOf`, no
-`HF_ENDPOINT`, no undocumented environment variables, and no gap for the
-endpoints a tool hard-codes.
+the wire. No per-tool base URL, no `HF_ENDPOINT`, no undocumented environment
+variables, and no gap for the endpoints a tool hard-codes. What a sandbox holds
+is at most a placeholder where a client will not run without a credential
+(decision 13), and git's `insteadOf` from SSH to HTTPS — a protocol frisket can
+see into, at the real host, never an address of frisket's.
 
 - Every session has a certificate authority of its own, made by the daemon
   when the session opens and trusted by that sandbox alone. It is
@@ -615,10 +618,10 @@ about forty lines.
 
 ## Per-tool routes
 
-Claude Code's route is decided and built (below). Every other tool's is
-designed on its own, one tool at a time, against what that tool actually does;
-what follows is what the design has to be able to express, and the questions
-each tool leaves open.
+Claude Code's and git's routes are decided and built (below). Every other
+tool's is designed on its own, one tool at a time, against what that tool
+actually does; what follows is what the design has to be able to express, and
+the questions each tool leaves open.
 
 With interception, the sandbox's configuration is ordinary. What each tool needs
 is a CA it trusts; what frisket needs is a route that knows how to authorise and
@@ -631,12 +634,12 @@ inject.
   file that says when its token expires lets a stale token answer 503 rather
   than 401 (decision 10).
 - **Scope richer than a path prefix.** Repository sets, for git's smart-HTTP
-  paths and GitHub's `/repos/{owner}/{repo}`; per-request method and path,
-  always against the real request line, matched by segment (decision 6).
-- **Injection shapes beyond a bearer token.** Basic with a fixed user (git), a
-  bare header (`x-api-key`), and a service rather than a header: the Google
-  client libraries and gcloud find credentials by probing a metadata server,
-  and between them probe `/`, `/computeMetadata/v1/instance`,
+  paths (built) and GitHub's `/repos/{owner}/{repo}`; per-request method and
+  path, always against the real request line, matched by segment (decision 6).
+- **Injection shapes beyond a bearer token.** Basic with a fixed user (git,
+  built), a bare header (`x-api-key`, built), and a service rather than a
+  header: the Google client libraries and gcloud find credentials by probing a
+  metadata server, and between them probe `/`, `/computeMetadata/v1/instance`,
   `service-accounts/default/?recursive=true`, `service-accounts/?recursive=true`,
   `default/email`, `project/project-id`, `project/numeric-project-id`,
   `universe/universe-domain`, and `token` with `?scopes=`, all with
@@ -670,8 +673,8 @@ inject.
 gh's design. It is marked PROVISIONAL, no policy can name it, and it is not an
 answer to gh's row until that row is designed.
 
-Several credentials have no source on this machine yet: there is no GitHub App,
-no gcloud installation, no Cloudflare login, and the hf token is outside sops.
+Several credentials have no source on this machine yet: there is no gcloud
+installation, no Cloudflare login, and the hf token is outside sops.
 The agent rows depend on decision 10: frisket holds no login of its own and
 injects what the host file currently holds.
 
@@ -679,13 +682,19 @@ injects what the host file currently holds.
 
 GitHub allowed by name is a write channel in strict, even with no credential
 of ours in the sandbox: a prompt injection brings its own throwaway account's
-token and posts a gist. So GitHub is not on strict's allowlist until it can be
-offered as an intercepted, read-only route, whose scope is what stops it:
+token and posts a gist. So GitHub is on strict's allowlist only as
+intercepted, read-only routes with no credential, whose scope is what stops it
+(built, measured):
 
-- only `GET` and `HEAD` are admitted, and git's upload-pack for clone and fetch
+- only `GET` and `HEAD` are admitted, on `github.com` and `api.github.com`,
+  and git's upload-pack for clone and fetch
   (`info/refs?service=git-upload-pack`, and the `POST` to `git-upload-pack`);
 - receive-pack (push), `info/refs?service=git-receive-pack` included, and every
   write method are refused.
+
+Its download hosts, `codeload.github.com` and `*.githubusercontent.com`, are
+allowed and spliced: they serve content, and GitHub takes uploads at
+`uploads.github.com`, which is not allowed.
 
 A planted token still reaches GitHub, for those reads (decision 13): strict
 holds nothing private to read out through them.
@@ -750,9 +759,10 @@ TPROXY, the daemon and its sessions across restarts, and the flong adapter;
 egress with the structural classifier, `Dialer.Control` and the session's
 resolved set; DNS with the allowlist; and interception with a CA per session,
 name-constrained to its policy's route hosts and mounted into the sandbox,
-leaves minted per name, and one generic route adding a credential from a host
-file on the wire. The VM test shows the credential reach the upstream and
-appear nowhere in the sandbox.
+leaves minted per name, and routes adding a credential from a host file on the
+wire — as a bearer token, a bare header or Basic's password — or holding a
+scope with no credential at all. The VM test shows the credential reach the
+upstream and appear nowhere in the sandbox.
 
 **Next: QUIC in `all`.** udp/443 is rejected, so QUIC clients fall back
 to TCP at once; QUIC through frisket is a relay on a UDP listener bound on 443
@@ -768,6 +778,9 @@ minting where one needs it.
 
 **Agents.** Claude Code's route is built: `credentialJSON` reads the host's
 rotating login, and its expiry answers 503. codex's is next, on the same shape.
+
+**git.** Built: over HTTPS with gh's token in trusted, anonymous and read-only
+in strict, measured in both tiers.
 
 **Integration.** The adapter against nix-config's tiers, and the mounts that
 target state removes.
@@ -887,10 +900,11 @@ payload does not start until the hook returns.
 
 - Define the policies and which sandbox gets which.
 - Drop its own CA variables (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_DIR`), which
-  the adapter now sets.
-- Handpick what each tier mounts. `~/.ssh` is gone (git over HTTPS, above); the agent
-  credential files go; `cc-socks` stays for trusted and goes for strict; the
-  askpass script belongs to the host tier alone.
+  the adapter now sets (done).
+- Handpick what each tier mounts. `~/.ssh` is gone (git over HTTPS, above) and
+  so is the Claude login; `~/.codex` goes with codex's route; `cc-socks` stays
+  for trusted and goes for strict; the askpass script belongs to the host tier
+  alone.
 
 Strict-tier hardening that is not frisket's concern, recorded so it is not lost:
 the read-only workspace overlay, vanilla agents with only `projects/<slug>`
@@ -917,7 +931,7 @@ inside, which the credential binds going away does not change.
 5. **Which host ports a trusted policy allows**, and whether that list is
    per project.
 6. **Where the credentials come from** for the routes that have no source yet:
-   there is no GitHub App, no gcloud installation and no Cloudflare login on
-   this machine, and the Hugging Face token is outside sops.
+   there is no gcloud installation and no Cloudflare login on this machine,
+   and the Hugging Face token is outside sops.
 7. **QUIC's policy.** Whether a relay's per-address allowlist is enough, or the
    Initial's SNI must be read (see "Build order").

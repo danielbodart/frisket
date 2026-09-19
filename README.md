@@ -12,8 +12,9 @@ them. For a sandbox with no network of its own it is also the only way out,
 and every connection and DNS query it sees is logged, one JSON line each.
 
 Nothing in a sandbox is configured to use it. The kernel steers connections to
-it with TPROXY: no proxy variables, no hosts file, no per-tool settings. The one
-thing a sandbox is told is which CA to trust.
+it with TPROXY: no proxy variables, no hosts file, no per-tool proxy settings.
+A sandbox is told which CA to trust, and holds a placeholder wherever a client
+insists on a credential of its own.
 
 The design, what was measured and what was rejected are in
 [PLAN.md](PLAN.md).
