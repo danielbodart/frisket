@@ -27,9 +27,13 @@ let
         routes = lib.mapAttrsToList
           (name: r: {
             inherit name;
-            inherit (r) host upstream credentialFile strip paths;
+            inherit (r) host upstream credentialFile placeholder paths;
           } // lib.optionalAttrs (r.upstreamCA != null) { upstreamCA = "${r.upstreamCA}"; }
-          // lib.optionalAttrs (r.header != null) { inherit (r) header; })
+          // lib.optionalAttrs (r.header != null) { inherit (r) header; }
+          // lib.optionalAttrs (r.credentialJSON != null) {
+            credentialJSON = { inherit (r.credentialJSON) token; }
+              // lib.optionalAttrs (r.credentialJSON.expiresMillis != null) { inherit (r.credentialJSON) expiresMillis; };
+          })
           p.routes;
       })
       cfg.policies;
@@ -83,11 +87,36 @@ let
         type = types.strMatching "/.*";
         example = "/run/secrets/example-token";
         description = ''
-          The token, alone in a file on the host, read by the daemon as
+          The token, alone in a file on the host -- or, with `credentialJSON`,
+          a JSON file that names it -- read by the daemon as
           `services.frisket.user` and re-read when it is replaced -- by rename
           too. A string and not a path, so it is never copied into the store.
           Not under /tmp, which the daemon's PrivateTmp hides.
         '';
+      };
+      credentialJSON = mkOption {
+        type = types.nullOr (types.submodule {
+          options = {
+            token = mkOption {
+              type = types.strMatching ".+";
+              example = "claudeAiOauth.accessToken";
+              description = "The dotted path through the file's JSON to the token.";
+            };
+            expiresMillis = mkOption {
+              type = types.nullOr (types.strMatching ".+");
+              default = null;
+              example = "claudeAiOauth.expiresAt";
+              description = ''
+                The dotted path to its expiry, in milliseconds since the epoch.
+                Past it the daemon answers 503, which the client retries,
+                rather than sending a token the upstream would 401. Null: the
+                file does not say.
+              '';
+            };
+          };
+        });
+        default = null;
+        description = "Read `credentialFile` as JSON, for a file that is not a bare token. Null: the whole file, trimmed.";
       };
       header = mkOption {
         type = types.nullOr types.str;
@@ -95,13 +124,15 @@ let
         example = "X-Api-Key";
         description = "The header the token goes in, bare. Null is `Authorization: Bearer <token>`.";
       };
-      strip = mkOption {
-        type = types.listOf types.str;
-        default = [ ];
+      placeholder = mkOption {
+        type = types.strMatching "[^[:space:]]+";
+        example = "frisket-injects-the-real-one";
         description = ''
-          Further request headers removed before the credential is added.
-          `Authorization`, `Proxy-Authorization` and the credential's own header
-          always are.
+          What the sandbox is given in the credential's place -- in the
+          environment variable or file its client reads a token from. A request
+          carrying exactly this in the credential's header, bare or after its
+          scheme, has it replaced with the credential; that is the only change
+          frisket makes. Anything else, or nothing, goes upstream as sent.
         '';
       };
       paths = mkOption {
@@ -148,6 +179,18 @@ in
         Made by a socket unit, root-owned and 0600: the daemon is not root and
         cannot make the socket root's itself, and it also refuses any peer that
         is not uid 0. Never bound into a sandbox.
+      '';
+    };
+
+    logLevel = mkOption {
+      type = types.enum [ "debug" "info" "warn" "error" ];
+      default = "info";
+      description = ''
+        `debug` adds a line per intercepted request with its headers as the
+        client sent them, the response's, and the start of an error's body --
+        to see what a client does on the wire. A header that can carry a
+        credential is described (its kind, length and a short hash), never
+        shown.
       '';
     };
 
@@ -315,7 +358,7 @@ in
       stopIfChanged = false;
 
       serviceConfig = {
-        ExecStart = "${lib.getExe cfg.package} serve -control ${cfg.controlSocket}"
+        ExecStart = "${lib.getExe cfg.package} serve -log-level ${cfg.logLevel} -control ${cfg.controlSocket}"
           + " -config ${configFile} -state ${stateDir}"
           + lib.optionalString (cfg.maxConnections > 0) " -max-conns ${toString cfg.maxConnections}";
         # The CA key lives here, 0600 inside a 0700 directory. A new CA is

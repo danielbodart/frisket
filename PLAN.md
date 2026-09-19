@@ -20,8 +20,9 @@ knows nothing about nspawn, flong or agents.
 
 Status: the base capability is built and tested end to end in a VM — steering,
 the daemon and its sessions across restarts, egress policy, DNS, and one
-generic intercepted route adding a credential on the wire. No tool's route is
-built; each is designed on its own (see "Per-tool routes"). Everything below
+generic intercepted route adding a credential on the wire. Claude Code's route
+is built on it; every other tool's is designed on its own (see "Per-tool
+routes"). Everything below
 that says *measured* was run on this machine.
 
 ---
@@ -274,6 +275,21 @@ the design wrong that was found by running it, and each gets a test:
 so untracked files are included). The override is never written to
 `flake.lock`, so no local path can be committed. Push frisket first, then
 `nix flake update frisket` in nix-config.
+
+**13. frisket replaces its placeholder, exactly, and changes nothing else.**
+A route names the placeholder its sandbox is given in the credential's place
+(`GH_TOKEN`, the Claude login's `accessToken`). A request carrying exactly
+that in the credential's header — bare, after its scheme, or as Basic auth's
+password — has it replaced with the real credential. Anything else goes
+upstream as the client sent it, and nothing is ever stripped. Measured: Claude
+Code's Remote Control is handed a session token (`sk-ant-si-…`) for its worker
+calls, and replacing every `Authorization` put the login where that token
+belonged, and every call failed 403. A client's own credential is its own
+business: frisket adds the host's where it was asked to, by the placeholder,
+and nowhere else. The cost is that a sandbox can use a token it brought with
+it. That is accepted: in trusted every host is reachable anyway, and strict
+holds nothing private but the prompt — it is for reading public code — so
+what bounds a planted token there is the route's scope, not frisket's.
 
 ---
 
@@ -573,11 +589,13 @@ about forty lines.
 ### Credentials
 
 - **Injection** — the tool's own request, to its own endpoint, over TLS frisket
-  terminates. frisket adds the credential, enforces the route's scope against
+  terminates. frisket replaces the route's placeholder with the credential
+  (decision 13), enforces the route's scope against
   the real request line, and forwards upstream over a fresh TLS connection,
   dialled through the same structural check as egress. Built, generically: a
   route is a host, an upstream, a token file on the host re-read when it is
-  replaced, a header to put it in, and the methods and path prefixes it admits.
+  replaced (a bare token, or a field of its JSON with an expiry), a header to
+  put it in, and the methods and path prefixes it admits.
 - **Minting** — where injection cannot work, a short-lived, narrowly scoped
   token, handed over once per session. Its lifetime and scope are the
   protection. Not built.
@@ -586,9 +604,10 @@ about forty lines.
 
 ## Per-tool routes
 
-No tool's route is built, and none is decided. Each is designed on its own, one
-tool at a time, against what that tool actually does; what follows is what the
-design has to be able to express, and the questions each tool leaves open.
+Claude Code's route is decided and built (below). Every other tool's is
+designed on its own, one tool at a time, against what that tool actually does;
+what follows is what the design has to be able to express, and the questions
+each tool leaves open.
 
 With interception, the sandbox's configuration is ordinary. What each tool needs
 is a CA it trusts; what frisket needs is a route that knows how to authorise and
@@ -630,8 +649,7 @@ inject.
 |---|---|---|
 | git over HTTPS | `github.com` smart-HTTP | which credential, which repositories a session gets, whether it may push |
 | gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`, GraphQL |
-| Claude Code | `api.anthropic.com` and its first-party endpoints | which endpoints, how the host's credential file is read, who refreshes (open question 1) |
-| codex | `chatgpt.com/backend-api/codex` | as for Claude Code |
+| codex | `chatgpt.com/backend-api/codex` | which endpoints, how `~/.codex/auth.json` is read, who refreshes; Claude Code's route is the template |
 | hf | `huggingface.co` | scope, which CDN and Xet hosts an allowlist needs, the token's source |
 | Cloudflare | `api.cloudflare.com` | account and zone scoping, the credential's source |
 | GCP client libraries, gcloud | a metadata server on the service address | where its tokens come from, and what they may do |
@@ -639,9 +657,8 @@ inject.
 | npm, PyPI, crates, Go proxy | — | no credential; which names each allowlist needs |
 
 `internal/intercept` holds tool-shaped pieces written ahead of these designs —
-a git smart-HTTP scope by repository, a GitHub REST scope, Basic with
-`x-access-token`, and a JSON extractor shaped around Claude Code's
-`claudeAiOauth`. They are marked PROVISIONAL, no policy can name them, and none
+a git smart-HTTP scope by repository, a GitHub REST scope, and Basic with
+`x-access-token`. They are marked PROVISIONAL, no policy can name them, and none
 is an answer to its row until that row is designed.
 
 Several credentials have no source on this machine yet: there is no GitHub App,
@@ -651,21 +668,40 @@ injects what the host file currently holds.
 
 ### GitHub
 
-GitHub allowed by name is an exfiltration channel in strict, even with no
-credential of ours in the sandbox: a prompt injection brings its own throwaway
-account's token and posts a gist. So GitHub is not on strict's allowlist until
-it can be offered as an intercepted, read-only route:
+GitHub allowed by name is a write channel in strict, even with no credential
+of ours in the sandbox: a prompt injection brings its own throwaway account's
+token and posts a gist. So GitHub is not on strict's allowlist until it can be
+offered as an intercepted, read-only route, whose scope is what stops it:
 
-- whatever `Authorization` the sandbox sends is stripped, and nothing is
-  injected: every request goes upstream anonymous;
 - only `GET` and `HEAD` are admitted, and git's upload-pack for clone and fetch
   (`info/refs?service=git-upload-pack`, and the `POST` to `git-upload-pack`);
 - receive-pack (push), `info/refs?service=git-receive-pack` included, and every
   write method are refused.
 
-The same argument applies to any host reachable by name with an
-attacker-supplied credential, the model APIs included. Strict must allow those,
-and there it is closed only by those hosts' own credential routes.
+A planted token still reaches GitHub, for those reads (decision 13): strict
+holds nothing private to read out through them.
+
+### Claude Code
+
+- **Where:** `api.anthropic.com`, every method, the whole path, for now: the
+  credential's own OAuth scopes are the narrowing, and the paths Claude Code
+  uses are to be measured from the request log before any are refused.
+  `mcp-proxy.anthropic.com` (claude.ai connectors) takes the same credential
+  where a policy wants connectors. Remote Control's hosts are unmeasured.
+- **The credential** is the host's own login, `~/.claude/.credentials.json`,
+  read with `credentialJSON` at `claudeAiOauth.accessToken`, expiring at
+  `claudeAiOauth.expiresAt`. Past that, 503 (decision 10).
+- **The sandbox** holds a placeholder with the same shape and an expiry far in
+  the future, so its Claude Code never tries a refresh of its own, and trusts
+  frisket's CA through `NODE_EXTRA_CA_CERTS`.
+- **Its `~/.claude` is its own.** The host's cannot be mounted with the
+  credential covered by a bind: a host session refreshes by temp-file and
+  rename, and a rename over a mountpoint detaches the mount in every other
+  namespace, uncovering the real file. What a sandbox shares of `~/.claude`
+  is picked, entry by entry, and never the directory.
+- **Who refreshes** is still the host (open question 1): its own sessions, and
+  where none is running, a keep-alive of the consumer's that runs the host's
+  Claude Code before the token expires. frisket still holds no login.
 
 ---
 
@@ -691,8 +727,8 @@ parser under decision 1's rule, not a hand-rolled one.
 **Then the routes**, each designed on its own (see "Per-tool routes"), and
 minting where one needs it.
 
-**Agents.** Claude Code and codex through interception, including what the
-host's rotating credential files require. A separate piece of work.
+**Agents.** Claude Code's route is built: `credentialJSON` reads the host's
+rotating login, and its expiry answers 503. codex's is next, on the same shape.
 
 **Integration.** The adapter against nix-config's tiers, and the mounts that
 target state removes.
@@ -781,8 +817,9 @@ node's address can be used.
 - Lifecycle: closing a session frees its namespace (its nsfs inode becomes
   reusable); a session survives a daemon restart through the fd store.
 - Credentials: the sandbox holds no credential, in its files or its processes'
-  environments; the real one reaches the upstream and the sandbox's own is
-  stripped; an out-of-scope request is refused; a credential file replaced by
+  environments; the real one reaches the upstream in the placeholder's place,
+  and any other credential goes as it was sent; an out-of-scope request is
+  refused; a credential file replaced by
   rename is used; an SSE response arrives incrementally; a large upload
   streams. Each tool's route brings its own.
 - Lifecycle: a session survives a daemon restart; a SIGKILLed launcher leaves

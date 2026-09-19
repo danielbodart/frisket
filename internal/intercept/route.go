@@ -34,20 +34,21 @@ type Route struct {
 	Credential credential.Source
 	// Inject puts the credential on the request.
 	Inject Injector
-	// Strip names further request headers to remove before injecting, for a
-	// sandbox that sends its own placeholder credential somewhere other than
-	// Authorization (an x-api-key, say). Authorization and
-	// Proxy-Authorization are always removed.
-	Strip []string
+	// Placeholder is what the sandbox is given in the credential's place. A
+	// request carrying exactly it, in Inject's header, has it replaced with
+	// the real credential; that is the only change frisket makes. A request
+	// carrying anything else -- a token of the client's own, like the session
+	// token Claude Code's Remote Control is handed -- or nothing goes upstream
+	// as it was sent. Nothing is ever stripped.
+	Placeholder string
 	// Scope is what the credential may be used for.
 	Scope Scope
 }
 
 // Injector puts a credential on an outgoing request.
 type Injector interface {
-	// Header is the header the credential goes in. It is removed from the
-	// sandbox's request first, so there is only ever one value and it is
-	// frisket's.
+	// Header is the header the credential goes in, and where the sandbox's
+	// placeholder is looked for.
 	Header() string
 	// Value is the header's value for secret.
 	Value(secret string) string
@@ -133,5 +134,34 @@ func (r *Route) validate() (*url.URL, error) {
 	if r.Inject == nil || r.Inject.Header() == "" {
 		return nil, fmt.Errorf("route %s: no injector", r.Name)
 	}
+	if r.Placeholder == "" || strings.ContainsAny(r.Placeholder, " \t\r\n") {
+		return nil, fmt.Errorf("route %s: a placeholder is required, one word: the only value frisket replaces", r.Name)
+	}
 	return u, nil
+}
+
+// carries reports whether a request holds the placeholder, exactly, as the
+// whole of the credential header or after its scheme: `Bearer <placeholder>`,
+// gh's `token <placeholder>`, or git's Basic auth with it as the password. One value only -- two is not a request
+// frisket can put one credential on.
+func (r *Route) carries(h http.Header) bool {
+	vals := h.Values(r.Inject.Header())
+	if len(vals) != 1 {
+		return false
+	}
+	if vals[0] == r.Placeholder {
+		return true
+	}
+	scheme, tok, ok := strings.Cut(vals[0], " ")
+	if !ok {
+		return false
+	}
+	if strings.EqualFold(scheme, "Basic") {
+		// git's shape: the placeholder is the password, under whatever user.
+		if b, err := base64.StdEncoding.DecodeString(tok); err == nil {
+			_, pass, ok := strings.Cut(string(b), ":")
+			return ok && pass == r.Placeholder
+		}
+	}
+	return tok == r.Placeholder
 }

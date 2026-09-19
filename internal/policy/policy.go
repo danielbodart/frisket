@@ -60,7 +60,8 @@ type Policy struct {
 }
 
 // Route is one intercepted host, as data. This is the generic route: a bearer
-// token or a bare header, from a file, scoped by method and path prefix.
+// token or a bare header, from a file -- the whole of it, or a field of its
+// JSON -- scoped by method and path prefix.
 // Tool-shaped routes are designed one tool at a time (PLAN.md, "Per-tool
 // routes") and none is expressed here.
 type Route struct {
@@ -72,17 +73,33 @@ type Route struct {
 	// UpstreamCA is a PEM bundle to verify the upstream with, instead of the
 	// host's roots.
 	UpstreamCA string `json:"upstreamCA,omitempty"`
-	// CredentialFile holds the token, alone, whitespace trimmed. It is read by
-	// the daemon, on the host, and re-read when it is replaced.
+	// CredentialFile holds the token, alone, whitespace trimmed -- or, with
+	// CredentialJSON, a JSON document that names it. It is read by the
+	// daemon, on the host, and re-read when it is replaced.
 	CredentialFile string `json:"credentialFile"`
+	// CredentialJSON reads CredentialFile as JSON: the token and its expiry
+	// at dotted paths. Nil is the bare token.
+	CredentialJSON *CredentialJSON `json:"credentialJSON,omitempty"`
 	// Header is the header the token goes in, bare. Empty means
 	// `Authorization: Bearer <token>`.
 	Header string `json:"header,omitempty"`
-	// Strip names further request headers to remove before injecting.
-	Strip []string `json:"strip,omitempty"`
+	// Placeholder is what the sandbox holds in the credential's place, and
+	// the only value frisket replaces: anything else is sent on as it came.
+	Placeholder string `json:"placeholder"`
 	// Paths is the route's scope: requests with a listed method at or under a
 	// prefix, matched by segment. Nothing else is admitted.
 	Paths []PathRule `json:"paths"`
+}
+
+// CredentialJSON is where a JSON credential file keeps its token, and when
+// that token expires: `claudeAiOauth.accessToken` and `claudeAiOauth.expiresAt`
+// for Claude Code's. The expiry is what turns a stale token into a 503, which
+// the client retries, instead of the upstream's 401, which fails its turn.
+type CredentialJSON struct {
+	Token string `json:"token"`
+	// ExpiresMillis names milliseconds since the epoch. Empty: the file does
+	// not say, and the token is never reported expired.
+	ExpiresMillis string `json:"expiresMillis,omitempty"`
 }
 
 // PathRule is one scope rule.
@@ -302,7 +319,7 @@ func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
 	if len(r.Paths) == 0 {
 		return intercept.Route{}, nil, errors.New("no paths: a route with no scope admits nothing")
 	}
-	out := intercept.Route{Name: r.Name, Host: r.Host, Upstream: r.Upstream, Strip: r.Strip, Inject: intercept.Bearer()}
+	out := intercept.Route{Name: r.Name, Host: r.Host, Upstream: r.Upstream, Placeholder: r.Placeholder, Inject: intercept.Bearer()}
 	if r.Header != "" {
 		if strings.EqualFold(r.Header, "Authorization") {
 			return intercept.Route{}, nil, errors.New(`header "Authorization" is the default, with Bearer; name another header for a bare token`)
@@ -319,7 +336,14 @@ func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
 		}
 		out.UpstreamCAs = pool
 	}
-	f, err := credential.WatchFile(r.CredentialFile, credential.Trimmed(), log)
+	extract := credential.Trimmed()
+	if j := r.CredentialJSON; j != nil {
+		if j.Token == "" {
+			return intercept.Route{}, nil, errors.New("credentialJSON names no token")
+		}
+		extract = credential.JSON{Token: j.Token, ExpiresMillis: j.ExpiresMillis}.Extract
+	}
+	f, err := credential.WatchFile(r.CredentialFile, extract, log)
 	if err != nil {
 		return intercept.Route{}, nil, err
 	}

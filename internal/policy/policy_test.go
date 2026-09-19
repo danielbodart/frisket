@@ -7,9 +7,11 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 
@@ -69,7 +71,7 @@ func valid(t *testing.T) Policy {
 		Allow:     []string{"allowed.test", "api.test", "*.cdn.test"},
 		Intercept: []string{"api.test"},
 		Routes: []Route{{
-			Name: "api", Host: "api.test", Upstream: "https://api.test", CredentialFile: token,
+			Name: "api", Host: "api.test", Upstream: "https://api.test", CredentialFile: token, Placeholder: "frisket-injects-the-real-one",
 			Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/v1"}},
 		}},
 	}
@@ -92,6 +94,8 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"a route for a name not intercepted":       func(p *Policy) { p.Intercept = nil },
 		"a route with no scope":                    func(p *Policy) { p.Routes[0].Paths = nil },
 		"a route with no credential":               func(p *Policy) { p.Routes[0].CredentialFile = "" },
+		"a JSON credential that names no token":    func(p *Policy) { p.Routes[0].CredentialJSON = &CredentialJSON{} },
+		"a route with no placeholder":              func(p *Policy) { p.Routes[0].Placeholder = "" },
 		"a plain-HTTP upstream":                    func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
 		"a * inside an allowlist name":             func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
 		"a * glued to an allowlist name":           func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
@@ -142,6 +146,40 @@ func TestLoadRefusesUnknownFields(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "intercepts") {
 		t.Errorf("Load = %v, want the unknown field named", err)
+	}
+}
+
+// A route's JSON credential is read at the paths its configuration names, from
+// the key the NixOS module writes, with the expiry that makes a stale token a
+// 503.
+func TestARouteReadsItsCredentialFromJSON(t *testing.T) {
+	dir := t.TempDir()
+	creds := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(creds, []byte(`{"claudeAiOauth":{"accessToken":"tok","expiresAt":1789766901894}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(config, []byte(`{"policies":{"p":{"allow":["api.test"],"intercept":["api.test"],"routes":[{
+		"name":"claude","host":"api.test","upstream":"https://api.test","credentialFile":`+strconv.Quote(creds)+`,"placeholder":"p",
+		"credentialJSON":{"token":"claudeAiOauth.accessToken","expiresMillis":"claudeAiOauth.expiresAt"},
+		"paths":[{"methods":["POST"],"prefix":"/v1"}]}]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, closer, err := route(cfg.Policies["p"].Routes[0], slog.New(slog.NewJSONHandler(&journal{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closer()
+	s, err := r.Credential.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Value != "tok" || !s.Expires.Equal(time.UnixMilli(1789766901894)) {
+		t.Errorf("credential = %q expiring %v, want the token at claudeAiOauth.accessToken expiring at claudeAiOauth.expiresAt", s.Value, s.Expires)
 	}
 }
 

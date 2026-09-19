@@ -155,6 +155,7 @@ in
           upstream = "https://api.test";
           upstreamCA = "${certs}/ca.crt";
           credentialFile = "/srv/secrets/token";
+          placeholder = "frisket-placeholder";
           paths = [{ methods = [ "GET" ]; prefix = "/v1"; }];
         };
       };
@@ -333,7 +334,7 @@ in
       # The real credential, made here so it exists nowhere before the test
       # writes it to the host, and can be searched for everywhere after.
       token = "real-" + secrets.token_hex(16)
-      sandbox_token = "sandbox-" + secrets.token_hex(8)
+      placeholder = "frisket-placeholder"
 
       def write_token(t):
           # By temp file and rename, as the tools that own credential files
@@ -583,10 +584,11 @@ in
 
       # Interception, end to end, in a session of its own. The first request
       # is the payload's, inside the session, through the CA the adapter bound
-      # at /etc/frisket/ca.crt and a sandbox Authorization header that must
-      # not survive. The rest are made as the workload from outside.
+      # at /etc/frisket/ca.crt, carrying the placeholder the sandbox is given
+      # in the credential's place. The rest are made as the workload from
+      # outside.
       api = ("curl -sS -m 10 --cacert /etc/frisket/ca.crt "
-             f"-H 'Authorization: Bearer {sandbox_token}' https://api.test/v1/models > api-out 2>&1")
+             f"-H 'Authorization: Bearer {placeholder}' https://api.test/v1/models > api-out 2>&1")
       name, leader = hold("${strict}", "ip link show frisket0", api)
       machine.wait_until_succeeds("grep -q upstream-api-ok /srv/work/api-out")
 
@@ -628,11 +630,11 @@ in
           intercepted = [m for m in lines_of("dns", name) if m.get("name") == "api.test"]
           assert intercepted and all(m["decision"] == "intercepted" and "upstream" not in m for m in intercepted), intercepted
 
-      with subtest("a request through it reaches the upstream with the real credential, and never the sandbox's"):
+      with subtest("a request through it reaches the upstream with the real credential in the placeholder's place"):
           assert machine.succeed("cat /srv/work/api-out").strip() == "upstream-api-ok"
           seen = upstream_saw("upstream-request GET api.test /v1/models")
           assert f"auth=Bearer {token}" in seen, seen
-          assert sandbox_token not in upstream_saw("."), "the sandbox's own Authorization reached the upstream"
+          assert placeholder not in upstream_saw("."), "the placeholder reached the upstream"
           [r] = wait_log("request", name, lambda m: m["path"] == "/v1/models", "the request")
           assert r["decision"] == "allowed" and r["status"] == 200 and r["route"] == "api", r
           assert r["dst"] in ("192.0.2.2:443", "[2001:db8::2]:443"), r
@@ -667,12 +669,18 @@ in
           new_token = "real-" + secrets.token_hex(16)
           write_token(new_token)
           for _ in range(50):
-              machine.succeed(as_workload(leader, "curl -sSf -m 10 --cacert /etc/frisket/ca.crt -o /dev/null https://api.test/v1/models"))
+              machine.succeed(as_workload(leader, "curl -sSf -m 10 --cacert /etc/frisket/ca.crt -o /dev/null "
+                                                  f"-H 'Authorization: Bearer {placeholder}' https://api.test/v1/models"))
               if f"auth=Bearer {new_token}" in upstream_saw("upstream-request"):
                   break
               time.sleep(0.2)
           assert f"auth=Bearer {new_token}" in upstream_saw("upstream-request"), upstream_saw("upstream-request")
           token = new_token
+
+      with subtest("a credential that is not the placeholder goes upstream as it was sent"):
+          machine.succeed(as_workload(leader, "curl -sSf -m 10 --cacert /etc/frisket/ca.crt -o /dev/null "
+                                              "-H 'Authorization: Bearer clients-own-7' https://api.test/v1/models"))
+          assert "auth=Bearer clients-own-7" in upstream_saw("upstream-request"), upstream_saw("upstream-request")
 
       with subtest("an allowed name that is not intercepted is spliced, not terminated"):
           out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert ${certs}/ca.crt https://allowed.test/"))

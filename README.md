@@ -39,6 +39,7 @@ launcher:
         host = "api.example.com";
         upstream = "https://api.example.com";
         credentialFile = "/run/secrets/example-token";
+        placeholder = "frisket-injects-the-real-one";   # what the sandbox holds instead
         paths = [ { methods = [ "GET" "POST" ]; prefix = "/v1"; } ];
       };
     };
@@ -56,8 +57,9 @@ launcher:
 
 A session `flong.agent` starts resolves `api.example.com` to frisket, which
 terminates its TLS with the machine's CA, checks each request against the
-route's paths, replaces whatever `Authorization` the sandbox sent with
-`Bearer <token>` from the file, and forwards it upstream. `*.pkg.example.org`
+route's paths, replaces the placeholder with `Bearer <token>` from the file,
+and forwards it upstream. Only the placeholder, exactly: a request carrying any
+other credential, or none, goes upstream as it was sent. `*.pkg.example.org`
 resolves as usual and is spliced through untouched. Every other name is
 answered NXDOMAIN, without an upstream lookup, and every address frisket did
 not resolve for the session is refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
@@ -117,10 +119,11 @@ to run out of turn.
 | `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
 | `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
 | `services.frisket.policies.<name>.intercept` | `[ ]` | exact names answered with frisket's address; each must be allowed and have a route |
-| `services.frisket.policies.<name>.routes.<route>` | `{ }` | `host`, `upstream`, `upstreamCA`, `credentialFile`, `header` (null: `Authorization: Bearer`), `strip`, `paths` |
+| `services.frisket.policies.<name>.routes.<route>` | `{ }` | `host`, `upstream`, `upstreamCA`, `credentialFile`, `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `paths` |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
 | `services.frisket.caCertificate` | *read-only* | the CA certificate's path on the host; constrained to every policy's `intercept` |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
+| `services.frisket.logLevel` | `info` | `debug` adds each intercepted request's headers and error bodies; credentials are described, never shown |
 | `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
 | `services.frisket.maxConnections` | built in | concurrent connections per session |
 | `services.frisket.flong.<launcher>.policy` | *required* | the policy for the launcher's sessions |
@@ -130,6 +133,17 @@ to run out of turn.
 A credential file is read by the daemon, as `user`, and re-read when replaced,
 by rename too. The option is a string, so the file is never copied into the
 store. Keep it out of `/tmp`, which the daemon cannot see.
+
+A file that is not a bare token is read as JSON, at dotted paths. Claude Code's
+own login, which the host's sessions keep refreshed:
+
+```nix
+credentialFile = "/home/alice/.claude/.credentials.json";
+credentialJSON = {
+  token = "claudeAiOauth.accessToken";
+  expiresMillis = "claudeAiOauth.expiresAt";  # past it, 503 rather than a stale token
+};
+```
 
 ## Development
 

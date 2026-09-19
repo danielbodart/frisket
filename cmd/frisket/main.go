@@ -137,13 +137,15 @@ func runServe(argv []string) error {
 	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
 	configPath := fs.String("config", "", "the policies, as the NixOS module writes them")
 	state := fs.String("state", "", "the daemon's state directory; the CA is made in ca/ inside it")
+	var level slog.Level
+	fs.TextVar(&level, "log-level", slog.LevelInfo, "debug adds each intercepted request's headers, credentials described and never shown")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
 	if *configPath == "" || *state == "" {
 		return errors.New("-config and -state are both required")
 	}
-	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, nil))
+	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, &slog.HandlerOptions{Level: level}))
 
 	// Everything the policies need is built before the control socket is
 	// touched, so a configuration that does not hold stops the daemon at

@@ -83,9 +83,8 @@ func Trimmed() Extractor {
 // rather than inferred from the number's size, because a guess that is wrong by
 // a factor of a thousand is a credential that is either always stale or never.
 //
-// PROVISIONAL: shaped around Claude Code's credential file before its route was
-// designed (PLAN.md, "Per-tool routes"), and used by no policy. The generic
-// route reads a token with Trimmed.
+// A route selects it with credentialJSON; without one it reads a bare token
+// with Trimmed.
 type JSON struct {
 	Token         string
 	ExpiresMillis string

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -35,7 +36,8 @@ const (
 	apiHost     = "api.example.test"
 	gitHost     = "git.example.test"
 	realToken   = "real-token-7f3a"
-	sandboxAuth = "Bearer sandbox-token-91c2"
+	placeholder = "frisket-injects-the-real-one"
+	sandboxAuth = "Bearer " + placeholder
 )
 
 // journal is the injected log writer. THE LOGGER IS NOT SILENCED UNDER TEST:
@@ -164,7 +166,7 @@ func apiRoute(up *upstream, cred credential.Source) Route {
 		UpstreamCAs: up.pool(),
 		Credential:  cred,
 		Inject:      Bearer(),
-		Strip:       []string{"X-Api-Key"},
+		Placeholder: placeholder,
 		Scope: Scope{Paths: []PathRule{
 			{Methods: []string{"GET", "POST"}, Prefix: "/v1/messages"},
 			{Methods: []string{"GET"}, Prefix: "/v1/stream"},
@@ -186,6 +188,11 @@ type fixture struct {
 
 func newFixture(t *testing.T, j *journal, routes ...Route) *fixture {
 	t.Helper()
+	return newFixtureAt(t, j, slog.LevelInfo, routes...)
+}
+
+func newFixtureAt(t *testing.T, j *journal, level slog.Level, routes ...Route) *fixture {
+	t.Helper()
 	hosts := make([]string, len(routes))
 	for i, r := range routes {
 		hosts[i] = r.Host
@@ -194,7 +201,7 @@ func newFixture(t *testing.T, j *journal, routes ...Route) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ic, err := New(Config{CA: ca, Routes: routes, Log: slog.New(slog.NewJSONHandler(j, nil))})
+	ic, err := New(Config{CA: ca, Routes: routes, Log: slog.New(slog.NewJSONHandler(j, &slog.HandlerOptions{Level: level}))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,17 +274,21 @@ func get(t *testing.T, c *http.Client, req *http.Request) (*http.Response, strin
 	return res, string(body)
 }
 
+// newRequest is a request as a sandbox's client makes it: carrying the
+// placeholder it was given, which is what asks frisket for the credential.
 func newRequest(t *testing.T, method, url string, body io.Reader) *http.Request {
 	t.Helper()
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Authorization", sandboxAuth)
 	return req
 }
 
-// The sandbox's own Authorization never reaches the upstream; the real
-// credential does; and neither appears in the log.
+// The placeholder never reaches the upstream; the real credential does, in its
+// place; every other header goes as the client sent it; and no credential
+// appears in the log.
 func TestCredentialIsSwappedOnTheWire(t *testing.T) {
 	protos(t, func(t *testing.T, h2 bool) {
 		j := &journal{}
@@ -289,8 +300,6 @@ func TestCredentialIsSwappedOnTheWire(t *testing.T) {
 		req := newRequest(t, "POST", "https://"+apiHost+"/v1/messages?beta=true", strings.NewReader(`{"model":"x"}`))
 		req.Header.Set("Authorization", sandboxAuth)
 		req.Header.Set("X-Api-Key", "sandbox-key-55")
-		req.Header.Set("Proxy-Authorization", "Basic c2FuZGJveDpwdw==")
-		req.Header.Set("X-Forwarded-For", "10.9.9.9")
 		req.Header.Set("Anthropic-Version", "2023-06-01")
 		res, body := get(t, c, req)
 
@@ -310,13 +319,14 @@ func TestCredentialIsSwappedOnTheWire(t *testing.T) {
 		}
 		for name, vals := range got.Header {
 			for _, v := range vals {
-				if strings.Contains(v, "sandbox") || strings.Contains(v, "10.9.9.9") {
-					t.Fatalf("the sandbox's %s reached the upstream: %q", name, v)
+				if strings.Contains(v, placeholder) {
+					t.Fatalf("the placeholder reached the upstream in %s: %q", name, v)
 				}
 			}
 		}
-		if got.Header.Get("Anthropic-Version") != "2023-06-01" {
-			t.Fatal("an ordinary header was not forwarded")
+		// Not the placeholder, so not frisket's: sent on as it was.
+		if got.Header.Get("X-Api-Key") != "sandbox-key-55" || got.Header.Get("Anthropic-Version") != "2023-06-01" {
+			t.Fatalf("headers were changed on the way: %v", got.Header)
 		}
 		if got.URL.RawQuery != "beta=true" || got.URL.Path != "/v1/messages" {
 			t.Fatalf("upstream got %s", got.URL)
@@ -326,7 +336,7 @@ func TestCredentialIsSwappedOnTheWire(t *testing.T) {
 		l := lines[0]
 		for k, want := range map[string]any{
 			"session": "sess-test", "route": "api", "host": apiHost, "method": "POST",
-			"path": "/v1/messages", "decision": DecisionAllowed, "rule": "path", "status": float64(200),
+			"path": "/v1/messages", "decision": DecisionAllowed, "rule": "path", "status": float64(200), "credential": CredentialInjected,
 			"req_bytes": float64(len(`{"model":"x"}`)), "resp_bytes": float64(len("upstream says hello")),
 		} {
 			if l[k] != want {
@@ -346,7 +356,7 @@ func TestCredentialIsSwappedOnTheWire(t *testing.T) {
 func assertNoSecretsLogged(t *testing.T, j *journal) {
 	t.Helper()
 	all := j.String()
-	for _, s := range []string{realToken, "sandbox-token", "sandbox-key", "c2FuZGJveDpwdw", "beta=true"} {
+	for _, s := range []string{realToken, placeholder, "sandbox-key", "beta=true"} {
 		if strings.Contains(all, s) {
 			t.Fatalf("the log contains %q:\n%s", s, all)
 		}
@@ -410,7 +420,7 @@ func TestGitScopeByRepositorySegment(t *testing.T) {
 	cred, _ := tokenFile(t, j, realToken)
 	route := Route{
 		Name: "git", Host: gitHost, Upstream: up.URL, UpstreamCAs: up.pool(),
-		Credential: cred, Inject: BasicUser("x-access-token"),
+		Credential: cred, Inject: BasicUser("x-access-token"), Placeholder: placeholder,
 		Scope: Scope{Git: &GitScope{Repos: []Repo{{Owner: "owner", Name: "repo"}}}},
 	}
 	f := newFixture(t, j, route)
@@ -427,7 +437,10 @@ func TestGitScopeByRepositorySegment(t *testing.T) {
 		{"GET", "/owner/repo.git/info/refs?service=git-receive-pack", 403},
 		{"POST", "/owner/repo.git/git-receive-pack", 403},
 	} {
-		res, _ := get(t, c, newRequest(t, tc.method, "https://"+gitHost+tc.target, nil))
+		// git's own shape: the placeholder as the password of Basic auth.
+		req := newRequest(t, tc.method, "https://"+gitHost+tc.target, nil)
+		req.SetBasicAuth("x-access-token", placeholder)
+		res, _ := get(t, c, req)
 		if res.StatusCode != tc.status {
 			t.Errorf("%s %s: %d, want %d", tc.method, tc.target, res.StatusCode, tc.status)
 		}
@@ -979,17 +992,19 @@ func TestNewRefusesBadRoutes(t *testing.T) {
 	}
 	src := credential.Source(nil)
 	cred, _ := tokenFile(t, &journal{}, realToken)
-	good := Route{Name: "r", Host: "a.test", Upstream: "https://a.test", Credential: cred, Inject: Bearer(),
+	good := Route{Name: "r", Host: "a.test", Upstream: "https://a.test", Credential: cred, Inject: Bearer(), Placeholder: placeholder,
 		Scope: Scope{Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}}}}
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	for name, mutate := range map[string]func(r *Route){
-		"plain http upstream": func(r *Route) { r.Upstream = "http://a.test" },
-		"no credential":       func(r *Route) { r.Credential = src },
-		"no injector":         func(r *Route) { r.Inject = nil },
-		"empty scope":         func(r *Route) { r.Scope = Scope{} },
-		"host with port":      func(r *Route) { r.Host = "a.test:443" },
-		"no name":             func(r *Route) { r.Name = "" },
-		"host outside the CA": func(r *Route) { r.Host, r.Upstream = "b.test", "https://b.test" },
+		"plain http upstream":  func(r *Route) { r.Upstream = "http://a.test" },
+		"no credential":        func(r *Route) { r.Credential = src },
+		"no injector":          func(r *Route) { r.Inject = nil },
+		"no placeholder":       func(r *Route) { r.Placeholder = "" },
+		"a spaced placeholder": func(r *Route) { r.Placeholder = "two words" },
+		"empty scope":          func(r *Route) { r.Scope = Scope{} },
+		"host with port":       func(r *Route) { r.Host = "a.test:443" },
+		"no name":              func(r *Route) { r.Name = "" },
+		"host outside the CA":  func(r *Route) { r.Host, r.Upstream = "b.test", "https://b.test" },
 	} {
 		r := good
 		mutate(&r)
@@ -1007,4 +1022,155 @@ func TestNewRefusesBadRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = ic.Close()
+}
+
+// AT DEBUG LEVEL A REQUEST'S DETAIL IS LOGGED, AND NO CREDENTIAL IN IT: the
+// headers the client sent, before any are stripped, with every one that can
+// carry a credential described rather than shown; the query's names and not
+// its values; and what came back, with the start of an error's body -- which
+// the client still receives whole. At info level there is no such line.
+func TestDebugDescribesTheWireWithoutItsCredentials(t *testing.T) {
+	enc := func(v string) string { return base64.RawURLEncoding.EncodeToString([]byte(v)) }
+	jwt := enc(`{"alg":"ES256"}`) + "." + enc(`{"sub":"session-9","exp":1789770000}`) + ".c2lnbmF0dXJl"
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Set-Cookie", "sid=upstream-cookie-41")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":"worker token required"}`)
+	})
+	send := func(t *testing.T, f *fixture, auth string) {
+		t.Helper()
+		req := newRequest(t, "PUT", "https://"+apiHost+"/v1/upload/s1/worker?token=query-secret-3&x=1", strings.NewReader("{}"))
+		req.Header.Set("Authorization", auth)
+		req.Header.Set("X-Session-Token", jwt)
+		req.Header.Set("Anthropic-Beta", "ccr-2026")
+		res, body := get(t, f.client(t, false), req)
+		if res.StatusCode != http.StatusForbidden || body != `{"error":"worker token required"}` {
+			t.Fatalf("client got %d %q, want the upstream's answer untouched", res.StatusCode, body)
+		}
+	}
+
+	j := &journal{}
+	cred, _ := tokenFile(t, j, realToken+"\n")
+	f := newFixtureAt(t, j, slog.LevelDebug, apiRoute(up, cred))
+	send(t, f, sandboxAuth)
+	send(t, f, "Bearer "+realToken)
+	lines := j.waitLines(t, "request detail", 2)
+
+	strs := func(v any) []string {
+		var out []string
+		for _, s := range v.([]any) {
+			out = append(out, s.(string))
+		}
+		return out
+	}
+	req := strings.Join(strs(lines[0]["req_headers"]), "\n")
+	for _, want := range []string{
+		"Anthropic-Beta: ccr-2026",
+		"Authorization: Bearer opaque len=28 sha256=",
+		"X-Session-Token: jwt(alg=ES256 claims=exp,sub exp=1789770000) len=",
+	} {
+		if !strings.Contains(req, want) {
+			t.Errorf("request headers lack %q:\n%s", want, req)
+		}
+	}
+	if q := strs(lines[0]["query"]); strings.Join(q, ",") != "token,x" {
+		t.Errorf("query = %v, want its names", q)
+	}
+	if !strings.Contains(strings.Join(strs(lines[1]["req_headers"]), "\n"), "Authorization: Bearer <frisket's credential>") {
+		t.Errorf("a client holding frisket's own credential is not shown as such: %v", lines[1]["req_headers"])
+	}
+	if lines[0]["status"] != float64(403) || lines[0]["resp_body"] != `{"error":"worker token required"}` {
+		t.Errorf("response = %v %q", lines[0]["status"], lines[0]["resp_body"])
+	}
+	if !strings.Contains(strings.Join(strs(lines[0]["resp_headers"]), "\n"), "Set-Cookie: opaque len=") {
+		t.Errorf("response headers = %v", lines[0]["resp_headers"])
+	}
+	for _, secret := range []string{placeholder, realToken, "query-secret-3", "upstream-cookie-41", "session-9", "c2lnbmF0dXJl"} {
+		if strings.Contains(j.String(), secret) {
+			t.Errorf("the log contains %q", secret)
+		}
+	}
+
+	// A stream's own line comes when it ends, so its start is logged too.
+	if starts := j.lines(t, "request start"); len(starts) != 2 || starts[0]["path"] != "/v1/upload/s1/worker" {
+		t.Errorf("request start lines = %v", starts)
+	}
+	if res := j.lines(t, "response start"); len(res) != 2 || res[0]["status"] != float64(403) {
+		t.Errorf("response start lines = %v", res)
+	}
+
+	quiet := &journal{}
+	cred2, _ := tokenFile(t, quiet, realToken+"\n")
+	send(t, newFixture(t, quiet, apiRoute(up, cred2)), sandboxAuth)
+	quiet.waitLines(t, "request", 1)
+	if got := quiet.lines(t, "request detail"); len(got) != 0 {
+		t.Errorf("detail logged at info level: %v", got)
+	}
+}
+
+// ONLY THE PLACEHOLDER IS EVER REPLACED. Anything else in the credential's
+// header -- the client's own token, like the session token Claude Code's
+// Remote Control is handed, or a placeholder that is not exactly ours -- goes
+// upstream as it was sent, and so does a request with none. None of them needs
+// frisket's credential, so a missing one does not refuse them. Other schemes
+// than Bearer carry the placeholder too, as gh's `token` does.
+func TestOnlyThePlaceholderIsReplaced(t *testing.T) {
+	up := newUpstream(t, nil)
+	j := &journal{}
+	cred, path := tokenFile(t, j, realToken+"\n")
+	f := newFixture(t, j, apiRoute(up, cred))
+	c := f.client(t, false)
+
+	for _, tc := range []struct {
+		name, auth, want, credential string
+	}{
+		{"the placeholder", sandboxAuth, "Bearer " + realToken, CredentialInjected},
+		{"under another scheme", "token " + placeholder, "Bearer " + realToken, CredentialInjected},
+		{"bare", placeholder, "Bearer " + realToken, CredentialInjected},
+		{"as Basic auth's password", "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+placeholder)), "Bearer " + realToken, CredentialInjected},
+		{"the client's own", "Bearer sk-ant-si-session-77", "Bearer sk-ant-si-session-77", CredentialPassed},
+		{"not exactly ours", "Bearer " + placeholder + "-2", "Bearer " + placeholder + "-2", CredentialPassed},
+		{"none", "", "", CredentialNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(up.requests())
+			req := newRequest(t, "GET", "https://"+apiHost+"/v1/messages", nil)
+			req.Header.Del("Authorization")
+			if tc.auth != "" {
+				req.Header.Set("Authorization", tc.auth)
+			}
+			if res, _ := get(t, c, req); res.StatusCode != 200 {
+				t.Fatalf("status %d", res.StatusCode)
+			}
+			seen := up.requests()
+			if len(seen) != before+1 {
+				t.Fatalf("upstream saw %d requests, want %d", len(seen), before+1)
+			}
+			if got := seen[len(seen)-1].Header.Get("Authorization"); got != tc.want {
+				t.Errorf("upstream Authorization = %q, want %q", got, tc.want)
+			}
+			lines := j.waitLines(t, "request", before+1)
+			if got := lines[len(lines)-1]["credential"]; got != tc.credential {
+				t.Errorf("log credential = %v, want %s", got, tc.credential)
+			}
+		})
+	}
+
+	// With frisket's own credential gone, the client's still goes through.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for _, err := cred.Get(); err == nil; _, err = cred.Get() {
+		if time.Now().After(deadline) {
+			t.Fatal("the credential's removal was never noticed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	req := newRequest(t, "GET", "https://"+apiHost+"/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer sk-ant-si-session-77")
+	if res, _ := get(t, c, req); res.StatusCode != 200 {
+		t.Errorf("the client's own credential was refused for want of frisket's: %d", res.StatusCode)
+	}
 }

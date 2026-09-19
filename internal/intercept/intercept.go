@@ -58,6 +58,13 @@ const (
 	DecisionFailed  = "failed"
 )
 
+// What happened to a request's credential header, as it appears in the log.
+const (
+	CredentialInjected = "injected" // the placeholder, replaced with the real credential
+	CredentialPassed   = "passed"   // the client's own, sent on untouched
+	CredentialNone     = "none"     // there was none
+)
+
 // Refusal reasons that are not the scope's.
 const (
 	ReasonNoSNI           = "no SNI"
@@ -107,7 +114,6 @@ type route struct {
 	host     string
 	upstream *url.URL
 	scope    *compiled
-	strip    []string
 	proxy    *httputil.ReverseProxy
 	tr       *http.Transport
 }
@@ -158,17 +164,13 @@ func New(cfg Config) (*Interceptor, error) {
 			return nil, fmt.Errorf("intercept: route %s: %w", r.Name, err)
 		}
 		rt := &route{Route: r, host: host, upstream: up, scope: sc}
-		// Every header a sandbox might have put a credential in. It is not
-		// enough to overwrite Authorization: a request carrying the sandbox's
-		// own token in a second header would reach the upstream with two
-		// identities, and which one wins is the upstream's business.
-		rt.strip = append([]string{"Authorization", "Proxy-Authorization", r.Inject.Header()}, r.Strip...)
 		rt.tr = upstreamTransport(r, up, dial)
 		rt.proxy = &httputil.ReverseProxy{
-			Rewrite:      rt.rewrite,
-			Transport:    rt.tr,
-			ErrorLog:     errLog,
-			ErrorHandler: upstreamFailed,
+			Rewrite:        rt.rewrite,
+			Transport:      rt.tr,
+			ModifyResponse: inspect,
+			ErrorLog:       errLog,
+			ErrorHandler:   upstreamFailed,
 		}
 		i.routes[host] = rt
 	}
@@ -352,6 +354,21 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	ic.requests.Add(1)
 
 	rec := &record{decision: DecisionAllowed}
+	if i.log.Enabled(r.Context(), slog.LevelDebug) {
+		// Before anything is replaced: what the client sent is the question.
+		ours := ""
+		if s, err := rt.Credential.Get(); err == nil {
+			ours = s.Value
+		}
+		rec.detail = &detail{reqHeader: describeHeaders(r.Header, ours), query: queryNames(r.URL.Query())}
+		// The request line comes when it finishes, which for a stream is
+		// when the stream does: this says it is open meanwhile.
+		i.log.Debug("request start", "session", ic.session, "conn", ic.id, "method", r.Method, "path", loggedPath(r))
+		rec.detail.responded = func(status int, contentType string) {
+			i.log.Debug("response start", "session", ic.session, "conn", ic.id, "path", loggedPath(r),
+				"status", status, "content_type", contentType)
+		}
+	}
 	lw := &logWriter{ResponseWriter: w, rec: rec}
 	if r.Body != nil && r.Body != http.NoBody {
 		r.Body = &countingBody{ReadCloser: r.Body, n: &rec.reqBytes}
@@ -385,6 +402,19 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec.rule = why
+
+	if !rt.carries(r.Header) {
+		// Not the placeholder, so not frisket's to touch: the client's own
+		// credential, or none, goes upstream as it was sent. Nor does it need
+		// frisket's -- a stale or missing one is no reason to refuse it.
+		rec.credential = CredentialPassed
+		if r.Header.Get(rt.Inject.Header()) == "" {
+			rec.credential = CredentialNone
+		}
+		rt.proxy.ServeHTTP(lw, r.WithContext(context.WithValue(r.Context(), recordKey{}, rec)))
+		return
+	}
+	rec.credential = CredentialInjected
 
 	sec, err := rt.Credential.Get()
 	if err != nil {
@@ -420,18 +450,44 @@ func refuse(w http.ResponseWriter, status int, reason string) {
 // rewrite is the only place a credential is put on a request.
 func (rt *route) rewrite(pr *httputil.ProxyRequest) {
 	pr.SetURL(rt.upstream)
-	for _, h := range rt.strip {
-		pr.Out.Header.Del(h)
+	secret, inject := pr.In.Context().Value(secretKey{}).(string)
+	if !inject {
+		// No placeholder on the request: nothing of frisket's goes on it.
+		return
 	}
-	secret, _ := pr.In.Context().Value(secretKey{}).(string)
 	if secret == "" {
-		// Unreachable by construction -- serveHTTP always sets it -- and
-		// fail-closed if that ever stops being true: a nil URL fails the
-		// round trip, so nothing goes upstream without its credential.
+		// Unreachable by construction -- a source never produces an empty
+		// credential -- and fail-closed if that ever stops being true: a nil
+		// URL fails the round trip, so a placeholder never goes upstream
+		// without its credential.
 		pr.Out.URL = nil
 		return
 	}
 	pr.Out.Header.Set(rt.Inject.Header(), rt.Inject.Value(secret))
+}
+
+// inspect keeps a response's headers, and the start of an error's body, for a
+// request whose detail is being kept. It changes nothing the client receives.
+func inspect(res *http.Response) error {
+	rec, _ := res.Request.Context().Value(recordKey{}).(*record)
+	if rec == nil || rec.detail == nil {
+		return nil
+	}
+	rec.detail.respHeader = describeHeaders(res.Header, "")
+	rec.detail.responded(res.StatusCode, res.Header.Get("Content-Type"))
+	if res.StatusCode >= 400 {
+		rec.detail.respBody = peekBody(res)
+	}
+	return nil
+}
+
+// loggedPath is a request's path as the log shows it: no query, and bounded.
+func loggedPath(r *http.Request) string {
+	path := r.URL.EscapedPath()
+	if len(path) > maxLoggedPath {
+		path = path[:maxLoggedPath] + "..."
+	}
+	return path
 }
 
 // upstreamFailed answers when the upstream could not be reached or answered
@@ -451,12 +507,10 @@ func upstreamFailed(w http.ResponseWriter, r *http.Request, err error) {
 
 // logRequest writes the request's one line. Metadata only: never a body,
 // never a header value, never the query string -- a query is where tokens end
-// up when someone puts them in a URL.
+// up when someone puts them in a URL. At debug level a second line follows
+// with the request's detail, whose credentials are described, never shown.
 func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *record, d time.Duration) {
-	path := r.URL.EscapedPath()
-	if len(path) > maxLoggedPath {
-		path = path[:maxLoggedPath] + "..."
-	}
+	path := loggedPath(r)
 	status := int(rec.status.Load())
 	if status == 0 {
 		status = http.StatusOK
@@ -471,6 +525,9 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 		"method", r.Method,
 		"path", path,
 		"decision", rec.decision,
+	}
+	if rec.credential != "" {
+		attrs = append(attrs, "credential", rec.credential)
 	}
 	if rec.reason != "" {
 		attrs = append(attrs, "reason", rec.reason)
@@ -492,6 +549,20 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 		level = slog.LevelWarn
 	}
 	i.log.Log(context.Background(), level, "request", attrs...)
+
+	if d := rec.detail; d != nil {
+		i.log.Debug("request detail",
+			"session", ic.session,
+			"conn", ic.id,
+			"method", r.Method,
+			"path", path,
+			"status", status,
+			"req_headers", d.reqHeader,
+			"query", d.query,
+			"resp_headers", d.respHeader,
+			"resp_body", d.respBody,
+		)
+	}
 }
 
 type (
@@ -504,14 +575,19 @@ type (
 // request body is read by the Transport's goroutine and an upgraded
 // connection is copied by two more.
 type record struct {
-	decision  string
-	reason    string
-	rule      string
-	err       error
-	level     slog.Level
-	status    atomic.Int64
-	reqBytes  atomic.Int64
-	respBytes atomic.Int64
+	// detail is kept only at debug level.
+	detail *detail
+	// credential is what happened to the credential header: the placeholder
+	// replaced, the client's own passed, or none sent.
+	credential string
+	decision   string
+	reason     string
+	rule       string
+	err        error
+	level      slog.Level
+	status     atomic.Int64
+	reqBytes   atomic.Int64
+	respBytes  atomic.Int64
 }
 
 func (r *record) refuse(reason string) {
