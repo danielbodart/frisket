@@ -662,7 +662,6 @@ inject.
 | Tool | Where it authenticates | To decide |
 |---|---|---|
 | gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`, GraphQL |
-| codex | `chatgpt.com/backend-api/codex` | which endpoints, how `~/.codex/auth.json` is read, who refreshes; Claude Code's route is the template |
 | hf | `huggingface.co` | scope, which CDN and Xet hosts an allowlist needs, the token's source |
 | Cloudflare | `api.cloudflare.com` | account and zone scoping, the credential's source |
 | GCP client libraries, gcloud | a metadata server on the service address | where its tokens come from, and what they may do |
@@ -750,6 +749,29 @@ holds nothing private to read out through them.
   where none is running, a keep-alive of the consumer's that runs the host's
   Claude Code before the token expires. frisket still holds no login.
 
+### codex
+
+- **Where:** `chatgpt.com`. A trusted policy takes every method and the whole
+  path; a strict one only `/backend-api/codex/`, because the same bearer reads
+  and writes your ChatGPT conversations everywhere else. `auth.openai.com` is
+  intercepted and refused, so a sandbox can neither refresh nor revoke.
+- **The credential** is the host's own login, `~/.codex/auth.json`, read with
+  `credentialJSON` at `tokens.access_token`. Its expiry is the `exp` claim
+  inside that token -- the file records only `last_refresh` -- so the route
+  names it with `expiresJWT`. The access token lasts 10 days. Past `exp`, 503.
+- **The sandbox** holds a placeholder `auth.json`: an `access_token` whose
+  `exp` is far in the future, which is what stops codex refreshing on its own
+  (it refreshes 5 minutes before `exp`), and an `id_token` carrying the plan
+  and account claims codex reads. Neither signature is ever checked, by codex
+  or by frisket.
+- **Its `~/.codex` can be shared**, unlike Claude Code's: codex rewrites
+  `auth.json` in place rather than by rename, so a bind over that one file
+  survives a refresh. A `codex logout` unlinks it, which detaches the bind, so
+  what covers the credential is only as good as the host never removing it.
+- **Who refreshes** is the host, a day before expiry: codex's refresh tokens
+  are single-use, and refreshing that early keeps the host's refresher clear of
+  any other codex on the machine, which only refreshes in the last 5 minutes.
+
 ---
 
 ## Build order
@@ -776,8 +798,9 @@ parser under decision 1's rule, not a hand-rolled one.
 **Then the routes**, each designed on its own (see "Per-tool routes"), and
 minting where one needs it.
 
-**Agents.** Claude Code's route is built: `credentialJSON` reads the host's
-rotating login, and its expiry answers 503. codex's is next, on the same shape.
+**Agents.** Claude Code's and codex's routes are built: `credentialJSON` reads
+the host's rotating login, and its expiry -- a field beside the token, or the
+`exp` claim inside it -- answers 503.
 
 **git.** Built: over HTTPS with gh's token in trusted, anonymous and read-only
 in strict, measured in both tiers.
@@ -902,9 +925,9 @@ payload does not start until the hook returns.
 - Drop its own CA variables (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_DIR`), which
   the adapter now sets (done).
 - Handpick what each tier mounts. `~/.ssh` is gone (git over HTTPS, above) and
-  so is the Claude login; `~/.codex` goes with codex's route; `cc-socks` stays
-  for trusted and goes for strict; the askpass script belongs to the host tier
-  alone.
+  so is the Claude login; the codex login goes too, though a trusted sandbox
+  may keep the rest of `~/.codex`; `cc-socks` stays for trusted and goes for
+  strict; the askpass script belongs to the host tier alone.
 
 Strict-tier hardening that is not frisket's concern, recorded so it is not lost:
 the read-only workspace overlay, vanilla agents with only `projects/<slug>`

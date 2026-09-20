@@ -2,6 +2,7 @@ package credential
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -305,6 +306,56 @@ func TestJSONRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// codex keeps no expiry beside its token: the only one is the `exp` claim
+// inside the access token itself.
+func TestJSONExtractsExpiryFromTheTokenItself(t *testing.T) {
+	exp := time.Unix(1_900_000_000, 0)
+	jwt := testJWT(t, fmt.Sprintf(`{"exp":%d,"sub":"someone"}`, exp.Unix()))
+	raw := fmt.Sprintf(`{"tokens":{"access_token":%q,"refresh_token":"never-used"},"last_refresh":"2026-09-14T07:15:59.6Z"}`, jwt)
+	s, err := JSON{Token: "tokens.access_token", ExpiresJWT: "tokens.access_token"}.Extract([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Value != jwt || !s.Expires.Equal(exp) {
+		t.Fatalf("got a token expiring %v, want %v", s.Expires, exp)
+	}
+	if !s.Expired(exp) || s.Expired(exp.Add(-time.Second)) {
+		t.Fatal("expiry is the instant the claim names, no earlier and no later")
+	}
+}
+
+func TestJSONJWTRefusals(t *testing.T) {
+	j := JSON{Token: "a.token", ExpiresJWT: "a.token"}
+	noExp := testJWT(t, `{"sub":"someone"}`)
+	fraction := testJWT(t, `{"exp":1.5}`)
+	notJSON := base64.RawURLEncoding.EncodeToString([]byte("sk-secret-in-a-payload"))
+	for name, raw := range map[string]string{
+		"not a JWT":          `{"a":{"token":"sk-secret-not-a-jwt"}}`,
+		"payload not base64": `{"a":{"token":"aGVhZGVy.sk-secret-!!.c2ln"}}`,
+		"payload not JSON":   fmt.Sprintf(`{"a":{"token":"aGVhZGVy.%s.c2ln"}}`, notJSON),
+		"no exp claim":       fmt.Sprintf(`{"a":{"token":%q}}`, noExp),
+		"exp fraction":       fmt.Sprintf(`{"a":{"token":%q}}`, fraction),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := j.Extract([]byte(raw))
+			if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("want ErrUnavailable, got %v", err)
+			}
+			if strings.Contains(err.Error(), "sk-secret") {
+				t.Fatalf("the error quotes the token: %v", err)
+			}
+		})
+	}
+}
+
+// testJWT is a JWT in shape only: the signature is never checked, here or in
+// the agent that reads one.
+func testJWT(t *testing.T, claims string) string {
+	t.Helper()
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + enc([]byte(claims)) + ".c2lnbmF0dXJl"
 }
 
 // A Secret formatted by accident -- %v in a log call, a test failure -- must

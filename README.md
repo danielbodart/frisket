@@ -158,6 +158,18 @@ credentialJSON = {
 };
 ```
 
+Where the expiry is inside the token rather than beside it, as codex's login
+keeps it, `expiresJWT` names the JWT to read `exp` from -- usually the token
+itself. The claim is read, not verified:
+
+```nix
+credentialFile = "/home/alice/.codex/auth.json";
+credentialJSON = {
+  token = "tokens.access_token";
+  expiresJWT = "tokens.access_token";
+};
+```
+
 ## git
 
 GitHub takes a token for git only as Basic auth's password. With the

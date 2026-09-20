@@ -98,11 +98,14 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"git with a repository that is not owner/name": func(p *Policy) { p.Routes[0].Git = &GitRule{Repos: []string{"owner"}} },
 		"git with a wildcard owner":                    func(p *Policy) { p.Routes[0].Git = &GitRule{Repos: []string{"owner/*"}} },
 		"a JSON credential that names no token":        func(p *Policy) { p.Routes[0].CredentialJSON = &CredentialJSON{} },
-		"a route with no placeholder":                  func(p *Policy) { p.Routes[0].Placeholder = "" },
-		"a plain-HTTP upstream":                        func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
-		"a * inside an allowlist name":                 func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
-		"a * glued to an allowlist name":               func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
-		"Authorization named as a bare header":         func(p *Policy) { p.Routes[0].Header = "authorization" },
+		"a JSON credential that expires twice": func(p *Policy) {
+			p.Routes[0].CredentialJSON = &CredentialJSON{Token: "t", ExpiresMillis: "e", ExpiresJWT: "t"}
+		},
+		"a route with no placeholder":          func(p *Policy) { p.Routes[0].Placeholder = "" },
+		"a plain-HTTP upstream":                func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
+		"a * inside an allowlist name":         func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
+		"a * glued to an allowlist name":       func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
+		"Authorization named as a bare header": func(p *Policy) { p.Routes[0].Header = "authorization" },
 	} {
 		p := valid(t)
 		mutate(&p)

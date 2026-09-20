@@ -10,6 +10,7 @@ package credential
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,18 +77,25 @@ func Trimmed() Extractor {
 }
 
 // JSON extracts the token at a dotted path through nested objects, and
-// optionally an expiry at another.
+// optionally an expiry -- from a field beside it, or from inside a JWT.
 //
 // ExpiresMillis names a number of milliseconds since the epoch, which is how
 // Claude Code writes `claudeAiOauth.expiresAt`. The unit is in the field's name
 // rather than inferred from the number's size, because a guess that is wrong by
 // a factor of a thousand is a credential that is either always stale or never.
 //
+// ExpiresJWT names a JWT -- usually the token itself -- whose `exp` claim is
+// the expiry, which is where codex's login keeps it: `auth.json` says only when
+// it last refreshed. The claim is read, never trusted: the signature is not
+// checked, because this is the host's own file and the answer only decides
+// between a 503 here and a 401 from the upstream.
+//
 // A route selects it with credentialJSON; without one it reads a bare token
 // with Trimmed.
 type JSON struct {
 	Token         string
 	ExpiresMillis string
+	ExpiresJWT    string
 }
 
 // Extract is JSON as an Extractor.
@@ -124,7 +132,49 @@ func (j JSON) Extract(raw []byte) (Secret, error) {
 		}
 		s.Expires = time.UnixMilli(ms)
 	}
+	if j.ExpiresJWT != "" {
+		jwt, ok := lookup(doc, j.ExpiresJWT).(string)
+		if !ok {
+			// Refused for the same reason as a missing expiresMillis: a route
+			// asked for an expiry, and without one a stale token becomes the
+			// upstream's 401, which fails the agent's turn.
+			return Secret{}, fmt.Errorf("%w: no string at %q", ErrUnavailable, j.ExpiresJWT)
+		}
+		exp, err := jwtExpiry(jwt)
+		if err != nil {
+			return Secret{}, fmt.Errorf("%w (at %q)", err, j.ExpiresJWT)
+		}
+		s.Expires = exp
+	}
 	return s, nil
+}
+
+// jwtExpiry reads the `exp` claim, in seconds since the epoch, out of a JWT's
+// payload. Errors say what is wrong with the shape and never quote the token.
+func jwtExpiry(jwt string) (time.Time, error) {
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return time.Time{}, fmt.Errorf("%w: not a JWT", ErrUnavailable)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: JWT payload is not base64url", ErrUnavailable)
+	}
+	var claims struct {
+		Exp json.Number `json:"exp"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
+	if err := dec.Decode(&claims); err != nil {
+		return time.Time{}, fmt.Errorf("%w: JWT payload is not JSON", ErrUnavailable)
+	}
+	// Seconds, by RFC 7519. A JWT that leaves exp out never expires here, and
+	// is refused instead: the route asked for an expiry.
+	secs, err := claims.Exp.Int64()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: JWT has no whole-second exp claim", ErrUnavailable)
+	}
+	return time.Unix(secs, 0), nil
 }
 
 func lookup(doc any, path string) any {

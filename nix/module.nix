@@ -35,7 +35,8 @@ let
           // lib.optionalAttrs (r.git != null) { git = { inherit (r.git) repos push; }; }
           // lib.optionalAttrs (r.credentialJSON != null) {
             credentialJSON = { inherit (r.credentialJSON) token; }
-              // lib.optionalAttrs (r.credentialJSON.expiresMillis != null) { inherit (r.credentialJSON) expiresMillis; };
+              // lib.optionalAttrs (r.credentialJSON.expiresMillis != null) { inherit (r.credentialJSON) expiresMillis; }
+              // lib.optionalAttrs (r.credentialJSON.expiresJWT != null) { inherit (r.credentialJSON) expiresJWT; };
           })
           p.routes;
       })
@@ -118,6 +119,17 @@ let
                 Past it the daemon answers 503, which the client retries,
                 rather than sending a token the upstream would 401. Null: the
                 file does not say.
+              '';
+            };
+            expiresJWT = mkOption {
+              type = types.nullOr (types.strMatching ".+");
+              default = null;
+              example = "tokens.access_token";
+              description = ''
+                The dotted path to a JWT whose `exp` claim is the expiry --
+                usually the token itself, which is where codex's login keeps
+                it. The claim is read, not verified. Not with expiresMillis.
+                Null: the file does not say.
               '';
             };
           };

@@ -112,6 +112,9 @@ type CredentialJSON struct {
 	// ExpiresMillis names milliseconds since the epoch. Empty: the file does
 	// not say, and the token is never reported expired.
 	ExpiresMillis string `json:"expiresMillis,omitempty"`
+	// ExpiresJWT names a JWT whose `exp` claim is the expiry -- usually the
+	// token itself, which is where codex keeps it. Not with ExpiresMillis.
+	ExpiresJWT string `json:"expiresJWT,omitempty"`
 }
 
 // PathRule is one scope rule.
@@ -377,7 +380,10 @@ func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
 		if j.Token == "" {
 			return intercept.Route{}, nil, errors.New("credentialJSON names no token")
 		}
-		extract = credential.JSON{Token: j.Token, ExpiresMillis: j.ExpiresMillis}.Extract
+		if j.ExpiresMillis != "" && j.ExpiresJWT != "" {
+			return intercept.Route{}, nil, errors.New("expiresMillis and expiresJWT: a token expires once")
+		}
+		extract = credential.JSON{Token: j.Token, ExpiresMillis: j.ExpiresMillis, ExpiresJWT: j.ExpiresJWT}.Extract
 	}
 	f, err := credential.WatchFile(r.CredentialFile, extract, log)
 	if err != nil {
