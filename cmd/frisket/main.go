@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -145,6 +146,8 @@ func runServe(argv []string) error {
 	uid := fs.Int("control-uid", 0, "the only uid the control socket answers")
 	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
 	configPath := fs.String("config", "", "the policies, as the NixOS module writes them")
+	var roots stringList
+	fs.Var(&roots, "policy-root", "a directory policy documents may be read from; repeatable (none: anywhere)")
 	policyDir := fs.String("policy-dir", "/etc/frisket/policies", "where a session stored under a policy name, before policies were documents, finds that policy")
 	askerPath := fs.String("asker", "", "the program a request a route asks about is put to (none: those requests are refused)")
 	var level slog.Level
@@ -170,7 +173,7 @@ func runServe(argv []string) error {
 	if err != nil {
 		return err
 	}
-	deps := policy.Deps{Classifier: classifier, Dialer: dialer, Log: log}
+	deps := policy.Deps{Classifier: classifier, Dialer: dialer, Log: log, Roots: roots}
 	if *askerPath != "" {
 		// Only when there is one: a nil *ask.Command in the interface would
 		// be an asker that panics rather than no asker at all.
@@ -407,5 +410,18 @@ func runSteering(argv []string) error {
 	fmt.Printf("steer, ip -4:\n%s", p.RoutingBatch(false))
 	fmt.Printf("steer, ip -6:\n%s", p.RoutingBatch(true))
 	fmt.Printf("connect:\n%s", p.ConnectBatch())
+	return nil
+}
+
+// stringList is a repeatable flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(s string) error {
+	if !filepath.IsAbs(s) {
+		return fmt.Errorf("%q is not an absolute path", s)
+	}
+	*l = append(*l, filepath.Clean(s))
 	return nil
 }

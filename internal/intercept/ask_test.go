@@ -2,11 +2,15 @@ package intercept
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -78,10 +82,10 @@ func TestAPersonDecidesWhatTheScopeAsksAbout(t *testing.T) {
 		// The GET was never asked about, and the bad path never got as far as
 		// a person: only the three in between were.
 		want := []Question{
-			{Session: "sess-test", Policy: "test-policy", Route: "api", Method: "DELETE", Host: apiHost,
+			{Session: "sess-test", Workspace: "/work/test", Policy: "test-policy", Route: "api", Method: "DELETE", Host: apiHost,
 				Path: "/v1/things/a%3Ab", Query: "force=true", Operation: deleteThing},
-			{Session: "sess-test", Policy: "test-policy", Route: "api", Method: "PUT", Host: apiHost, Path: "/v1/things/a"},
-			{Session: "sess-test", Policy: "test-policy", Route: "api", Method: "POST", Host: apiHost, Path: "/v2/other"},
+			{Session: "sess-test", Workspace: "/work/test", Policy: "test-policy", Route: "api", Method: "PUT", Host: apiHost, Path: "/v1/things/a"},
+			{Session: "sess-test", Workspace: "/work/test", Policy: "test-policy", Route: "api", Method: "POST", Host: apiHost, Path: "/v2/other"},
 		}
 		if !reflect.DeepEqual(asker.questions, want) {
 			t.Errorf("questions:\n got %+v\nwant %+v", asker.questions, want)
@@ -200,5 +204,63 @@ func TestARefusalShapeMustHoldItsMessage(t *testing.T) {
 		if build(rf) == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// A header or parameter some APIs read as the real method is refused: frisket
+// decides on the request line's, and an admitted GET must not be a DELETE
+// upstream.
+func TestMethodOverridesAreRefused(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	f := newFixture(t, j, gatedRoute(up, t, j))
+	c := f.client(t, false)
+	for _, tc := range []struct{ target, header string }{
+		{"/v1/things/a", "X-HTTP-Method-Override"},
+		{"/v1/things/a", "X-HTTP-Method"},
+		{"/v1/things/a", "x-method-override"},
+		{"/v1/things/a?_method=DELETE", ""},
+	} {
+		req := newRequest(t, "GET", "https://"+apiHost+tc.target, nil)
+		req.Header.Set("Authorization", sandboxAuth)
+		if tc.header != "" {
+			req.Header.Set(tc.header, "DELETE")
+		}
+		if res, _ := get(t, c, req); res.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s: %d, want 403", tc.target, tc.header, res.StatusCode)
+		}
+	}
+	if n := len(up.requests()); n != 0 {
+		t.Fatalf("upstream saw %d requests", n)
+	}
+}
+
+// An asked request's body is in its question -- the start of it, its length
+// and its digest -- and what goes upstream is exactly that body.
+func TestAnAskedBodyIsShownAndSentAsShown(t *testing.T) {
+	j := &journal{}
+	var got []byte
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+	})
+	asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+	f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
+	body := `{"type":"A","name":"www","content":"203.0.113.9"}` + strings.Repeat(" ", BodyPreview)
+	req := newRequest(t, "POST", "https://"+apiHost+"/v2/records", strings.NewReader(body))
+	req.Header.Set("Authorization", sandboxAuth)
+	if res, _ := get(t, f.client(t, true), req); res.StatusCode != http.StatusOK {
+		t.Fatalf("%d", res.StatusCode)
+	}
+	if len(asker.questions) != 1 {
+		t.Fatalf("%d questions", len(asker.questions))
+	}
+	q := asker.questions[0]
+	sum := sha256.Sum256([]byte(body))
+	if !strings.HasPrefix(q.Body, `{"type":"A"`) || len(q.Body) != BodyPreview ||
+		q.BodyBytes != int64(len(body)) || q.BodySHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("question: %d bytes shown of %d, digest %s", len(q.Body), q.BodyBytes, q.BodySHA256)
+	}
+	if string(got) != body {
+		t.Fatalf("upstream got a different body from the one asked about")
 	}
 }

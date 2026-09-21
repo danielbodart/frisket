@@ -55,7 +55,7 @@ in
     type = types.attrsOf (types.submodule {
       options = {
         policy = mkOption {
-          type = types.str;
+          type = types.strMatching "[A-Za-z0-9][A-Za-z0-9_.-]*";
           description = ''
             The policy in `services.frisket.policies` frisket serves the
             session under, unless `policyFile` says otherwise.

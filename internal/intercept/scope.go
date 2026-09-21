@@ -191,6 +191,7 @@ type compiledPath struct {
 	// segs is the template; exact says whether it is the whole path or a
 	// prefix of it.
 	segs      []string
+	folded    []string
 	exact     bool
 	ask       bool
 	operation *Operation
@@ -279,7 +280,14 @@ func compilePath(p PathRule) (compiledPath, error) {
 	if o := p.Operation; o != nil && (o.ID == "" || o.Summary == "") {
 		return compiledPath{}, fmt.Errorf("path rule %q: an operation needs an id and a summary", written)
 	}
-	return compiledPath{methods: upper(p.Methods), segs: segs, exact: exact, ask: p.Ask, operation: p.Operation}, nil
+	folded := make([]string, len(segs))
+	for i, seg := range segs {
+		folded[i] = seg
+		if seg != wildcard {
+			folded[i] = fold(seg)
+		}
+	}
+	return compiledPath{methods: upper(p.Methods), segs: segs, folded: folded, exact: exact, ask: p.Ask, operation: p.Operation}, nil
 }
 
 func upper(ms []string) []string {
@@ -314,10 +322,35 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 			return Verdict{Outcome: Refuse, Reason: reason}
 		}
 	}
+	if best := c.best(method, segs, true); best != nil {
+		return c.admitOrAsk(method, segs, best)
+	}
+	if best := c.best(method, segs, false); best != nil {
+		return c.admitOrAsk(method, segs, best)
+	}
+	if c.api != nil && slices.Contains(c.api.Methods, method) &&
+		len(segs) >= 3 && segs[0] == "repos" && inRepos(c.api.Repos, segs[1], segs[2]) {
+		if asks := c.askedLeniently(method, segs); len(asks) > 0 {
+			return Verdict{Outcome: Ask, Reason: "path", Operation: asks[0].operation}
+		}
+		return Verdict{Outcome: Admit, Reason: "github-api"}
+	}
+	if c.unmatched == UnmatchedAsk {
+		return Verdict{Outcome: Ask, Reason: RuleUnmatched}
+	}
+	return Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}
+}
+
+// best is the most specific rule of one kind that matches: exact rules, which
+// name one operation each, or prefixes. Exact rules are consulted first and
+// prefixes only when none matched, so a broad prefix never outranks an
+// operation somebody named: a prefix with a literal where the operation has
+// a "*" is still not the operation.
+func (c *compiled) best(method string, segs []string, exact bool) *compiledPath {
 	var best *compiledPath
 	for i := range c.paths {
 		p := &c.paths[i]
-		if !slices.Contains(p.methods, method) || !p.matches(segs) {
+		if p.exact != exact || !slices.Contains(p.methods, method) || !p.matches(segs) {
 			continue
 		}
 		if best == nil {
@@ -329,20 +362,100 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 			best = p
 		}
 	}
-	if best != nil {
-		if best.ask {
-			return Verdict{Outcome: Ask, Reason: "path", Operation: best.operation}
+	return best
+}
+
+// admitOrAsk is the rule's answer -- unless it admits, and a rule that asks
+// matches a lenient reading of the same request without being outranked by
+// the one that admits. A request spelt so that the rule asking about it
+// misses -- a trailing slash, a ;parameter, another case, a trailing dot --
+// is one an upstream may well read as that rule's operation, and an
+// admission is the one outcome that must not depend on how literally the
+// upstream reads its paths.
+func (c *compiled) admitOrAsk(method string, segs []string, best *compiledPath) Verdict {
+	if best.ask {
+		return Verdict{Outcome: Ask, Reason: "path", Operation: best.operation}
+	}
+	for _, p := range c.askedLeniently(method, segs) {
+		if !outranks(best, p, len(segs)) {
+			return Verdict{Outcome: Ask, Reason: "path", Operation: p.operation}
 		}
-		return Verdict{Outcome: Admit, Reason: "path", Operation: best.operation}
 	}
-	if c.api != nil && slices.Contains(c.api.Methods, method) &&
-		len(segs) >= 3 && segs[0] == "repos" && inRepos(c.api.Repos, segs[1], segs[2]) {
-		return Verdict{Outcome: Admit, Reason: "github-api"}
+	return Verdict{Outcome: Admit, Reason: "path", Operation: best.operation}
+}
+
+// outranks is whether an admitting rule is more specific than an asking one,
+// as decide ranks them: an operation over a prefix, and between two of a
+// kind, segment by segment.
+func outranks(admit, ask *compiledPath, n int) bool {
+	if admit.exact != ask.exact {
+		return admit.exact
 	}
-	if c.unmatched == UnmatchedAsk {
-		return Verdict{Outcome: Ask, Reason: RuleUnmatched}
+	return admit.specificity(ask, n) > 0
+}
+
+// askedLeniently is every rule that asks and matches the request however
+// leniently an upstream might read it: most specific first.
+func (c *compiled) askedLeniently(method string, segs []string) []*compiledPath {
+	lenient := make([]string, 0, len(segs))
+	for _, s := range segs {
+		lenient = append(lenient, fold(s))
 	}
-	return Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}
+	// A trailing slash is nothing, to a lenient reader.
+	if n := len(lenient); n > 0 && lenient[n-1] == "" {
+		lenient = lenient[:n-1]
+	}
+	var out []*compiledPath
+	for i := range c.paths {
+		p := &c.paths[i]
+		if p.ask && slices.Contains(p.methods, method) && p.matchesFolded(lenient) {
+			out = append(out, p)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b *compiledPath) int {
+		if a.exact != b.exact {
+			if a.exact {
+				return -1
+			}
+			return 1
+		}
+		return -a.specificity(b, len(lenient))
+	})
+	return out
+}
+
+// matchesFolded is matches, against folded segments and the rule's folded
+// literals.
+func (p *compiledPath) matchesFolded(segs []string) bool {
+	if len(segs) < len(p.folded) || p.exact && len(segs) != len(p.folded) {
+		return false
+	}
+	for i, t := range p.folded {
+		if t == wildcard {
+			if segs[i] == "" {
+				return false
+			}
+		} else if segs[i] != t {
+			return false
+		}
+	}
+	return true
+}
+
+// fold is a segment as the most lenient upstream might read it: decoded as
+// often as it decodes, cut at a ;parameter, trailing dots and spaces trimmed,
+// and ASCII lower case.
+func fold(seg string) string {
+	for range maxDecodes {
+		next, err := url.PathUnescape(seg)
+		if err != nil || next == seg {
+			break
+		}
+		seg = next
+	}
+	seg, _, _ = strings.Cut(seg, ";")
+	seg = strings.TrimRight(seg, ". ")
+	return strings.ToLower(seg)
 }
 
 // matches is whether a request's segments are this template: all of them for

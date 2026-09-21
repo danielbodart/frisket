@@ -11,7 +11,12 @@
 //   - exit status 0 admits the request, 1 declines it, and anything else
 //     refuses it too and is reported as the asker failing;
 //   - one question at a time, daemon-wide: while one is open every other waits
-//     its turn, so a person never faces a pile of dialogs.
+//     its turn, so a person never faces a pile of dialogs;
+//   - one question per session: a session with a question waiting has any
+//     other refused at once, so no sandbox can fill the queue ahead of
+//     another's, or bury one question among many;
+//   - a pause between one question and the next, so an answer meant for one
+//     -- a click, an Enter -- cannot land on another put up in its place.
 package ask
 
 import (
@@ -24,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +38,9 @@ import (
 
 // waitDelay is how long an asker has to go once told to, before it is killed.
 var waitDelay = 5 * time.Second
+
+// gap is the least time between one question closing and the next opening.
+var gap = time.Second
 
 // maxStderr bounds what of an asker's stderr is kept for its error.
 const maxStderr = 1024
@@ -42,6 +51,10 @@ type Command struct {
 	// turn is held for the whole of a question, from the program's start to
 	// its end: the one-at-a-time invariant.
 	turn chan struct{}
+
+	mu      sync.Mutex
+	waiting map[string]bool // sessions with a question queued or open
+	closed  time.Time       // when the last question closed
 }
 
 var _ intercept.Asker = (*Command)(nil)
@@ -60,7 +73,7 @@ func NewCommand(path string) (*Command, error) {
 	if fi.IsDir() || fi.Mode().Perm()&0o111 == 0 {
 		return nil, fmt.Errorf("asker %s is not executable", path)
 	}
-	return &Command{path: path, turn: make(chan struct{}, 1)}, nil
+	return &Command{path: path, turn: make(chan struct{}, 1), waiting: map[string]bool{}}, nil
 }
 
 // Ask waits its turn, then runs the program with the question on stdin.
@@ -70,12 +83,41 @@ func NewCommand(path string) (*Command, error) {
 // process group, so a dialog it started goes too -- and killed if it has not
 // gone after waitDelay.
 func (c *Command) Ask(ctx context.Context, q intercept.Question) (bool, error) {
+	c.mu.Lock()
+	if c.waiting[q.Session] {
+		c.mu.Unlock()
+		return false, intercept.ErrBusy
+	}
+	c.waiting[q.Session] = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.waiting, q.Session)
+		c.mu.Unlock()
+	}()
+
 	select {
 	case c.turn <- struct{}{}:
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
-	defer func() { <-c.turn }()
+	defer func() {
+		c.mu.Lock()
+		c.closed = time.Now()
+		c.mu.Unlock()
+		<-c.turn
+	}()
+	c.mu.Lock()
+	wait := time.Until(c.closed.Add(gap))
+	c.mu.Unlock()
+	if wait > 0 {
+		t := time.NewTimer(wait)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}

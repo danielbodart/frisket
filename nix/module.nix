@@ -415,6 +415,18 @@ in
       });
     };
 
+    policyRoots = mkOption {
+      type = types.listOf (types.strMatching "/.*");
+      default = [ ];
+      example = [ "/run/user/1000/chase" ];
+      description = ''
+        Directories, beside /etc/frisket/policies, that a session's policy
+        document may be read from. A document is also refused unless it is a
+        regular file, owned by root or the daemon's user, that nobody else
+        can write: it says which credential goes to which host.
+      '';
+    };
+
     asker = mkOption {
       type = types.nullOr (types.strMatching "/.*");
       default = null;
@@ -523,6 +535,7 @@ in
         ExecStart = "${lib.getExe cfg.package} serve -log-level ${cfg.logLevel} -control ${cfg.controlSocket}"
           + " -config ${configFile}"
           + lib.optionalString (cfg.asker != null) " -asker ${cfg.asker}"
+          + lib.concatMapStrings (r: " -policy-root ${lib.escapeShellArg r}") ([ "/etc/frisket/policies" ] ++ cfg.policyRoots)
           + lib.optionalString (cfg.maxConnections > 0) " -max-conns ${toString cfg.maxConnections}";
         User = cfg.user;
         Group = cfg.group;

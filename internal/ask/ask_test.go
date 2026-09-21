@@ -3,6 +3,8 @@ package ask
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -101,9 +103,11 @@ func TestOneQuestionAtATime(t *testing.T) {
 		rmdir `+dir+`/open`))
 	var wg sync.WaitGroup
 	var admitted atomic.Int32
-	for range 5 {
+	for i := range 5 {
 		wg.Go(func() {
-			ok, err := c.Ask(context.Background(), question)
+			q := question
+			q.Session = fmt.Sprintf("s%d", i)
+			ok, err := c.Ask(context.Background(), q)
 			if err != nil {
 				t.Errorf("two questions were open at once: %v", err)
 			}
@@ -130,7 +134,9 @@ func TestAClientThatStopsWaitingTakesItsQuestionWithIt(t *testing.T) {
 	done := make(chan error, 2)
 	go func() { _, err := c.Ask(ctx, question); done <- err }()
 	waitFor(t, func() bool { m, _ := filepath.Glob(dir + "/asked.*"); return len(m) == 1 })
-	go func() { _, err := c.Ask(ctx, question); done <- err }()
+	other := question
+	other.Session = "another"
+	go func() { _, err := c.Ask(ctx, other); done <- err }()
 	time.Sleep(20 * time.Millisecond)
 	cancel()
 	for range 2 {
@@ -152,5 +158,57 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("timed out")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func init() { gap = 20 * time.Millisecond }
+
+// A session with a question waiting has another refused at once: no sandbox
+// can queue ahead of another's, or bury one question among many.
+func TestOneQuestionPerSession(t *testing.T) {
+	dir := t.TempDir()
+	c := mustCommand(t, script(t, `touch `+dir+`/asked; while [ ! -e `+dir+`/go ]; do sleep 0.01; done`))
+	done := make(chan error, 1)
+	go func() { _, err := c.Ask(context.Background(), question); done <- err }()
+	waitFor(t, func() bool { _, err := os.Stat(dir + "/asked"); return err == nil })
+	if _, err := c.Ask(context.Background(), question); !errors.Is(err, intercept.ErrBusy) {
+		t.Fatalf("a second question from the same session: %v, want ErrBusy", err)
+	}
+	if err := os.WriteFile(dir+"/go", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// Answered, the session may ask again.
+	if ok, err := c.Ask(context.Background(), question); !ok || err != nil {
+		t.Fatalf("after its question was answered: (%v, %v)", ok, err)
+	}
+}
+
+// Between one question closing and the next opening there is a pause, so an
+// answer meant for one cannot land on the next.
+func TestAPauseBetweenQuestions(t *testing.T) {
+	dir := t.TempDir()
+	c := mustCommand(t, script(t, `date +%s%N >> `+dir+`/times`))
+	for i := range 3 {
+		q := question
+		q.Session = fmt.Sprintf("s%d", i)
+		if _, err := c.Ask(context.Background(), q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, err := os.ReadFile(dir + "/times")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prev int64
+	for i, l := range strings.Fields(string(b)) {
+		var n int64
+		fmt.Sscan(l, &n)
+		if i > 0 && time.Duration(n-prev) < gap {
+			t.Fatalf("question %d opened %v after the last, want at least %v", i, time.Duration(n-prev), gap)
+		}
+		prev = n
 	}
 }

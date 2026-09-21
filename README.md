@@ -259,10 +259,16 @@ daemon's user inside its sandbox, once per question and one at a time. The
 question is one JSON document on stdin:
 
 ```json
-{"session": "...", "policy": "...", "route": "cloudflare", "method": "DELETE",
- "host": "api.cloudflare.com", "path": "/client/v4/zones/023e/dns_records/372e",
- "query": "...", "operation": {"id": "...", "summary": "...", "description": "..."}}
+{"session": "...", "workspace": "/home/alice/Projects/site", "policy": "...",
+ "route": "cloudflare", "method": "PATCH", "host": "api.cloudflare.com",
+ "path": "/client/v4/zones/023e/dns_records/372e", "query": "...",
+ "body": "{\"content\":\"203.0.113.9\"}", "bodyBytes": 26, "bodySHA256": "...",
+ "operation": {"id": "...", "summary": "...", "description": "..."}}
 ```
+
+A request with a body is read whole (16 MiB at most; more is refused) before
+it is asked about, and what goes upstream is exactly that body: `body` is its
+first 4 KiB, `bodyBytes` all of it, `bodySHA256` its digest.
 
 Exit 0 admits the request, 1 declines it, and anything else refuses it and is
 logged as the asker failing. `operation` is absent when nothing matched, and it
@@ -270,6 +276,18 @@ is the only prose in the question: it comes from the configuration, and
 everything else is the workload's, to be shown as the request. A client that
 stops waiting takes its question with it: queued, it is never asked; open, the
 asker's process group is sent SIGTERM. With no asker, every ask is refused.
+
+Each session has one question at most: another while one waits is refused at
+once, so no sandbox can queue ahead of another's or bury a question among
+many. Between one question closing and the next opening there is a second's
+pause, so an answer meant for one cannot land on the next.
+
+Where several rules match, an admission never depends on how literally the
+upstream reads its paths: a rule that asks, and matches the request read
+leniently -- another case, a trailing slash, a `;parameter`, a trailing dot --
+asks, unless the rule that admits is more specific. An operation named with
+`path` always outranks a `prefix`. A method-override header
+(`X-HTTP-Method-Override` and its kin) or `_method` parameter is refused.
 
 A refusal is plain text unless the route gives it the API's own error shape,
 which a client then reads and reports:

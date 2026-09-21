@@ -31,6 +31,7 @@ import (
 	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/internal/serve"
+	"golang.org/x/sys/unix"
 )
 
 // Config is the daemon's configuration file. Policies are not in it: each is
@@ -217,6 +218,10 @@ type Deps struct {
 	// it.
 	Asker intercept.Asker
 
+	// Roots are the directories a policy document may be read from. Empty:
+	// anywhere, which only a check or a test should want.
+	Roots []string
+
 	// checking builds a document without watching its credential files.
 	checking bool
 }
@@ -273,6 +278,9 @@ func NewStore(c *Config, d Deps) (*Store, error) {
 // not read, or does not hold together, is refused: the session it was for
 // never gets rules.
 func (s *Store) Open(path string) (serve.Policy, func(), error) {
+	if !underRoots(path, s.deps.Roots) {
+		return nil, nil, fmt.Errorf("policy %s: not under %s", path, strings.Join(s.deps.Roots, " or "))
+	}
 	b, err := readDocument(path)
 	if err != nil {
 		return nil, nil, err
@@ -347,13 +355,43 @@ func Check(path string, d Deps) error {
 	return nil
 }
 
-// readDocument reads a policy document, bounded.
-func readDocument(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("policy: %w", err)
+// underRoots is whether path is inside one of roots, or roots is empty.
+func underRoots(path string, roots []string) bool {
+	if len(roots) == 0 {
+		return true
 	}
+	for _, r := range roots {
+		if strings.HasPrefix(path, strings.TrimSuffix(r, "/")+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// readDocument reads a policy document, bounded: a regular file, owned by
+// root or by the daemon's own user, that nobody else can write. A document
+// says which credential goes to which host, so one that another user could
+// have written is not one to act on. The last component is not followed if
+// it is a link, and a FIFO does not block the open.
+func readDocument(path string) ([]byte, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("policy %s: %w", path, err)
+	}
+	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return nil, fmt.Errorf("policy %s: %w", path, err)
+	}
+	switch {
+	case st.Mode&unix.S_IFMT != unix.S_IFREG:
+		return nil, fmt.Errorf("policy %s: not a regular file", path)
+	case st.Uid != 0 && int(st.Uid) != os.Getuid():
+		return nil, fmt.Errorf("policy %s: owned by uid %d, neither root nor this daemon's", path, st.Uid)
+	case st.Mode&0o022 != 0:
+		return nil, fmt.Errorf("policy %s: writable by others", path)
+	}
 	b, err := io.ReadAll(io.LimitReader(f, maxDocument+1))
 	if err != nil {
 		return nil, fmt.Errorf("policy %s: %w", path, err)
@@ -462,7 +500,7 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 				PolicyName: name,
 				Log:        log,
 			},
-			Intercept: ic.For(ca),
+			Intercept: ic.For(ca, s.Params["workspace"]),
 			DNS:       srv,
 			Authority: authority,
 			CACert:    ca.CertPEM(),

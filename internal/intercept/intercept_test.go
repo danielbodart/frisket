@@ -216,7 +216,7 @@ func newFixtureAsking(t *testing.T, j *journal, level slog.Level, asker Asker, r
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ic.Close() })
-	return &fixture{ca: ca, journal: j, addr: listen(t, j, "sess-test", ic.For(ca)), ic: ic}
+	return &fixture{ca: ca, journal: j, addr: listen(t, j, "sess-test", ic.For(ca, "/work/test")), ic: ic}
 }
 
 // listen serves h as a session's listener would, and says where.
@@ -973,7 +973,7 @@ func TestEachSessionIsServedFromItsOwnCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherAddr := listen(t, j, "sess-other", f.ic.For(other))
+	otherAddr := listen(t, j, "sess-other", f.ic.For(other, ""))
 
 	c, err := tls.Dial("tcp", f.addr, &tls.Config{RootCAs: f.roots(), ServerName: apiHost})
 	if err != nil {
@@ -1005,7 +1005,7 @@ func TestAHostOutsideTheSessionsCAIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := listen(t, j, "sess-older", f.ic.For(older))
+	addr := listen(t, j, "sess-older", f.ic.For(older, ""))
 	if c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true, ServerName: apiHost}); err == nil {
 		c.Close()
 		t.Fatal("a handshake for a host outside the session's CA completed")

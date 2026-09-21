@@ -419,7 +419,9 @@ func TestTemplatesDecideByTheMostSpecificOperation(t *testing.T) {
 		{"DELETE", "/zones/z/dns_records/r", Ask, "path", "delete-record"},
 		{"DELETE", "/zones/z/dns_records/r%2Fx", Ask, RuleUnmatched, ""},
 		{"DELETE", "/zones/z/dns_records/r%255Cx", Ask, RuleUnmatched, ""},
-		{"GET", "/accounts/a%2Fb/tokens/t", Admit, "path", ""},
+		// Admitted by "/" strictly; to an upstream that decodes %2F it is
+		// under the operation that asks, and so it asks.
+		{"GET", "/accounts/a%2Fb/tokens/t", Ask, "path", "token-value"},
 		{"DELETE", "/zones/z%2F/dns_records/r", Ask, RuleUnmatched, ""},
 		{"DELETE", "/zones/z/dns_records/r/", Ask, RuleUnmatched, ""},
 		{"DELETE", "/zones/z/dns_records/", Ask, RuleUnmatched, ""},
@@ -536,4 +538,67 @@ func TestATemplateMatchesOnlyItsOwnShape(t *testing.T) {
 			t.Fatalf("%s %s matched export, but reads as %v", method, target, read)
 		}
 	})
+}
+
+// A rule that asks is not escaped by spelling the request so that it misses
+// while a broader rule admits it: an upstream may read the spelling as the
+// operation that asks. (Found in review: every one of these was admitted.)
+func TestAnAskCannotBeSpeltAround(t *testing.T) {
+	op := func(id string) *Operation { return &Operation{ID: id, Summary: id} }
+	github := mustCompile(t, Scope{Paths: []PathRule{
+		{Methods: []string{"GET"}, Prefix: "/repos/o/r"},
+		{Methods: []string{"GET"}, Path: "/repos/o/r/actions/secrets", Ask: true, Operation: op("secrets")},
+		{Methods: []string{"GET"}, Path: "/repos/o/*/keys", Ask: true, Operation: op("keys")},
+	}})
+	cloudflare := mustCompile(t, Scope{Paths: []PathRule{
+		{Methods: []string{"GET"}, Path: "/accounts/*/images/v1/*", Operation: op("image-details")},
+		{Methods: []string{"GET"}, Path: "/accounts/*/images/v1/keys", Ask: true, Operation: op("signing-keys")},
+		{Methods: []string{"GET"}, Path: "/accounts/*/tokens/verify", Operation: op("verify")},
+		{Methods: []string{"GET"}, Path: "/accounts/*/tokens/*", Ask: true, Operation: op("token")},
+	}, Unmatched: UnmatchedAsk})
+	for _, tc := range []struct {
+		scope     *compiled
+		target    string
+		operation string
+	}{
+		{github, "/repos/o/r/actions/secrets", "secrets"},
+		{github, "/repos/o/r/actions/secrets/", "secrets"},
+		{github, "/repos/o/r/actions/secrets;a", "secrets"},
+		{github, "/repos/o/r/actions/Secrets", "secrets"},
+		{github, "/repos/o/r/actions/secrets.", "secrets"},
+		{github, "/repos/o/r/actions/secret%73", "secrets"},
+		{github, "/repos/o/r/actions/secret%2573", "secrets"},
+		{github, "/repos/o/r/keys", "keys"},
+		{cloudflare, "/accounts/a/images/v1/keys", "signing-keys"},
+		{cloudflare, "/accounts/a/images/v1/Keys", "signing-keys"},
+		{cloudflare, "/accounts/a/images/v1/KEYS", "signing-keys"},
+		{cloudflare, "/accounts/a/images/v1/keys;x", "signing-keys"},
+		{cloudflare, "/accounts/a/images/v1/keys%20", "signing-keys"},
+		{cloudflare, "/accounts/a/images/v1/keys.", "signing-keys"},
+		{cloudflare, "/accounts/a/tokens/t", "token"},
+	} {
+		u, ok := parseTarget(tc.target)
+		if !ok {
+			t.Fatalf("test target %q does not parse", tc.target)
+		}
+		v := tc.scope.decide("GET", u)
+		got := ""
+		if v.Operation != nil {
+			got = v.Operation.ID
+		}
+		if v.Outcome != Ask || got != tc.operation {
+			t.Errorf("GET %s: (%v, %q), want to ask about %q", tc.target, v.Outcome, got, tc.operation)
+		}
+	}
+	// And what is named more specifically than the ask still passes.
+	for _, target := range []string{"/accounts/a/tokens/verify", "/accounts/a/images/v1/cat.png", "/repos/o/r/pulls"} {
+		u, _ := parseTarget(target)
+		scope := cloudflare
+		if strings.HasPrefix(target, "/repos") {
+			scope = github
+		}
+		if v := scope.decide("GET", u); v.Outcome != Admit {
+			t.Errorf("GET %s: %v, want admitted", target, v.Outcome)
+		}
+	}
 }

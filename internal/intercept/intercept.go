@@ -16,8 +16,11 @@ package intercept
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -77,10 +80,29 @@ const (
 	ReasonDeclined        = "declined"
 	ReasonAskFailed       = "asking failed"
 	ReasonStoppedWaiting  = "client stopped waiting"
+	ReasonBusy            = "a question from this session is already waiting"
+	ReasonMethodOverride  = "method override"
+	ReasonBodyTooLarge    = "body too large to ask about"
 )
+
+// BodyPreview is how much of an asked request's body its question carries.
+const BodyPreview = 4096
+
+// maxAskedBody bounds the body of a request that is asked about: read whole,
+// into memory, before anyone is asked.
+const maxAskedBody = 16 << 20
 
 // RuleAsked is the rule of a request a person admitted.
 const RuleAsked = "asked"
+
+// ErrBusy is an Asker's answer when the session already has a question
+// waiting: refused at once, and not the asker failing.
+var ErrBusy = errors.New(ReasonBusy)
+
+// methodOverrides are the headers some APIs read as the request's real
+// method. frisket decides on the request line's; one of these would let an
+// admitted GET be a DELETE upstream.
+var methodOverrides = []string{"X-Http-Method-Override", "X-Http-Method", "X-Method-Override"}
 
 // Asker puts a request the scope would not decide to someone who can. It
 // answers true to admit it; false, or an error, refuses it. It is called on
@@ -92,17 +114,27 @@ type Asker interface {
 
 // Question is one request put to an Asker. Operation is the only prose in it,
 // and it comes from the route's configuration, never from the request:
-// everything the workload chose -- method, path, query -- is here as the
-// request, to be shown as the request.
+// everything the workload chose -- method, path, query, body -- is here as
+// the request, to be shown as the request.
 type Question struct {
 	Session string `json:"session"`
-	Policy  string `json:"policy"`
-	Route   string `json:"route"`
-	Method  string `json:"method"`
-	Host    string `json:"host"`
+	// Workspace is the checkout the session was started in: which project
+	// is asking, when several are running.
+	Workspace string `json:"workspace,omitempty"`
+	Policy    string `json:"policy"`
+	Route     string `json:"route"`
+	Method    string `json:"method"`
+	Host      string `json:"host"`
 	// Path is escaped, exactly as it was sent; Query too, without its "?".
 	Path  string `json:"path"`
 	Query string `json:"query,omitempty"`
+	// Body is the start of the request's body, BodyPreview bytes at most;
+	// BodyBytes is all of it, and BodySHA256 its digest. What goes upstream
+	// is exactly the body these describe: it was read in full before the
+	// question was asked.
+	Body       string `json:"body,omitempty"`
+	BodyBytes  int64  `json:"bodyBytes"`
+	BodySHA256 string `json:"bodySHA256,omitempty"`
 	// Operation is what the request matched, or nil if it matched nothing --
 	// in which case nothing is borrowed to describe it.
 	Operation *Operation `json:"operation,omitempty"`
@@ -308,22 +340,25 @@ func (i *Interceptor) Hosts() []string {
 
 // For is the handler for one session's connections: the routes are the
 // policy's, the certificates are minted from ca, the session's own.
-func (i *Interceptor) For(ca *CA) steer.Handler {
-	return sessionHandler{i: i, ca: ca}
+func (i *Interceptor) For(ca *CA, workspace string) steer.Handler {
+	return sessionHandler{i: i, ca: ca, workspace: workspace}
 }
 
 type sessionHandler struct {
-	i  *Interceptor
-	ca *CA
+	i         *Interceptor
+	ca        *CA
+	workspace string
 }
 
-func (h sessionHandler) ServeConn(ctx context.Context, c *steer.Conn) { h.i.serveConn(ctx, c, h.ca) }
+func (h sessionHandler) ServeConn(ctx context.Context, c *steer.Conn) {
+	h.i.serveConn(ctx, c, h.ca, h.workspace)
+}
 
 // serveConn terminates TLS on a steered connection and hands it to the HTTP
 // server, returning when the connection is finished. The session's slot is
 // held for exactly that long.
-func (i *Interceptor) serveConn(ctx context.Context, c *steer.Conn, ca *CA) {
-	ic := &interceptedConn{Conn: c, session: c.Session, id: c.ID, dst: c.Orig, ca: ca, done: make(chan struct{})}
+func (i *Interceptor) serveConn(ctx context.Context, c *steer.Conn, ca *CA, workspace string) {
+	ic := &interceptedConn{Conn: c, session: c.Session, workspace: workspace, id: c.ID, dst: c.Orig, ca: ca, done: make(chan struct{})}
 	defer ic.Close()
 
 	tc := tls.Server(ic, i.tlsConfig)
@@ -464,6 +499,18 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.refuse(lw, http.StatusMisdirectedRequest, ReasonMisdirected, nil)
 		return
 	}
+	for _, h := range methodOverrides {
+		if _, ok := r.Header[h]; ok {
+			rec.refuse(ReasonMethodOverride)
+			rt.refuse(lw, http.StatusForbidden, ReasonMethodOverride, nil)
+			return
+		}
+	}
+	if r.URL.Query().Has("_method") {
+		rec.refuse(ReasonMethodOverride)
+		rt.refuse(lw, http.StatusForbidden, ReasonMethodOverride, nil)
+		return
+	}
 	v := rt.scope.decide(r.Method, r.URL)
 	if v.Operation != nil {
 		rec.operation = v.Operation.ID
@@ -531,8 +578,9 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 	if i.asker == nil {
 		return ReasonNobodyToAsk
 	}
-	ok, err := i.asker.Ask(r.Context(), Question{
+	q := Question{
 		Session:   ic.session,
+		Workspace: ic.workspace,
 		Policy:    i.policy,
 		Route:     ic.route.Name,
 		Method:    r.Method,
@@ -540,12 +588,36 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 		Path:      r.URL.EscapedPath(),
 		Query:     r.URL.RawQuery,
 		Operation: v.Operation,
-	})
+	}
+	// The body is what a write does, so it is read before the question is
+	// asked and what goes upstream is exactly what was read: a person
+	// allowing an update is allowing THIS update.
+	if r.Body != nil && r.Body != http.NoBody {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxAskedBody+1))
+		if err != nil {
+			return ReasonStoppedWaiting
+		}
+		if len(body) > maxAskedBody {
+			return ReasonBodyTooLarge
+		}
+		if len(body) > 0 {
+			sum := sha256.Sum256(body)
+			q.Body = string(body[:min(len(body), BodyPreview)])
+			q.BodyBytes = int64(len(body))
+			q.BodySHA256 = hex.EncodeToString(sum[:])
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		r.TransferEncoding = nil
+	}
+	ok, err := i.asker.Ask(r.Context(), q)
 	switch {
 	case r.Context().Err() != nil:
 		// Nobody is waiting for the answer, so there is nothing to admit and
 		// nothing wrong with the asker.
 		return ReasonStoppedWaiting
+	case errors.Is(err, ErrBusy):
+		return ReasonBusy
 	case err != nil:
 		// Said in the log where it happened, not in the request's line: the
 		// error is the asker's, and may quote whatever it was sent.
@@ -789,14 +861,15 @@ func (b *countingBody) Read(p []byte) (int, error) {
 // upgraded stream finishing, or by the session going away.
 type interceptedConn struct {
 	net.Conn
-	session  string
-	id       uint64
-	dst      netip.AddrPort
-	ca       *CA
-	route    *route
-	requests atomic.Int64
-	done     chan struct{}
-	once     sync.Once
+	session   string
+	workspace string
+	id        uint64
+	dst       netip.AddrPort
+	ca        *CA
+	route     *route
+	requests  atomic.Int64
+	done      chan struct{}
+	once      sync.Once
 }
 
 func (c *interceptedConn) Close() error {
