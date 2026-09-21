@@ -21,9 +21,11 @@
 #
 # `frisket steer` also puts the session's own CA at /etc/frisket, on a
 # read-only tmpfs in the session's mount namespace: ca.crt, and ca-bundle.crt,
-# the host's roots with the CA after them. The container exports every
-# variable the common runtimes read their roots from, pointing at the bundle,
-# so a client trusts the intercepted hosts and every other host alike.
+# the host's roots with the CA after them. WHERE THE BUNDLE IS is frisket's to
+# say; which of a runtime's dozen CA variables point at it is not. That list
+# is a fact about the tools a sandbox runs, it drifts as they change, and the
+# consumer is what knows them -- so it lives there. chase carries the set
+# these containers used to get from here.
 self:
 { config, lib, pkgs, ... }:
 
@@ -31,35 +33,6 @@ let
   cfg = config.services.frisket;
   inherit (lib) mkOption types;
   control = "-control ${cfg.controlSocket}";
-
-  # Where the common runtimes read their roots from, all of them the bundle.
-  # Each of these REPLACES a runtime's roots, bar NODE_EXTRA_CA_CERTS, which
-  # adds to Node's own and takes the bundle as readily as the CA alone. The
-  # set a Claude Code web session exports.
-  caVariables =
-    lib.genAttrs [
-      "AWS_CA_BUNDLE"
-      "CARGO_HTTP_CAINFO"
-      "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE"
-      "CURL_CA_BUNDLE"
-      "DENO_CERT"
-      "GIT_SSL_CAINFO"
-      "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"
-      "HEX_CACERTS_PATH"
-      "HTTPLIB2_CA_CERTS"
-      "NIX_SSL_CERT_FILE"
-      "NODE_EXTRA_CA_CERTS"
-      "PIP_CERT"
-      "REQUESTS_CA_BUNDLE"
-      "SSL_CERT_FILE"
-    ]
-      (_: "/etc/frisket/ca-bundle.crt")
-    // {
-      DENO_TLS_CA_STORE = "system,mozilla";
-      # uv's roots are compiled in; this makes it read the system's, which
-      # SSL_CERT_FILE names.
-      UV_NATIVE_TLS = "true";
-    };
 
   steeringFile = name: s: pkgs.writeText "frisket-steering-${name}.json"
     (self.lib.steering ({ inherit (s) set; } // s.steering)).json;
@@ -115,15 +88,6 @@ in
 
   config = lib.mkIf (cfg.flong != { }) {
     services.frisket.enable = lib.mkDefault true;
-
-    # The variables are defaults: a container that wants a runtime pointed
-    # elsewhere says so in its own declaration. They name /etc/frisket, which
-    # steer mounts in every session before its payload starts.
-    containers = lib.mapAttrs'
-      (name: _: lib.nameValuePair config.flong.${name}.container {
-        config.environment.variables = lib.mapAttrs (_: lib.mkDefault) caVariables;
-      })
-      cfg.flong;
 
     flong = lib.mapAttrs
       (name: s:

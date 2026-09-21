@@ -73,19 +73,19 @@ its policy's route hosts. It is mounted read-only at `/etc/frisket` in the
 session, on a tmpfs nothing else sees: `ca.crt`, and `ca-bundle.crt`, the
 host's `security.pki.caBundle` with the CA appended. The key never leaves the
 daemon and never touches disk; the CA survives a restart of the daemon and ends
-with the session. The container exports
-`SSL_CERT_FILE`, `NIX_SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
-`NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`, `PIP_CERT`, `AWS_CA_BUNDLE`,
-`CARGO_HTTP_CAINFO`, `DENO_CERT`, `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`,
-`HEX_CACERTS_PATH`, `HTTPLIB2_CA_CERTS` and `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`
-pointing at the bundle, plus `UV_NATIVE_TLS=true` and
-`DENO_TLS_CA_STORE=system,mozilla`, so a client trusts intercepted and spliced
-hosts alike. Each is a default; override one in the container's own
-declaration:
+with the session. Pointing a runtime at the bundle is the consumer's: set whichever of
+`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`
+and the rest the tools in that sandbox actually read.
 
 ```nix
-containers.agent.config.environment.variables.PIP_CERT = "/etc/ssl/certs/ca-certificates.crt";
+containers.agent.config.environment.variables.SSL_CERT_FILE =
+  "/etc/frisket/ca-bundle.crt";
 ```
+
+frisket used to export a set of them itself. It no longer does: which variable
+a runtime reads is a fact about the runtime, the list drifts as tools come and
+go, and the thing that chose to run those tools is what knows. [chase](https://github.com/danielbodart/chase)
+carries the set its containers were getting from here.
 
 A route added to a policy is intercepted in sessions started after the change;
 one already running fails on that host until it is relaunched.

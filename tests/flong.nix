@@ -216,6 +216,21 @@ in
         users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; home = "/home/alice"; };
         users.groups.users.gid = 100;
         environment.systemPackages = [ pkgs.curl pkgs.nftables pkgs.netcat pkgs.dnsutils ];
+        # A CONSUMER'S, not frisket's. frisket says where the bundle is and
+        # stops there; which of a runtime's CA variables point at it is a fact
+        # about the tools, so it belongs to whoever chose to run them. The
+        # subtest below is what proves the contract still holds from here.
+        environment.variables = {
+          SSL_CERT_FILE = "/etc/frisket/ca-bundle.crt";
+          NIX_SSL_CERT_FILE = "/etc/frisket/ca-bundle.crt";
+          CURL_CA_BUNDLE = "/etc/frisket/ca-bundle.crt";
+          REQUESTS_CA_BUNDLE = "/etc/frisket/ca-bundle.crt";
+          NODE_EXTRA_CA_CERTS = "/etc/frisket/ca-bundle.crt";
+          GIT_SSL_CAINFO = "/etc/frisket/ca-bundle.crt";
+          PIP_CERT = "/etc/frisket/ca-bundle.crt";
+          AWS_CA_BUNDLE = "/etc/frisket/ca-bundle.crt";
+          UV_NATIVE_TLS = "true";
+        };
       };
     };
 
@@ -645,12 +660,19 @@ in
               assert status != 0, (cmd, status, out)
           assert machine.succeed(f"cat {inside}/ca.crt {inside}/ca-bundle.crt") == before
 
-      with subtest("the payload is told to trust the bundle, through every variable the common runtimes read"):
+      with subtest("a consumer's CA variables reach the payload, and name the bundle frisket mounted"):
+          # frisket no longer sets these; the container above does, which is
+          # the documented way. What is under test is that the path they name
+          # is the one steer mounts, and that it is readable from inside.
           env = machine.succeed("cat /srv/work/env-out")
           for var in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
                       "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO", "PIP_CERT", "AWS_CA_BUNDLE"]:
               assert f"{var}=/etc/frisket/ca-bundle.crt\n" in env, (var, env)
           assert "UV_NATIVE_TLS=true\n" in env, env
+          # The variable would be worth nothing if it named a file the session
+          # could not read, or one that was not the session's own bundle.
+          assert machine.succeed(as_workload(leader, "cat /etc/frisket/ca-bundle.crt")) \
+              == machine.succeed(f"cat {inside}/ca-bundle.crt")
 
       with subtest("the intercepted name resolves to the service address, and only that name does"):
           for qtype, want in [("A", "192.0.2.2"), ("AAAA", "2001:db8::2")]:
