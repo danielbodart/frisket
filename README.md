@@ -227,9 +227,14 @@ it came, for what the scope admits.
 A route can put a request to a person instead of deciding it. A path rule
 names one operation exactly with `path`, a `*` segment matching any one
 segment, and `ask = true` holds a matching request while the asker decides;
-`unmatched = "ask"` does the same for anything no rule matches. Where several
-rules match, the most specific decides -- a literal beats `*`, either beats
-the end of a prefix -- and between equals, asking wins.
+`unmatched = "ask"` does the same for anything no rule matches, and
+`refuse = true` refuses what it matches outright -- a hole in a broader rule.
+Where several rules match, the most specific decides -- a literal beats `*`,
+either beats the end of a prefix -- and between equals, the stricter:
+refusing, then asking, then admitting. Neither a question nor a refusal can be
+spelt around: a request is also read as leniently as an upstream might --
+decoded, case-folded, a `;parameter` or trailing dot dropped, an encoded slash
+taken either way -- and a stricter rule that matches that reading decides.
 
 ```nix
 routes.cloudflare = {

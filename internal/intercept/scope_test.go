@@ -470,6 +470,87 @@ func TestEquallySpecificRulesAsk(t *testing.T) {
 	}
 }
 
+// Refusing is stricter still: equal to a rule that asks or admits, it wins,
+// whichever comes first.
+func TestEquallySpecificRulesRefuse(t *testing.T) {
+	admit := PathRule{Methods: []string{"GET"}, Path: "/zones/*"}
+	ask := PathRule{Methods: []string{"GET"}, Path: "/zones/*", Ask: true}
+	refuse := PathRule{Methods: []string{"GET"}, Path: "/zones/*", Refuse: true}
+	u, _ := parseTarget("/zones/z")
+	for _, order := range [][]PathRule{{admit, refuse}, {refuse, admit}, {ask, refuse}, {refuse, ask}, {admit, ask, refuse}} {
+		if v := mustCompile(t, Scope{Paths: order}).decide("GET", u); v.Outcome != Refuse || v.Reason != ReasonRefused {
+			t.Errorf("%v: (%v, %q), want refused by rule", order, v.Outcome, v.Reason)
+		}
+	}
+}
+
+// A refusal is a hole in what is broader, whatever it would otherwise have
+// been, and is itself outranked by what is named more specifically: a route
+// that refuses everything but one operation says so in two rules.
+func TestRefusalsDecideByTheMostSpecificRule(t *testing.T) {
+	reads := []string{"GET", "HEAD"}
+	every := []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}
+	hub := mustCompile(t, Scope{Paths: []PathRule{
+		{Methods: reads, Prefix: "/"},
+		{Methods: reads, Path: "/api/models/*/*/xet-write-token/*", Refuse: true},
+		{Methods: reads, Prefix: "/api/*/settings", Ask: true},
+		{Methods: reads, Path: "/api/*/settings/secret", Refuse: true},
+	}, Unmatched: UnmatchedAsk})
+	closed := mustCompile(t, Scope{Paths: []PathRule{
+		{Methods: every, Prefix: "/", Refuse: true},
+		{Methods: reads, Path: "/health"},
+	}, Unmatched: UnmatchedAsk})
+	for _, tc := range []struct {
+		scope          *compiled
+		method, target string
+		outcome        Outcome
+	}{
+		{hub, "GET", "/api/models/o/r/xet-read-token/main", Admit},
+		{hub, "GET", "/api/models/o/r/xet-write-token/main", Refuse},
+		{hub, "HEAD", "/api/models/o/r/xet-write-token/main", Refuse},
+		{hub, "POST", "/api/models/o/r/xet-write-token/main", Ask},
+		{hub, "GET", "/api/x/settings", Ask},
+		{hub, "GET", "/api/x/settings/secret", Refuse},
+		{closed, "GET", "/health", Admit},
+		{closed, "GET", "/", Refuse},
+		{closed, "POST", "/health", Refuse},
+		{closed, "GET", "/oauth/token", Refuse},
+	} {
+		u, _ := parseTarget(tc.target)
+		if v := tc.scope.decide(tc.method, u); v.Outcome != tc.outcome {
+			t.Errorf("%s %s: %v, want %v", tc.method, tc.target, v.Outcome, tc.outcome)
+		}
+	}
+}
+
+// Nor can a refusal be spelt around, by a request a broader rule admits or
+// asks about: it is refused however an upstream reads it.
+func TestARefusalCannotBeSpeltAround(t *testing.T) {
+	c := mustCompile(t, Scope{Paths: []PathRule{
+		{Methods: []string{"GET"}, Prefix: "/"},
+		{Methods: []string{"GET"}, Prefix: "/api", Ask: true},
+		{Methods: []string{"GET"}, Path: "/api/models/*/*/xet-write-token/*", Refuse: true},
+	}})
+	for _, target := range []string{
+		"/api/models/o/r/xet-write-token/main",
+		"/api/models/o/r/xet-write-token/main/",
+		"/api/models/o/r/Xet-Write-Token/main",
+		"/api/models/o/r/xet-write-token;a/main",
+		"/api/models/o/r/xet-write-token./main",
+		"/api/models/o/r/xet-write-toke%6E/main",
+		"/api/models/o%2Fr/xet-write-token/main",
+		"/API/models/o/r/xet-write-token/main",
+	} {
+		u, ok := parseTarget(target)
+		if !ok {
+			t.Fatalf("test target %q does not parse", target)
+		}
+		if v := c.decide("GET", u); v.Outcome != Refuse {
+			t.Errorf("GET %s: %v, want refused", target, v.Outcome)
+		}
+	}
+}
+
 // Without Unmatched, a scope of templates refuses what they do not match, as
 // a scope of prefixes always has.
 func TestUnmatchedRefusesByDefault(t *testing.T) {
@@ -499,6 +580,7 @@ func TestTemplateConfigurationRefusals(t *testing.T) {
 		"operation with no id":    {Paths: []PathRule{{Methods: get, Path: "/a", Operation: &Operation{Summary: "s"}}}},
 		"operation with no words": {Paths: []PathRule{{Methods: get, Path: "/a", Operation: &Operation{ID: "a"}}}},
 		"unknown unmatched":       {Paths: []PathRule{{Methods: get, Path: "/a"}}, Unmatched: 7},
+		"asks and refuses":        {Paths: []PathRule{{Methods: get, Path: "/a", Ask: true, Refuse: true}}},
 	} {
 		if _, err := compileScope(s); err == nil {
 			t.Errorf("%s: compiled, want a refusal", name)

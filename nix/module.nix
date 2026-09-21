@@ -109,6 +109,16 @@ let
           admitting it. With no asker, it is refused.
         '';
       };
+      refuse = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Refuse a matching request: a hole in a broader rule -- where it is
+          as specific as a rule that admits or asks, it wins -- or, alone, a
+          route whose whole purpose is that nothing it matches goes anywhere.
+          Not with `ask`.
+        '';
+      };
       operation = mkOption {
         type = types.nullOr (types.submodule {
           options = {

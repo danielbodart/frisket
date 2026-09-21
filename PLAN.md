@@ -662,7 +662,7 @@ inject.
 | Tool | Where it authenticates | To decide |
 |---|---|---|
 | gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`, GraphQL |
-| hf | `huggingface.co` | scope, which CDN and Xet hosts an allowlist needs, the token's source |
+| hf | `huggingface.co` | *decided, in chase's `apps/huggingface.nix` and `docs/huggingface.md`*: rules generated from the Hub's own OpenAPI description, reads admitted and writes and token-minting reads asked; strict refuses what would ask; `huggingface.co` and `*.hf.co` allowed; the token in sops |
 | Cloudflare | `api.cloudflare.com` | account and zone scoping, the credential's source |
 | GCP client libraries, gcloud | a metadata server on the service address | where its tokens come from, and what they may do |
 | Postgres, Redis, MongoDB | — | nothing of frisket's in trusted; unreachable in strict |
@@ -673,7 +673,7 @@ gh's design. It is marked PROVISIONAL, no policy can name it, and it is not an
 answer to gh's row until that row is designed.
 
 Several credentials have no source on this machine yet: there is no gcloud
-installation, no Cloudflare login, and the hf token is outside sops.
+installation and no Cloudflare login.
 The agent rows depend on decision 10: frisket holds no login of its own and
 injects what the host file currently holds.
 
@@ -949,12 +949,22 @@ inside, which the credential binds going away does not change.
 3. **Inbound to a trusted sandbox.** A dev server inside a sandbox is reachable
    from inside it, and Playwright runs there, so this is only about reaching it
    from the host's own browser. Whether that is worth a forwarder.
-4. **Hugging Face gated repos** — confirm the presigned CDN and Xet paths work
-   as ordinary egress, and which hosts a strict allowlist needs.
+4. **Hugging Face gated repos** — *mostly answered, measured.* Only
+   `huggingface.co` takes the token. A large file's `resolve/` redirects to a
+   presigned URL on a CDN under `hf.co`, and Xet's
+   `/api/<type>/<repo>/xet-read-token/<rev>` -- a GET, with our token --
+   hands the sandbox a short-lived CAS token for `cas-server.xethub.hf.co`.
+   So strict allows `huggingface.co` and `*.hf.co`, intercepts only the first,
+   and downloads work anonymously. Xet's write token is also fetched with a
+   GET, so it is one of the reads that ask -- and in strict, are refused: with
+   it a planted token could put bytes in Xet's store with no request frisket
+   sees. Still
+   unmeasured: a gated repository's download end to end, since the account
+   has no gated grant yet; the path is the same `resolve/` with the token.
 5. **Which host ports a trusted policy allows**, and whether that list is
    per project.
 6. **Where the credentials come from** for the routes that have no source yet:
-   there is no gcloud installation and no Cloudflare login on this machine,
-   and the Hugging Face token is outside sops.
+   there is no gcloud installation and no Cloudflare login on this machine.
+   (The Hugging Face token is in sops now, as `hf_token`.)
 7. **QUIC's policy.** Whether a relay's per-address allowlist is enough, or the
    Initial's SNI must be read (see "Build order").

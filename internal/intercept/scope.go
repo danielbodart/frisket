@@ -22,8 +22,8 @@ import (
 // in the sandbox can open a connection to an intercepted host and ask frisket
 // to add the credential.
 type Scope struct {
-	// Paths admit a request whose method is listed and whose path is at or
-	// under Prefix.
+	// Paths decide a request whose method is listed and whose path is at or
+	// under Prefix, or is exactly Path.
 	Paths []PathRule
 	// Git admits git's smart-HTTP protocol, GitHub-shaped, for a set of
 	// repositories or all of them.
@@ -59,13 +59,17 @@ const (
 // Where several rules match, the most specific decides, as OpenAPI resolves a
 // request to one operation: segment by segment from the left, a literal beats
 // a "*", and either beats being past the end of a prefix. Between rules that
-// are equally specific, one that asks beats one that admits.
+// are equally specific the stricter decides: refusing beats asking, and asking
+// beats admitting.
 type PathRule struct {
 	Methods []string
 	Prefix  string
 	Path    string
 	// Ask puts a matching request to a person instead of admitting it.
 	Ask bool
+	// Refuse refuses a matching request: a hole in a broader rule, or a
+	// route that exists only so what it matches goes nowhere. Not with Ask.
+	Refuse bool
 	// Operation is what the rule is, in its API's own words, for the person
 	// being asked. Nil: the rule has none, and the question says so.
 	Operation *Operation
@@ -151,6 +155,7 @@ const (
 	ReasonBadPath    = "path not canonical"
 	ReasonOutOfScope = "out of scope"
 	ReasonPush       = "push not allowed"
+	ReasonRefused    = "refused by rule"
 )
 
 // Outcome is what a scope decides about one request.
@@ -193,8 +198,30 @@ type compiledPath struct {
 	segs      []string
 	folded    []string
 	exact     bool
-	ask       bool
+	outcome   Outcome
 	operation *Operation
+}
+
+// strictness orders outcomes: admitting, then asking, then refusing.
+func strictness(o Outcome) int {
+	switch o {
+	case Admit:
+		return 0
+	case Ask:
+		return 1
+	}
+	return 2
+}
+
+// verdict is what the rule decides about a request it matched.
+func (p *compiledPath) verdict() Verdict {
+	switch p.outcome {
+	case Refuse:
+		return Verdict{Outcome: Refuse, Reason: ReasonRefused, Operation: p.operation}
+	case Ask:
+		return Verdict{Outcome: Ask, Reason: "path", Operation: p.operation}
+	}
+	return Verdict{Outcome: Admit, Reason: "path", Operation: p.operation}
 }
 
 func compileScope(s Scope) (*compiled, error) {
@@ -277,6 +304,9 @@ func compilePath(p PathRule) (compiledPath, error) {
 			return compiledPath{}, fmt.Errorf("path rule %q: a * is a whole segment or nothing", written)
 		}
 	}
+	if p.Ask && p.Refuse {
+		return compiledPath{}, fmt.Errorf("path rule %q both asks and refuses", written)
+	}
 	if o := p.Operation; o != nil && (o.ID == "" || o.Summary == "") {
 		return compiledPath{}, fmt.Errorf("path rule %q: an operation needs an id and a summary", written)
 	}
@@ -287,7 +317,14 @@ func compilePath(p PathRule) (compiledPath, error) {
 			folded[i] = fold(seg)
 		}
 	}
-	return compiledPath{methods: upper(p.Methods), segs: segs, folded: folded, exact: exact, ask: p.Ask, operation: p.Operation}, nil
+	outcome := Admit
+	switch {
+	case p.Ask:
+		outcome = Ask
+	case p.Refuse:
+		outcome = Refuse
+	}
+	return compiledPath{methods: upper(p.Methods), segs: segs, folded: folded, exact: exact, outcome: outcome, operation: p.Operation}, nil
 }
 
 func upper(ms []string) []string {
@@ -323,15 +360,15 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 		}
 	}
 	if best := c.best(method, segs, true); best != nil {
-		return c.admitOrAsk(method, segs, best)
+		return c.verdict(method, segs, best)
 	}
 	if best := c.best(method, segs, false); best != nil {
-		return c.admitOrAsk(method, segs, best)
+		return c.verdict(method, segs, best)
 	}
 	if c.api != nil && slices.Contains(c.api.Methods, method) &&
 		len(segs) >= 3 && segs[0] == "repos" && inRepos(c.api.Repos, segs[1], segs[2]) {
-		if asks := c.askedLeniently(method, segs); len(asks) > 0 {
-			return Verdict{Outcome: Ask, Reason: "path", Operation: asks[0].operation}
+		if stricter := c.stricterLeniently(method, segs, Admit); len(stricter) > 0 {
+			return stricter[0].verdict()
 		}
 		return Verdict{Outcome: Admit, Reason: "github-api"}
 	}
@@ -358,68 +395,75 @@ func (c *compiled) best(method string, segs []string, exact bool) *compiledPath 
 			continue
 		}
 		switch cmp := p.specificity(best, len(segs)); {
-		case cmp > 0, cmp == 0 && p.ask && !best.ask:
+		case cmp > 0, cmp == 0 && strictness(p.outcome) > strictness(best.outcome):
 			best = p
 		}
 	}
 	return best
 }
 
-// admitOrAsk is the rule's answer -- unless it admits, and a rule that asks
-// matches a lenient reading of the same request without being outranked by
-// the one that admits. A request spelt so that the rule asking about it
-// misses -- a trailing slash, a ;parameter, another case, a trailing dot --
-// is one an upstream may well read as that rule's operation, and an
-// admission is the one outcome that must not depend on how literally the
-// upstream reads its paths.
-func (c *compiled) admitOrAsk(method string, segs []string, best *compiledPath) Verdict {
-	if best.ask {
-		return Verdict{Outcome: Ask, Reason: "path", Operation: best.operation}
-	}
-	for _, p := range c.askedLeniently(method, segs) {
+// verdict is the rule's answer -- unless a stricter rule matches a lenient
+// reading of the same request without being outranked by it. A request spelt
+// so that the stricter rule misses -- a trailing slash, a ;parameter, another
+// case, a trailing dot -- is one an upstream may well read as that rule's
+// operation, and what a rule lets through is the one outcome that must not
+// depend on how literally the upstream reads its paths.
+func (c *compiled) verdict(method string, segs []string, best *compiledPath) Verdict {
+	for _, p := range c.stricterLeniently(method, segs, best.outcome) {
 		if !outranks(best, p, len(segs)) {
-			return Verdict{Outcome: Ask, Reason: "path", Operation: p.operation}
+			return p.verdict()
 		}
 	}
-	return Verdict{Outcome: Admit, Reason: "path", Operation: best.operation}
+	return best.verdict()
 }
 
-// outranks is whether an admitting rule is more specific than an asking one,
-// as decide ranks them: an operation over a prefix, and between two of a
-// kind, segment by segment.
-func outranks(admit, ask *compiledPath, n int) bool {
-	if admit.exact != ask.exact {
-		return admit.exact
+// outranks is whether a rule is more specific than a stricter one, as decide
+// ranks them: an operation over a prefix, and between two of a kind, segment
+// by segment.
+func outranks(rule, stricter *compiledPath, n int) bool {
+	if rule.exact != stricter.exact {
+		return rule.exact
 	}
-	return admit.specificity(ask, n) > 0
+	return rule.specificity(stricter, n) > 0
 }
 
-// askedLeniently is every rule that asks and matches the request however
-// leniently an upstream might read it: most specific first.
-func (c *compiled) askedLeniently(method string, segs []string) []*compiledPath {
-	lenient := make([]string, 0, len(segs))
+// stricterLeniently is every rule stricter than `than` that matches the
+// request however leniently an upstream might read it: the strictest first,
+// and among those the most specific.
+func (c *compiled) stricterLeniently(method string, segs []string, than Outcome) []*compiledPath {
+	// Two readings: a slash a segment decodes to is part of it, or -- to an
+	// upstream that decodes before it splits -- the end of it.
+	var whole, split []string
 	for _, s := range segs {
-		lenient = append(lenient, fold(s))
+		whole = append(whole, fold(s))
+		for _, piece := range strings.FieldsFunc(decode(s), func(r rune) bool { return r == '/' || r == '\\' }) {
+			split = append(split, foldDecoded(piece))
+		}
 	}
 	// A trailing slash is nothing, to a lenient reader.
-	if n := len(lenient); n > 0 && lenient[n-1] == "" {
-		lenient = lenient[:n-1]
+	if n := len(whole); n > 0 && whole[n-1] == "" {
+		whole = whole[:n-1]
 	}
 	var out []*compiledPath
 	for i := range c.paths {
 		p := &c.paths[i]
-		if p.ask && slices.Contains(p.methods, method) && p.matchesFolded(lenient) {
+		if strictness(p.outcome) > strictness(than) && slices.Contains(p.methods, method) &&
+			(p.matchesFolded(whole) || p.matchesFolded(split)) {
 			out = append(out, p)
 		}
 	}
+	n := max(len(whole), len(split))
 	slices.SortStableFunc(out, func(a, b *compiledPath) int {
+		if d := strictness(b.outcome) - strictness(a.outcome); d != 0 {
+			return d
+		}
 		if a.exact != b.exact {
 			if a.exact {
 				return -1
 			}
 			return 1
 		}
-		return -a.specificity(b, len(lenient))
+		return -a.specificity(b, n)
 	})
 	return out
 }
@@ -445,7 +489,10 @@ func (p *compiledPath) matchesFolded(segs []string) bool {
 // fold is a segment as the most lenient upstream might read it: decoded as
 // often as it decodes, cut at a ;parameter, trailing dots and spaces trimmed,
 // and ASCII lower case.
-func fold(seg string) string {
+func fold(seg string) string { return foldDecoded(decode(seg)) }
+
+// decode is a segment decoded as often as it decodes.
+func decode(seg string) string {
 	for range maxDecodes {
 		next, err := url.PathUnescape(seg)
 		if err != nil || next == seg {
@@ -453,6 +500,11 @@ func fold(seg string) string {
 		}
 		seg = next
 	}
+	return seg
+}
+
+// foldDecoded is fold, for a segment already decoded.
+func foldDecoded(seg string) string {
 	seg, _, _ = strings.Cut(seg, ";")
 	seg = strings.TrimRight(seg, ". ")
 	return strings.ToLower(seg)

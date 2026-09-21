@@ -140,12 +140,14 @@ type CredentialJSON struct {
 }
 
 // PathRule is one scope rule: the methods, at exactly Path or at and under
-// Prefix, either of them with "*" segments; admitted, or asked about.
+// Prefix, either of them with "*" segments; admitted, asked about, or
+// refused.
 type PathRule struct {
 	Methods   []string   `json:"methods"`
 	Prefix    string     `json:"prefix,omitempty"`
 	Path      string     `json:"path,omitempty"`
 	Ask       bool       `json:"ask,omitempty"`
+	Refuse    bool       `json:"refuse,omitempty"`
 	Operation *Operation `json:"operation,omitempty"`
 }
 
@@ -540,7 +542,7 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 		return intercept.Route{}, nil, fmt.Errorf("unmatched %q: refuse or ask", r.Unmatched)
 	}
 	for _, p := range r.Paths {
-		rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, Ask: p.Ask}
+		rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, Ask: p.Ask, Refuse: p.Refuse}
 		if o := p.Operation; o != nil {
 			rule.Operation = &intercept.Operation{ID: o.ID, Summary: o.Summary, Description: o.Description}
 		}
