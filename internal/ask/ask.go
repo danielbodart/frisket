@@ -14,9 +14,7 @@
 //     its turn, so a person never faces a pile of dialogs;
 //   - one question per session: a session with a question waiting has any
 //     other refused at once, so no sandbox can fill the queue ahead of
-//     another's, or bury one question among many;
-//   - a pause between one question and the next, so an answer meant for one
-//     -- a click, an Enter -- cannot land on another put up in its place.
+//     another's, or bury one question among many.
 package ask
 
 import (
@@ -39,9 +37,6 @@ import (
 // waitDelay is how long an asker has to go once told to, before it is killed.
 var waitDelay = 5 * time.Second
 
-// gap is the least time between one question closing and the next opening.
-var gap = time.Second
-
 // maxStderr bounds what of an asker's stderr is kept for its error.
 const maxStderr = 1024
 
@@ -54,7 +49,6 @@ type Command struct {
 
 	mu      sync.Mutex
 	waiting map[string]bool // sessions with a question queued or open
-	closed  time.Time       // when the last question closed
 }
 
 var _ intercept.Asker = (*Command)(nil)
@@ -101,23 +95,7 @@ func (c *Command) Ask(ctx context.Context, q intercept.Question) (bool, error) {
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
-	defer func() {
-		c.mu.Lock()
-		c.closed = time.Now()
-		c.mu.Unlock()
-		<-c.turn
-	}()
-	c.mu.Lock()
-	wait := time.Until(c.closed.Add(gap))
-	c.mu.Unlock()
-	if wait > 0 {
-		t := time.NewTimer(wait)
-		select {
-		case <-t.C:
-		case <-ctx.Done():
-			t.Stop()
-		}
-	}
+	defer func() { <-c.turn }()
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}

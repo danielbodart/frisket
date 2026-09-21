@@ -161,8 +161,6 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
-func init() { gap = 20 * time.Millisecond }
-
 // A session with a question waiting has another refused at once: no sandbox
 // can queue ahead of another's, or bury one question among many.
 func TestOneQuestionPerSession(t *testing.T) {
@@ -183,32 +181,5 @@ func TestOneQuestionPerSession(t *testing.T) {
 	// Answered, the session may ask again.
 	if ok, err := c.Ask(context.Background(), question); !ok || err != nil {
 		t.Fatalf("after its question was answered: (%v, %v)", ok, err)
-	}
-}
-
-// Between one question closing and the next opening there is a pause, so an
-// answer meant for one cannot land on the next.
-func TestAPauseBetweenQuestions(t *testing.T) {
-	dir := t.TempDir()
-	c := mustCommand(t, script(t, `date +%s%N >> `+dir+`/times`))
-	for i := range 3 {
-		q := question
-		q.Session = fmt.Sprintf("s%d", i)
-		if _, err := c.Ask(context.Background(), q); err != nil {
-			t.Fatal(err)
-		}
-	}
-	b, err := os.ReadFile(dir + "/times")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var prev int64
-	for i, l := range strings.Fields(string(b)) {
-		var n int64
-		fmt.Sscan(l, &n)
-		if i > 0 && time.Duration(n-prev) < gap {
-			t.Fatalf("question %d opened %v after the last, want at least %v", i, time.Duration(n-prev), gap)
-		}
-		prev = n
 	}
 }

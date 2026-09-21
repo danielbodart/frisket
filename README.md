@@ -279,8 +279,7 @@ asker's process group is sent SIGTERM. With no asker, every ask is refused.
 
 Each session has one question at most: another while one waits is refused at
 once, so no sandbox can queue ahead of another's or bury a question among
-many. Between one question closing and the next opening there is a second's
-pause, so an answer meant for one cannot land on the next.
+many.
 
 Where several rules match, an admission never depends on how literally the
 upstream reads its paths: a rule that asks, and matches the request read
