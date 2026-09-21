@@ -1,4 +1,4 @@
-<p align="center"><img src="logo.png" alt="flong" width="600"></p>
+<p align="center"><img src="logo.png" alt="frisket" width="600"></p>
 
 # frisket
 
