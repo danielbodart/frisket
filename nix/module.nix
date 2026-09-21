@@ -15,35 +15,54 @@ let
   perSession = 5;
 
 
-  # THE POLICIES ARE DATA, read by the daemon at start and checked there in
-  # full: a configuration that does not hold stops the daemon, loudly, rather
-  # than refusing every session later.
-  configFile = pkgs.writeText "frisket.json" (builtins.toJSON {
-    inherit (cfg) dns;
-    policies = lib.mapAttrs
-      (_: p: {
-        inherit (p) allow;
-        routes = lib.mapAttrsToList
-          (name: r: {
-            inherit name;
-            inherit (r) host upstream unmatched;
-            paths = map (lib.filterAttrs (_: v: v != null)) r.paths;
-          } // lib.optionalAttrs (r.upstreamCA != null) { upstreamCA = "${r.upstreamCA}"; }
-          // lib.optionalAttrs (r.refusal != null) { inherit (r) refusal; }
-          // lib.optionalAttrs (r.credentialFile != null) { inherit (r) credentialFile; }
-          // lib.optionalAttrs (r.placeholder != null) { inherit (r) placeholder; }
-          // lib.optionalAttrs (r.header != null) { inherit (r) header; }
-          // lib.optionalAttrs (r.basicUser != null) { inherit (r) basicUser; }
-          // lib.optionalAttrs (r.git != null) { git = { inherit (r.git) repos push; }; }
-          // lib.optionalAttrs (r.credentialJSON != null) {
-            credentialJSON = { inherit (r.credentialJSON) token; }
-              // lib.optionalAttrs (r.credentialJSON.expiresMillis != null) { inherit (r.credentialJSON) expiresMillis; }
-              // lib.optionalAttrs (r.credentialJSON.expiresJWT != null) { inherit (r.credentialJSON) expiresJWT; };
-          })
-          p.routes;
+  # THE POLICIES ARE DOCUMENTS, one per policy, under /etc/frisket/policies.
+  # A session names its document by path, and the daemon reads it when the
+  # session opens and again if the session is restored: a switch that
+  # tightens a policy tightens the sessions already running under it. The
+  # daemon's own file says only where names are resolved.
+  configFile = pkgs.writeText "frisket.json" (builtins.toJSON { inherit (cfg) dns; });
+
+  document = name: p: {
+    inherit name;
+    inherit (p) allow;
+    routes = lib.mapAttrsToList
+      (name: r: {
+        inherit name;
+        inherit (r) host upstream unmatched;
+        paths = map (lib.filterAttrs (_: v: v != null)) r.paths;
+      } // lib.optionalAttrs (r.upstreamCA != null) { upstreamCA = "${r.upstreamCA}"; }
+      // lib.optionalAttrs (r.refusal != null) { inherit (r) refusal; }
+      // lib.optionalAttrs (r.credentialFile != null) { inherit (r) credentialFile; }
+      // lib.optionalAttrs (r.placeholder != null) { inherit (r) placeholder; }
+      // lib.optionalAttrs (r.header != null) { inherit (r) header; }
+      // lib.optionalAttrs (r.basicUser != null) { inherit (r) basicUser; }
+      // lib.optionalAttrs (r.git != null) { git = { inherit (r.git) repos push; }; }
+      // lib.optionalAttrs (r.credentialJSON != null) {
+        credentialJSON = { inherit (r.credentialJSON) token; }
+          // lib.optionalAttrs (r.credentialJSON.expiresMillis != null) { inherit (r.credentialJSON) expiresMillis; }
+          // lib.optionalAttrs (r.credentialJSON.expiresJWT != null) { inherit (r.credentialJSON) expiresJWT; };
       })
-      cfg.policies;
-  });
+      p.routes;
+  };
+
+  # Checked as the daemon will read them, when the system is built: a
+  # document that does not hold together fails the build, rather than
+  # refusing every session later. Whether its credential files exist yet is
+  # not the document's to say, and is not checked.
+  policies = pkgs.runCommand "frisket-policies"
+    {
+      nativeBuildInputs = [ cfg.package ];
+      documents = lib.mapAttrs (name: p: builtins.toJSON (document name p)) cfg.policies;
+      __structuredAttrs = true;
+    } ''
+    mkdir -p "$out"
+    for name in "''${!documents[@]}"; do
+      printf '%s' "''${documents[$name]}" > "$out/$name.json"
+    done
+    if [ -n "$(ls -A "$out")" ]; then
+      frisket check "$out"/*.json
+    fi
+  '';
 
   # A name is on the allowlist exactly, under one of its wildcards, or the
   # list has "*". The daemon makes the same checks with the real matcher;
@@ -457,6 +476,10 @@ in
           p.routes)
       cfg.policies);
 
+    # A directory of the documents, so the path a session names stays the
+    # same across a switch while what it holds changes.
+    environment.etc."frisket/policies".source = policies;
+
     users.users = lib.mkIf (cfg.user == "frisket") {
       frisket = { isSystemUser = true; inherit (cfg) group; };
     };
@@ -489,6 +512,12 @@ in
       # stop-then-start, would sever every running session on every switch
       # that touches this unit, which is exactly what the store is for.
       stopIfChanged = false;
+
+      # A changed policy restarts the daemon, and every session comes back
+      # from the fd store served under its document as it reads now. The
+      # documents are not in the unit, so without this a switch would leave
+      # running sessions under what they were opened with.
+      restartTriggers = [ policies ];
 
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve -log-level ${cfg.logLevel} -control ${cfg.controlSocket}"

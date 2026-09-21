@@ -36,6 +36,17 @@ type session struct {
 	cancel  context.CancelFunc
 	serving sync.WaitGroup
 	conns   tracker
+
+	// release gives back the policy the session was served under, once
+	// everything serving it has stopped.
+	release     func()
+	releaseOnce sync.Once
+}
+
+func (s *session) releasePolicy() {
+	if s.release != nil {
+		s.releaseOnce.Do(s.release)
+	}
 }
 
 // descriptors is how many this session holds in the sandbox's namespace, or
@@ -96,10 +107,14 @@ func (s *session) closeAll(wait time.Duration) int {
 	}()
 	select {
 	case <-done:
+		s.releasePolicy()
 	case <-time.After(wait):
 		// Every descriptor is already closed; what is late is a handler
 		// returning. Said, so a handler that ignores its context is visible.
+		// The policy is given back when it does, not before: its interceptor
+		// may be what it is still using.
 		s.log.Warn("handlers still running after close", "session", s.info.Name)
+		go func() { <-done; s.releasePolicy() }()
 	}
 	return n
 }

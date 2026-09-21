@@ -19,7 +19,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +26,8 @@ import (
 
 	"github.com/danielbodart/frisket/internal/ask"
 	"github.com/danielbodart/frisket/internal/control"
+	"github.com/danielbodart/frisket/internal/dns"
+	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/nsnet"
 	"github.com/danielbodart/frisket/internal/policy"
 	"github.com/danielbodart/frisket/internal/sdnotify"
@@ -45,11 +46,13 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         each connection and query steered to them under the session's policy:
         DNS against the allowlist, egress to what that DNS resolved, and
         interception for the routes' hosts, with a CA of the session's own.
-        FILE holds the policies. Under systemd it is socket-activated, and
+        FILE says where names are resolved; each session names its own policy
+        document, read when it opens and again if it is restored. Under
+        systemd it is socket-activated, and
         keeps its sessions -- and their CAs -- across a restart in the
         service's file-descriptor store.
 
-  frisket steer -netns PATH -mntns PATH -roots BUNDLE -steering FILE -name NAME -policy POLICY [-param K=V]...
+  frisket steer -netns PATH -mntns PATH -roots BUNDLE -steering FILE -name NAME -policy DOCUMENT [-param K=V]...
         Root's first step, from a launcher's hook: create the session's
         listeners inside the network namespace, hand them to the daemon, then
         install the policy routing and load the ruleset that steers to them.
@@ -66,6 +69,10 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
   frisket close -name NAME
         End a session: the daemon closes every descriptor it holds and drops it
         from the fd store. Closing one that is not open succeeds.
+
+  frisket check DOCUMENT...
+        Check policy documents as a session opening one would: everything but
+        whether its credential files exist yet.
 
   frisket sessions        What the daemon holds, one JSON object per line.
   frisket steering FILE   Check a steering file and print what it will do.
@@ -95,6 +102,8 @@ func main() {
 		err = runSessions(args)
 	case "steering":
 		err = runSteering(args)
+	case "check":
+		err = runCheck(args)
 	case "helper":
 		err = nsnet.RunHelper(args, os.Stderr)
 	case "nsexec":
@@ -147,10 +156,11 @@ func runServe(argv []string) error {
 	}
 	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, &slog.HandlerOptions{Level: level}))
 
-	// Everything the policies need is built before the control socket is
+	// Everything the policies share is built before the control socket is
 	// touched, so a configuration that does not hold stops the daemon at
-	// start -- loudly, in the journal -- rather than refusing every session
-	// later for a reason nobody sees.
+	// start. The policies themselves are each session's to name, and are
+	// read when it opens: `frisket check` is how a document is refused
+	// before any session is.
 	cfg, err := policy.Load(*configPath)
 	if err != nil {
 		return err
@@ -169,7 +179,7 @@ func runServe(argv []string) error {
 		}
 		deps.Asker = asker
 	}
-	policies, err := policy.Build(cfg, deps)
+	policies, err := policy.NewStore(cfg, deps)
 	if err != nil {
 		return err
 	}
@@ -205,7 +215,7 @@ func runServe(argv []string) error {
 
 	d := &serve.Daemon{
 		Log:        log,
-		Policies:   policies.Policies,
+		Policies:   policies,
 		ControlUID: *uid,
 		MaxConns:   *maxConns,
 	}
@@ -214,13 +224,7 @@ func runServe(argv []string) error {
 	if n := sdnotify.FromEnv(); n != nil {
 		d.Notify = n
 	}
-	names := make([]string, 0, len(policies.Policies))
-	for n := range policies.Policies {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored),
-		"policies", names)
+	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -276,10 +280,37 @@ func root(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, 30*time.Second)
 }
 
+func runCheck(argv []string) error {
+	if len(argv) == 0 {
+		return errors.New("name at least one policy document")
+	}
+	// Nothing is dialled and nothing resolved: the host's addresses and its
+	// resolver are no part of whether a document holds together, and a build
+	// sandbox has neither.
+	classifier, err := egress.NewClassifier(nil, egress.StaticHostAddrs())
+	if err != nil {
+		return err
+	}
+	deps := policy.Deps{
+		Classifier: classifier,
+		Dialer:     &egress.Dialer{Classifier: classifier},
+		Upstream:   &dns.Upstream{},
+		// A credential file that is not there yet is logged by its watcher,
+		// and is not the document's fault.
+		Log: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+	for _, path := range argv {
+		if err := policy.Check(path, deps); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func runSteer(argv []string) error {
 	fs := flag.NewFlagSet("steer", flag.ContinueOnError)
 	s, netns, file, name := rootFlags(fs)
-	policy := fs.String("policy", "", "the policy the daemon applies to the session")
+	policy := fs.String("policy", "", "the policy document the daemon serves the session under, by its absolute path")
 	mntns := fs.String("mntns", "", "the sandbox's mount namespace, where the session's CA is put: /proc/<pid>/ns/mnt")
 	roots := fs.String("roots", "", "the host's CA bundle, which the session's bundle is made from")
 	ps := params{}

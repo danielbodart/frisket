@@ -2,25 +2,28 @@
 // by the NixOS module -- into the handlers each session is served with: the
 // real egress, DNS and interception, wired together.
 //
-// A policy is three lists and nothing else: the names a session may resolve,
-// the names among them that are intercepted, and the routes that say what an
-// intercepted name's requests may do and which credential they carry. Every
-// session of a policy gets its own DNS server and its own resolved set --
-// an answer given to one sandbox is not a permission for another -- and its
-// own CA, constrained to the policy's route hosts, and shares the policy's
-// interceptor and its credential watchers.
+// A policy is a document at a path, which a session names: the names a
+// session may resolve, the names among them that are intercepted, and the
+// routes that say what an intercepted name's requests may do and which
+// credential they carry. Every session gets its own DNS server and its own
+// resolved set -- an answer given to one sandbox is not a permission for
+// another -- and its own CA, constrained to the policy's route hosts. Sessions
+// whose documents are the same, byte for byte, share one interceptor and its
+// credential watchers, and the last of them to end closes them.
 package policy
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"os"
-	"sort"
 	"strings"
+	"sync"
 
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/credential"
@@ -30,14 +33,19 @@ import (
 	"github.com/danielbodart/frisket/internal/serve"
 )
 
-// Config is the daemon's configuration file.
+// Config is the daemon's configuration file. Policies are not in it: each is
+// a document of its own, which a session names by its path.
 type Config struct {
 	// DNS is where frisket resolves the names a session is allowed. Empty
 	// means whatever the host's /etc/resolv.conf names, followed as it changes.
 	DNS []string `json:"dns,omitempty"`
-	// Policies by name. A session names one; one it names that is not here
-	// is refused, and so never gets rules.
-	Policies map[string]Policy `json:"policies"`
+}
+
+// Document is a policy as its file holds it: the policy, and a name for the
+// log lines and questions of the sessions served under it.
+type Document struct {
+	Name string `json:"name"`
+	Policy
 }
 
 // Policy is one policy, as data.
@@ -148,20 +156,31 @@ type Operation struct {
 	Description string `json:"description,omitempty"`
 }
 
-// Load reads a configuration file, refusing any field it does not know: a
-// misspelt key in a policy is a rule that silently does not apply.
+// Load reads the daemon's configuration file.
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
 	var c Config
-	if err := dec.Decode(&c); err != nil {
+	if err := decode(b, &c); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	return &c, nil
+}
+
+// decode refuses any field it does not know, and anything after the one
+// value: a misspelt key in a policy is a rule that silently does not apply.
+func decode(b []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("more than one JSON value")
+	}
+	return nil
 }
 
 // interceptHosts is a policy's intercepted names -- its routes' hosts -- each
@@ -197,89 +216,199 @@ type Deps struct {
 	// Asker decides what a route asks about, for every policy. Nil refuses
 	// it.
 	Asker intercept.Asker
+
+	// checking builds a document without watching its credential files.
+	checking bool
 }
 
-// Set is every policy, built, and what must be closed when the daemon stops.
-type Set struct {
-	Policies map[string]serve.Policy
-	closers  []func() error
+// unchecked is the credential of a route built only to be checked.
+type unchecked struct{}
+
+func (unchecked) Get() (credential.Secret, error) {
+	return credential.Secret{}, errors.New("a policy being checked has no credentials")
 }
 
-// Close stops every interceptor and watcher.
-func (s *Set) Close() error {
-	var errs []error
-	for i := len(s.closers) - 1; i >= 0; i-- {
-		if err := s.closers[i](); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	s.closers = nil
-	return errors.Join(errs...)
+// maxDocument bounds a policy document. Cloudflare's, every operation of
+// its API with its description, is about a megabyte.
+const maxDocument = 64 << 20
+
+// Store opens policies from their documents for serve.Daemon, building each
+// once for however many sessions are served under it.
+type Store struct {
+	deps    Deps
+	up      dns.Exchanger
+	closeUp func() error
+
+	mu    sync.Mutex
+	built map[[sha256.Size]byte]*built
 }
 
-// Build checks c and builds every policy in it. Nothing is built unless all of
-// it is valid: a daemon with half its policies is one whose sessions are
-// refused for reasons nobody configured.
-func Build(c *Config, d Deps) (_ *Set, err error) {
+type built struct {
+	policy  serve.Policy
+	closers []func() error
+	refs    int
+}
+
+var _ serve.Policies = (*Store)(nil)
+
+// NewStore makes the store every session's policy is opened from, resolving
+// allowed names where c says.
+func NewStore(c *Config, d Deps) (*Store, error) {
 	if d.Classifier == nil || d.Dialer == nil || d.Log == nil {
 		return nil, errors.New("policy: a classifier, a dialer and a logger are all required")
 	}
-	set := &Set{Policies: map[string]serve.Policy{}}
-	defer func() {
+	s := &Store{deps: d, up: d.Upstream, closeUp: func() error { return nil }, built: map[[sha256.Size]byte]*built{}}
+	if s.up == nil {
+		up, closeUp, err := upstream(c.DNS, d.Log)
 		if err != nil {
-			_ = set.Close()
-		}
-	}()
-	up := d.Upstream
-	if up == nil {
-		if up, err = upstream(c.DNS, d.Log, set); err != nil {
 			return nil, err
 		}
+		s.up, s.closeUp = up, closeUp
 	}
-	names := make([]string, 0, len(c.Policies))
-	for name := range c.Policies {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		p, err := build(name, c.Policies[name], d, up, set)
-		if err != nil {
-			return nil, fmt.Errorf("policy %s: %w", name, err)
-		}
-		set.Policies[name] = p
-	}
-	return set, nil
+	return s, nil
 }
 
-func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Policy, error) {
+// Open reads the document at path and returns its policy, built now or shared
+// with the sessions already served under the same bytes. A document that does
+// not read, or does not hold together, is refused: the session it was for
+// never gets rules.
+func (s *Store) Open(path string) (serve.Policy, func(), error) {
+	b, err := readDocument(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	key := sha256.Sum256(b)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.built == nil {
+		return nil, nil, errors.New("policy: the store is closed")
+	}
+	e := s.built[key]
+	if e == nil {
+		var doc Document
+		if err := decode(b, &doc); err != nil {
+			return nil, nil, fmt.Errorf("policy %s: %w", path, err)
+		}
+		p, closers, err := build(doc.Name, doc.Policy, s.deps, s.up)
+		if err != nil {
+			return nil, nil, fmt.Errorf("policy %s: %w", path, err)
+		}
+		e = &built{policy: p, closers: closers}
+		s.built[key] = e
+	}
+	e.refs++
+	var once sync.Once
+	return e.policy, func() { once.Do(func() { s.release(key, e) }) }, nil
+}
+
+func (s *Store) release(key [sha256.Size]byte, e *built) {
+	s.mu.Lock()
+	e.refs--
+	last := e.refs == 0 && s.built != nil && s.built[key] == e
+	if last {
+		delete(s.built, key)
+	}
+	s.mu.Unlock()
+	if last {
+		if err := closeAll(e.closers); err != nil {
+			s.deps.Log.Warn("policy closed", "error", err.Error())
+		}
+	}
+}
+
+// Close stops every policy still built and the upstream DNS follower.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	all := s.built
+	s.built = nil
+	s.mu.Unlock()
+	var errs []error
+	for _, e := range all {
+		errs = append(errs, closeAll(e.closers))
+	}
+	errs = append(errs, s.closeUp())
+	return errors.Join(errs...)
+}
+
+// Check reads and builds a document and closes it again: the whole of what a
+// session opening it would be refused for, said before one does.
+func Check(path string, d Deps) error {
+	d.checking = true
+	s, err := NewStore(&Config{}, d)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	_, release, err := s.Open(path)
+	if err != nil {
+		return err
+	}
+	release()
+	return nil
+}
+
+// readDocument reads a policy document, bounded.
+func readDocument(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("policy: %w", err)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxDocument+1))
+	if err != nil {
+		return nil, fmt.Errorf("policy %s: %w", path, err)
+	}
+	if len(b) > maxDocument {
+		return nil, fmt.Errorf("policy %s: larger than %d bytes", path, maxDocument)
+	}
+	return b, nil
+}
+
+func closeAll(closers []func() error) error {
+	var errs []error
+	for i := len(closers) - 1; i >= 0; i-- {
+		errs = append(errs, closers[i]())
+	}
+	return errors.Join(errs...)
+}
+
+// build builds one policy and everything behind it, returning what closes
+// it. Nothing is left running if it fails.
+func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, closers []func() error, err error) {
+	defer func() {
+		if err != nil {
+			_ = closeAll(closers)
+			closers = nil
+		}
+	}()
 	if err := control.ValidName(name); err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("policy %w", err)
 	}
 	allow, err := dns.NewMatcher(p.Allow...)
 	if err != nil {
-		return nil, fmt.Errorf("allow: %w", err)
+		return nil, closers, fmt.Errorf("allow: %w", err)
 	}
 	hosts, err := interceptHosts(p)
 	if err != nil {
-		return nil, err
+		return nil, closers, err
 	}
 	icpt, err := dns.NewMatcher(hosts...)
 	if err != nil {
-		return nil, fmt.Errorf("intercept: %w", err)
+		return nil, closers, fmt.Errorf("intercept: %w", err)
 	}
 	for _, h := range hosts {
 		if !allow.Match(h) {
-			return nil, fmt.Errorf("route for %s: not on the allowlist; interception is how an allowed host gets its credential, not a way round the allowlist", h)
+			return nil, closers, fmt.Errorf("route for %s: not on the allowlist; interception is how an allowed host gets its credential, not a way round the allowlist", h)
 		}
 	}
 
 	routes := make([]intercept.Route, 0, len(p.Routes))
 	for _, r := range p.Routes {
-		ir, closer, err := route(r, d.Log)
+		ir, closer, err := route(r, d)
 		if err != nil {
-			return nil, fmt.Errorf("route %s: %w", r.Name, err)
+			return nil, closers, fmt.Errorf("route %s: %w", r.Name, err)
 		}
-		set.closers = append(set.closers, closer)
+		closers = append(closers, closer)
 		routes = append(routes, ir)
 	}
 
@@ -294,9 +423,9 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 		DialContext: d.Dialer.DialContext,
 	})
 	if err != nil {
-		return nil, err
+		return nil, closers, err
 	}
-	set.closers = append(set.closers, ic.Close)
+	closers = append(closers, ic.Close)
 
 	return serve.PolicyFunc(func(s control.Session, authority []byte, log *slog.Logger) (serve.Handlers, error) {
 		ca, authority, err := sessionCA(hosts, authority)
@@ -309,13 +438,13 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 		for _, h := range hosts {
 			if !ca.Permits(h) {
 				log.Warn("session CA does not cover a route's host: relaunch the session to intercept it",
-					"session", s.Name, "policy", s.Policy, "host", h)
+					"session", s.Name, "policy", name, "host", h)
 			}
 		}
 		resolved := egress.NewResolved(egress.ResolvedConfig{})
 		srv, err := dns.New(dns.Config{
 			Session:   s.Name,
-			Policy:    s.Policy,
+			Policy:    name,
 			Allow:     allow,
 			Intercept: icpt,
 			Service:   s.Service,
@@ -330,7 +459,7 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 			Egress: &egress.Handler{
 				Policy:     &egress.Policy{Classifier: d.Classifier, Resolved: resolved},
 				Dialer:     d.Dialer,
-				PolicyName: s.Policy,
+				PolicyName: name,
 				Log:        log,
 			},
 			Intercept: ic.For(ca),
@@ -338,7 +467,7 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 			Authority: authority,
 			CACert:    ca.CertPEM(),
 		}, nil
-	}), nil
+	}), closers, nil
 }
 
 // sessionCA is a new session's CA, constrained to hosts, or a restored
@@ -357,7 +486,7 @@ func sessionCA(hosts []string, authority []byte) (*intercept.CA, []byte, error) 
 }
 
 // route builds one route and the watcher behind its credential, if it has one.
-func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
+func route(r Route, d Deps) (intercept.Route, func() error, error) {
 	out := intercept.Route{Name: r.Name, Host: r.Host, Upstream: r.Upstream}
 	if rf := r.Refusal; rf != nil {
 		out.Refusal = &intercept.Refusal{ContentType: rf.ContentType, Body: rf.Body}
@@ -429,7 +558,13 @@ func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
 		}
 		extract = credential.JSON{Token: j.Token, ExpiresMillis: j.ExpiresMillis, ExpiresJWT: j.ExpiresJWT}.Extract
 	}
-	f, err := credential.WatchFile(r.CredentialFile, extract, log)
+	if d.checking {
+		// Checking a document, not serving it: the file is somebody else's
+		// to have made by the time a session needs it.
+		out.Credential = unchecked{}
+		return out, func() error { return nil }, nil
+	}
+	f, err := credential.WatchFile(r.CredentialFile, extract, d.Log)
 	if err != nil {
 		return intercept.Route{}, nil, err
 	}
@@ -459,20 +594,19 @@ func gitScope(g GitRule) (*intercept.GitScope, error) {
 
 // upstream is the configured servers, fixed, or with none configured whatever
 // the host's resolv.conf names, followed as it changes.
-func upstream(conf []string, log *slog.Logger, set *Set) (dns.Exchanger, error) {
+func upstream(conf []string, log *slog.Logger) (dns.Exchanger, func() error, error) {
 	if len(conf) == 0 {
 		rc, err := dns.FollowResolvConf(dns.HostResolvConf, dns.Upstream{}, log)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		set.closers = append(set.closers, rc.Close)
-		return rc, nil
+		return rc, rc.Close, nil
 	}
 	servers, err := upstreamServers(conf)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &dns.Upstream{Servers: servers}, nil
+	return &dns.Upstream{Servers: servers}, func() error { return nil }, nil
 }
 
 // upstreamServers parses the configured servers.

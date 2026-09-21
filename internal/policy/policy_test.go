@@ -3,6 +3,8 @@ package policy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -74,11 +76,9 @@ func valid(t *testing.T) Policy {
 }
 
 func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
-	set, err := Build(&Config{Policies: map[string]Policy{"p": valid(t)}}, deps(t, &counting{}))
-	if err != nil {
+	if err := check(t, "p", valid(t)); err != nil {
 		t.Fatalf("a valid policy was refused: %v", err)
 	}
-	_ = set.Close()
 
 	for name, mutate := range map[string]func(*Policy){
 		// Interception is how an allowed host gets its credential, not a way
@@ -118,12 +118,11 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 	} {
 		p := valid(t)
 		mutate(&p)
-		if set, err := Build(&Config{Policies: map[string]Policy{"p": p}}, deps(t, &counting{})); err == nil {
-			_ = set.Close()
+		if check(t, "p", p) == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := Build(&Config{Policies: map[string]Policy{"a:b": valid(t)}}, deps(t, &counting{})); err == nil {
+	if check(t, "a:b", valid(t)) == nil {
 		t.Error("a policy name that cannot be a session's was accepted")
 	}
 }
@@ -145,11 +144,9 @@ func TestGitRoutesBuild(t *testing.T) {
 			Git:   &GitRule{Repos: []string{"*"}},
 		},
 	)
-	set, err := Build(&Config{Policies: map[string]Policy{"p": p}}, deps(t, &counting{}))
-	if err != nil {
+	if err := check(t, "p", p); err != nil {
 		t.Fatal(err)
 	}
-	_ = set.Close()
 }
 
 // A route for a wildcard is refused: every name it matched would resolve to
@@ -165,11 +162,18 @@ func TestARouteIsForOneHost(t *testing.T) {
 // A misspelt key is a rule that silently does not apply, so it is refused.
 func TestLoadRefusesUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"policies":{"p":{"allow":["a.test"],"intercepts":["a.test"]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"dns":[],"policies":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "intercepts") {
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "policies") {
 		t.Errorf("Load = %v, want the unknown field named", err)
+	}
+	doc := filepath.Join(t.TempDir(), "p.json")
+	if err := os.WriteFile(doc, []byte(`{"name":"p","allow":["a.test"],"intercepts":["a.test"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(doc, deps(t, &counting{})); err == nil || !strings.Contains(err.Error(), "intercepts") {
+		t.Errorf("Check = %v, want the unknown field named", err)
 	}
 }
 
@@ -182,18 +186,14 @@ func TestARouteReadsItsCredentialFromJSON(t *testing.T) {
 	if err := os.WriteFile(creds, []byte(`{"claudeAiOauth":{"accessToken":"tok","expiresAt":1789766901894}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(config, []byte(`{"policies":{"p":{"allow":["api.test"],"routes":[{
+	var doc Document
+	if err := decode([]byte(`{"name":"p","allow":["api.test"],"routes":[{
 		"name":"claude","host":"api.test","upstream":"https://api.test","credentialFile":`+strconv.Quote(creds)+`,"placeholder":"p",
 		"credentialJSON":{"token":"claudeAiOauth.accessToken","expiresMillis":"claudeAiOauth.expiresAt"},
-		"paths":[{"methods":["POST"],"prefix":"/v1"}]}]}}}`), 0o600); err != nil {
+		"paths":[{"methods":["POST"],"prefix":"/v1"}]}]}`), &doc); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, closer, err := route(cfg.Policies["p"].Routes[0], slog.New(slog.NewJSONHandler(&journal{}, nil)))
+	r, closer, err := route(doc.Routes[0], Deps{Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,14 +212,10 @@ func TestARouteReadsItsCredentialFromJSON(t *testing.T) {
 // upstream, and its own egress, which refuses what its DNS did not resolve.
 func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 	up := &counting{}
-	set, err := Build(&Config{Policies: map[string]Policy{"p": valid(t)}}, deps(t, up))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer set.Close()
+	pol := open(t, up, "p", valid(t))
 	var log journal
 	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2")}
-	h, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, nil, slog.New(slog.NewJSONHandler(&log, nil)))
+	h, err := pol.Handlers(control.Session{Name: "s", Policy: "/p.json", Service: svc}, nil, slog.New(slog.NewJSONHandler(&log, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +240,7 @@ func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 
 	// A second session's handlers are its own: nothing resolved for one is a
 	// permission for the other.
-	h2, err := set.Policies["p"].Handlers(control.Session{Name: "s2", Policy: "p", Service: svc}, nil, slog.New(slog.NewJSONHandler(&log, nil)))
+	h2, err := pol.Handlers(control.Session{Name: "s2", Policy: "/p.json", Service: svc}, nil, slog.New(slog.NewJSONHandler(&log, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +264,7 @@ func TestASessionIsServedByTheRealHandlers(t *testing.T) {
 	}
 
 	// Restored, a session is given its own CA back, not a new one.
-	again, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, h.Authority, slog.New(slog.NewJSONHandler(&log, nil)))
+	again, err := pol.Handlers(control.Session{Name: "s", Policy: "/p.json", Service: svc}, h.Authority, slog.New(slog.NewJSONHandler(&log, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,13 +297,9 @@ func TestEveryNameCanBeAllowedWhileSomeAreIntercepted(t *testing.T) {
 	up := &counting{}
 	p := valid(t)
 	p.Allow = []string{"*"}
-	set, err := Build(&Config{Policies: map[string]Policy{"p": p}}, deps(t, up))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer set.Close()
+	pol := open(t, up, "p", p)
 	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2")}
-	h, err := set.Policies["p"].Handlers(control.Session{Name: "s", Policy: "p", Service: svc}, nil, slog.New(slog.NewJSONHandler(&journal{}, nil)))
+	h, err := pol.Handlers(control.Session{Name: "s", Policy: "/p.json", Service: svc}, nil, slog.New(slog.NewJSONHandler(&journal{}, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,8 +337,8 @@ func TestARouteOfOperationsLoadsAndBuilds(t *testing.T) {
 	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	conf := filepath.Join(t.TempDir(), "frisket.json")
-	if err := os.WriteFile(conf, []byte(`{"policies": {"p": {
+	conf := filepath.Join(t.TempDir(), "p.json")
+	if err := os.WriteFile(conf, []byte(`{"name": "p",
 		"allow": ["api.test", "other.test"],
 		"routes": [
 			{"name": "api", "host": "api.test", "upstream": "https://api.test",
@@ -360,16 +352,109 @@ func TestARouteOfOperationsLoadsAndBuilds(t *testing.T) {
 			 ]},
 			{"name": "other", "host": "other.test", "upstream": "https://other.test",
 			 "credentialFile": "`+token+`", "placeholder": "proxy-injected", "unmatched": "ask"}
-		]}}}`), 0o600); err != nil {
+		]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load(conf)
+	if err := Check(conf, deps(t, &counting{})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeDocument writes a policy document, as the NixOS module does.
+func writeDocument(t *testing.T, name string, p Policy) string {
+	t.Helper()
+	b, err := json.Marshal(Document{Name: name, Policy: p})
 	if err != nil {
 		t.Fatal(err)
 	}
-	set, err := Build(c, deps(t, &counting{}))
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// check is whether a policy holds together, as a session opening it finds.
+func check(t *testing.T, name string, p Policy) error {
+	t.Helper()
+	return Check(writeDocument(t, name, p), deps(t, &counting{}))
+}
+
+// open opens a policy from its document, for as long as the test runs.
+func open(t *testing.T, up dns.Exchanger, name string, p Policy) serve.Policy {
+	t.Helper()
+	s, err := NewStore(&Config{}, deps(t, up))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = set.Close()
+	t.Cleanup(func() { _ = s.Close() })
+	pol, release, err := s.Open(writeDocument(t, name, p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	return pol
+}
+
+// Sessions under the same document share what it built, and the last of them
+// to go closes it; a document that has changed is built anew.
+func TestTheSameDocumentIsBuiltOnceAndClosedByItsLastSession(t *testing.T) {
+	s, err := NewStore(&Config{}, deps(t, &counting{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	path := writeDocument(t, "p", valid(t))
+	a, releaseA, err := s.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, releaseB, err := s.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(a) != fmt.Sprint(b) || len(s.built) != 1 {
+		t.Fatalf("one document built %d times", len(s.built))
+	}
+	releaseA()
+	releaseA() // a second release of the same session is nothing
+	if len(s.built) != 1 {
+		t.Fatal("closed while a session still held it")
+	}
+	changed := valid(t)
+	changed.Allow = append(changed.Allow, "more.test")
+	if err := os.WriteFile(path, mustJSON(t, Document{Name: "p", Policy: changed}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, releaseC, err := s.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.built) != 2 {
+		t.Fatalf("a changed document was not built anew: %d built", len(s.built))
+	}
+	releaseB()
+	releaseC()
+	if len(s.built) != 0 {
+		t.Fatalf("%d built after every session was gone", len(s.built))
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A document is checked without its credential files, which are for the
+// machine that serves it to have: a build has none of them.
+func TestADocumentIsCheckedWithoutItsCredentials(t *testing.T) {
+	p := valid(t)
+	p.Routes[0].CredentialFile = "/nonexistent/secrets/token"
+	if err := check(t, "p", p); err != nil {
+		t.Fatalf("a document was refused for a credential file it cannot be expected to find: %v", err)
+	}
 }

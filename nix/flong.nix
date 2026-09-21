@@ -56,7 +56,22 @@ in
       options = {
         policy = mkOption {
           type = types.str;
-          description = "The policy frisket applies to the session. One it does not know fails the launch.";
+          description = ''
+            The policy in `services.frisket.policies` frisket serves the
+            session under, unless `policyFile` says otherwise.
+          '';
+        };
+        policyFile = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          example = "$(my-launcher-policy \"$workspace\")";
+          description = ''
+            A shell word, expanded in the launch hook, for the path of the
+            policy document the session is served under instead of `policy`'s:
+            a document the launcher wrote for this session, say. `$workspace`
+            and `$machine` are set. It must name an absolute path; one that
+            does not read, or does not hold together, fails the launch.
+          '';
         };
         set = mkOption {
           type = types.enum [ "all" "service" ];
@@ -102,7 +117,7 @@ in
             (lib.mkBefore ''
               frisket steer ${control} -netns "$netns" -mntns "/proc/$leader/ns/mnt" \
                 -roots ${config.security.pki.caBundle} -steering ${file} \
-                -name "$machine" -policy ${lib.escapeShellArg s.policy} \
+                -name "$machine" -policy ${if s.policyFile != null then ''"${s.policyFile}"'' else "/etc/frisket/policies/${s.policy}.json"} \
                 -param workspace="$workspace" ${paramFlags s}
             '')
             # Connectivity, last. It checks the daemon holds this

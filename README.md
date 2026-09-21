@@ -87,8 +87,25 @@ a runtime reads is a fact about the runtime, the list drifts as tools come and
 go, and the thing that chose to run those tools is what knows. [chase](https://github.com/danielbodart/chase)
 carries the set its containers were getting from here.
 
+## Policies are documents
+
+Each policy is a JSON document of its own, and a session names its document by
+path. The module writes one per `services.frisket.policies.<name>` to
+`/etc/frisket/policies/<name>.json`, checked with `frisket check` when the
+system is built. The daemon reads a session's document when the session opens
+and again when it is restored after a restart, and a changed policy restarts
+the daemon: a switch that tightens a policy tightens the sessions running under
+it. Sessions whose documents are the same, byte for byte, share one
+interceptor and its credential watchers.
+
+A launcher can name a document of its own instead, written for the session --
+`services.frisket.flong.<launcher>.policyFile`, a shell word expanded at
+launch. It is served the same way; only root, through the control socket, ever
+names one.
+
 A route added to a policy is intercepted in sessions started after the change;
-one already running fails on that host until it is relaunched.
+one already running fails on that host until it is relaunched, because its CA
+was made before the host was a route.
 
 ## Sets
 
@@ -115,7 +132,7 @@ namespace before anything gives it egress:
 ```console
 # frisket steer   -netns /proc/$leader/ns/net -mntns /proc/$leader/ns/mnt \
                   -roots /etc/ssl/certs/ca-certificates.crt \
-                  -steering $file -name $session -policy research
+                  -steering $file -name $session -policy /etc/frisket/policies/research.json
 # frisket connect -netns /proc/$leader/ns/net -steering $file -name $session
 # frisket close   -name $session
 ```
@@ -141,6 +158,7 @@ Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
 | `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
 | `services.frisket.maxConnections` | built in | concurrent connections per session |
 | `services.frisket.flong.<launcher>.policy` | *required* | the policy for the launcher's sessions |
+| `services.frisket.flong.<launcher>.policyFile` | `null` | a shell word for a document's path, expanded at launch, instead of `policy`'s |
 | `services.frisket.flong.<launcher>.set` | `all` | `all` or `service` |
 | `services.frisket.flong.<launcher>.params` | `{ }` | recorded with each session, for a policy that reads them; `workspace` always is |
 

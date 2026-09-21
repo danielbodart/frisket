@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/danielbodart/frisket/internal/nsnet"
@@ -66,7 +67,10 @@ type Session struct {
 	// (FDNAME), and in the close that ends it. flong's machine name, in
 	// practice, which is unique per session.
 	Name string `json:"name"`
-	// Policy names what the daemon does with the session's connections.
+	// Policy is the path of the policy document the daemon serves the
+	// session under: read when the session is opened, and read again when it
+	// is restored, so a session restored after the document changed is
+	// served under what it says now.
 	Policy string `json:"policy"`
 	// Params are the policy's parameters -- the workspace, for one.
 	Params map[string]string `json:"params,omitempty"`
@@ -132,13 +136,31 @@ func ValidName(s string) error {
 	return nil
 }
 
+// maxPolicyPath bounds a policy's path, well inside a request.
+const maxPolicyPath = 1024
+
+// ValidPolicyPath refuses a policy path that is not absolute and clean, or
+// carries anything that is not an ordinary printable character. It is a log
+// field as well as a path, and only root ever sends one.
+func ValidPolicyPath(p string) error {
+	if p == "" || len(p) > maxPolicyPath || !filepath.IsAbs(p) || filepath.Clean(p) != p {
+		return fmt.Errorf("policy %q: want an absolute, clean path", p)
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("policy %q: a control character", p)
+		}
+	}
+	return nil
+}
+
 // Validate refuses a session the daemon could not hold as described.
 func (s *Session) Validate() error {
 	if err := ValidName(s.Name); err != nil {
 		return fmt.Errorf("session %w", err)
 	}
-	if err := ValidName(s.Policy); err != nil {
-		return fmt.Errorf("policy %w", err)
+	if err := ValidPolicyPath(s.Policy); err != nil {
+		return fmt.Errorf("session %s: %w", s.Name, err)
 	}
 	if s.Set != SetAll && s.Set != SetService {
 		return fmt.Errorf("session %s: set %q is neither %q nor %q", s.Name, s.Set, SetAll, SetService)

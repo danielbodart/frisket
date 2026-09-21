@@ -166,7 +166,7 @@ func TestCallRefusesToSendTooMany(t *testing.T) {
 func validSession() Session {
 	return Session{
 		Name:      "netless-123-456",
-		Policy:    "research",
+		Policy:    "/etc/frisket/policies/research.json",
 		Set:       SetAll,
 		Service:   []netip.Addr{netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2")},
 		Mark:      1,
@@ -184,6 +184,9 @@ func TestValidateRefusesWhatCannotBeHeld(t *testing.T) {
 		"fd store name with a colon": func(s *Session) { s.Name = "a:b" },
 		"empty name":                 func(s *Session) { s.Name = "" },
 		"no policy":                  func(s *Session) { s.Policy = "" },
+		"a policy by name":           func(s *Session) { s.Policy = "trusted" },
+		"a policy path that climbs":  func(s *Session) { s.Policy = "/etc/frisket/../shadow" },
+		"a policy path with a break": func(s *Session) { s.Policy = "/etc/frisket/a\nb.json" },
 		"unknown set":                func(s *Session) { s.Set = "everything" },
 		"no listeners":               func(s *Session) { s.Listeners = nil },
 		"wildcard listener":          func(s *Session) { s.Listeners = []string{"tcp4:0.0.0.0:15001"} },

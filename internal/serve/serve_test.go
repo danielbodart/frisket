@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,7 +234,7 @@ func startDaemonWith(t *testing.T, configure func(*Daemon), sd Notifier, rec *re
 	j := &journal{}
 	d := &Daemon{
 		Log:        slog.New(slog.NewJSONHandler(j, nil)),
-		Policies:   map[string]Policy{"recorder": rec.policy()},
+		Policies:   PolicyMap{"/etc/frisket/policies/recorder.json": rec.policy()},
 		Notify:     sd,
 		ControlUID: os.Getuid(),
 		own:        1,
@@ -290,7 +291,7 @@ func listeners(t *testing.T, name string) (control.Session, []*os.File, net.List
 	_ = pc.Close()
 	info := control.Session{
 		Name:   name,
-		Policy: "recorder",
+		Policy: "/etc/frisket/policies/recorder.json",
 		Set:    control.SetAll,
 		Mark:   1,
 		Service: []netip.Addr{
@@ -482,7 +483,10 @@ func TestOpenRefusesWhatItCannotHoldAsDescribed(t *testing.T) {
 	sd := newFakeSystemd()
 	f := startDaemon(t, sd, &recorder{}, nil, nil)
 	for name, mutate := range map[string]func(*control.Session, []*os.File) []*os.File{
-		"an unknown policy": func(s *control.Session, fs []*os.File) []*os.File { s.Policy = "nonesuch"; return fs },
+		"an unknown policy": func(s *control.Session, fs []*os.File) []*os.File {
+			s.Policy = "/etc/frisket/policies/nonesuch.json"
+			return fs
+		},
 		"a listener bound elsewhere": func(s *control.Session, fs []*os.File) []*os.File {
 			s.Listeners[0] = "tcp4:127.0.0.1:1"
 			return fs
@@ -546,7 +550,7 @@ func TestARestartAdoptsTheStoredSessions(t *testing.T) {
 	}
 	second := startDaemon(t, sd, rec, orig, passed)
 	st := second.d.List()
-	if len(st) != 1 || st[0].Name != "netless-7-8" || !st[0].Restored || st[0].Policy != "recorder" {
+	if len(st) != 1 || st[0].Name != "netless-7-8" || !st[0].Restored || st[0].Policy != "/etc/frisket/policies/recorder.json" {
 		t.Fatalf("after a restart: %+v", st)
 	}
 	c, err := net.Dial("tcp4", addr)
@@ -620,7 +624,7 @@ func TestAStoredSessionThatDoesNotAddUpIsDropped(t *testing.T) {
 }
 
 func TestTheRecordIsSealed(t *testing.T) {
-	f, err := newRecord(control.Session{Name: "a", Policy: "p"}, []byte("the CA"))
+	f, err := newRecord(control.Session{Name: "a", Policy: "/p.json"}, []byte("the CA"))
 	if err != nil {
 		t.Skipf("no memfd here: %v", err)
 	}
@@ -631,5 +635,75 @@ func TestTheRecordIsSealed(t *testing.T) {
 	got, authority, err := readRecord(f)
 	if err != nil || got.Name != "a" || string(authority) != "the CA" {
 		t.Errorf("read back %+v, %q, %v", got, authority, err)
+	}
+}
+
+// counting is a Policies that counts what is held: every policy a session
+// was given is given back, once, whether the session was refused, closed or
+// ended with the daemon.
+type counting struct {
+	PolicyMap
+	mu   sync.Mutex
+	held int
+	gave int
+}
+
+func (c *counting) Open(path string) (Policy, func(), error) {
+	p, _, err := c.PolicyMap.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	c.mu.Lock()
+	c.held++
+	c.mu.Unlock()
+	var once atomic.Bool
+	return p, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if once.Swap(true) {
+			c.gave++ // a second release: counted, and failed below
+		}
+		c.held--
+	}, nil
+}
+
+func (c *counting) count() (held, extra int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.held, c.gave
+}
+
+func TestEveryPolicyASessionHeldIsGivenBack(t *testing.T) {
+	sd := newFakeSystemd()
+	pols := &counting{PolicyMap: PolicyMap{"/etc/frisket/policies/recorder.json": (&recorder{}).policy()}}
+	f := startDaemonWith(t, func(d *Daemon) { d.Policies = pols }, sd, &recorder{}, nil, nil)
+
+	// Refused after its policy was opened: descriptors that do not match.
+	info, files, ln := listeners(t, "netless-9-1")
+	_ = ln.Close()
+	if _, err := control.Call(context.Background(), f.path, control.Request{Op: control.OpOpen, Session: &info}, files[:1]); err == nil {
+		t.Fatal("a session missing a descriptor was accepted")
+	}
+	control.CloseAll(files)
+	if held, _ := pols.count(); held != 0 {
+		t.Fatalf("a refused session kept its policy: %d held", held)
+	}
+
+	// Opened, then closed.
+	info, files, ln = listeners(t, "netless-9-2")
+	_ = ln.Close()
+	if _, err := control.Call(context.Background(), f.path, control.Request{Op: control.OpOpen, Session: &info}, files); err != nil {
+		t.Fatal(err)
+	}
+	control.CloseAll(files)
+	if held, _ := pols.count(); held != 1 {
+		t.Fatalf("an open session holds %d policies, want 1", held)
+	}
+	if _, err := control.Call(context.Background(), f.path, control.Request{Op: control.OpClose, Name: "netless-9-2"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the policy to be given back", func() bool { held, _ := pols.count(); return held == 0 })
+	if _, extra := pols.count(); extra != 0 {
+		t.Fatalf("a policy was given back %d times too many", extra)
 	}
 }

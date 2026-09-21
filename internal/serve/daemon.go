@@ -41,9 +41,10 @@ type Daemon struct {
 	// Log is injected. Every line the daemon and its sessions write goes
 	// through it, so a test can hold it to "one line per connection".
 	Log *slog.Logger
-	// Policies by name. A session naming one that is not here is refused, and
-	// so never gets rules: an unknown policy fails closed.
-	Policies map[string]Policy
+	// Policies opens a session's policy from its path. A session whose
+	// policy cannot be opened is refused, and so never gets rules: a missing
+	// or broken policy fails closed.
+	Policies Policies
 	// Notify is systemd, or nil.
 	Notify Notifier
 	// ControlUID is the only peer uid the control socket answers. Root in
@@ -228,10 +229,17 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, er
 	if err := info.Validate(); err != nil {
 		return nil, err
 	}
-	policy, ok := d.Policies[info.Policy]
-	if !ok {
-		return nil, fmt.Errorf("session %s: no policy named %q", info.Name, info.Policy)
+	policy, release, err := d.Policies.Open(info.Policy)
+	if err != nil {
+		return nil, fmt.Errorf("session %s: %w", info.Name, err)
 	}
+	// Released here unless a session came to hold it.
+	held := false
+	defer func() {
+		if !held {
+			release()
+		}
+	}()
 	specs, err := parseSpecs(info.Listeners)
 	if err != nil {
 		return nil, err
@@ -307,7 +315,8 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, er
 		}
 		return nil, fmt.Errorf("session %s: %w", info.Name, err)
 	}
-	s := &session{info: info, log: d.Log, socks: socks, meta: meta}
+	s := &session{info: info, log: d.Log, socks: socks, meta: meta, release: release}
+	held = true
 	if err := d.serve(s, h); err != nil {
 		s.closeAll(closeWait)
 		if stored {
@@ -465,11 +474,19 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 		meta.Close()
 		return err
 	}
-	policy, ok := d.Policies[info.Policy]
-	if !ok {
+	// Read again, not remembered: a document that changed while the daemon
+	// was down serves the session as it reads now.
+	policy, release, err := d.Policies.Open(info.Policy)
+	if err != nil {
 		meta.Close()
-		return fmt.Errorf("no policy named %q any more", info.Policy)
+		return err
 	}
+	held := false
+	defer func() {
+		if !held {
+			release()
+		}
+	}()
 	specs, err := parseSpecs(info.Listeners)
 	if err != nil {
 		meta.Close()
@@ -520,7 +537,8 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 		meta.Close()
 		return err
 	}
-	s := &session{info: info, restored: true, log: d.Log, socks: socksHeld, meta: meta}
+	s := &session{info: info, restored: true, log: d.Log, socks: socksHeld, meta: meta, release: release}
+	held = true
 	d.mu.Lock()
 	d.sessions[name] = nil
 	d.mu.Unlock()

@@ -5,6 +5,7 @@ package serve
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
 
@@ -49,6 +50,25 @@ type DNSHandler interface {
 // returned, and the policy uses that CA again.
 type Policy interface {
 	Handlers(s control.Session, authority []byte, log *slog.Logger) (Handlers, error)
+}
+
+// Policies opens the policy a session names by its path. The session holds
+// what Open returns until it ends, and then calls release, once: a source
+// that shares one built policy between sessions knows from that when the last
+// of them is gone.
+type Policies interface {
+	Open(path string) (p Policy, release func(), err error)
+}
+
+// PolicyMap is a fixed set of policies by path, never released.
+type PolicyMap map[string]Policy
+
+func (m PolicyMap) Open(path string) (Policy, func(), error) {
+	p, ok := m[path]
+	if !ok {
+		return nil, nil, fmt.Errorf("no policy at %s", path)
+	}
+	return p, func() {}, nil
 }
 
 // PolicyFunc adapts a function to Policy.

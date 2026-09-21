@@ -964,7 +964,10 @@ in
           machine.wait_until_fails(f"machinectl show {name}")
           machine.wait_until_succeeds(f"! ${frisket} sessions | grep -q {name}")
           assert stored() == 0, stored()
-          assert daemon_fds(pid) == held - 5, (held, daemon_fds(pid))
+          # At least its five: the last session under a document takes what
+          # the document built -- its credential watchers, its upstream
+          # connections -- with it.
+          assert daemon_fds(pid) <= held - 5, (held, daemon_fds(pid))
           [closed] = wait_log("session closed", name, lambda m: True, "close")
           assert closed["descriptors"] == 5, closed
 
@@ -980,12 +983,12 @@ in
           machine.succeed("${nodes.machine.system.build.toplevel}/specialisation/narrowed/bin/switch-to-configuration test")
           machine.wait_for_unit("frisket.service")
           assert main_pid() != first
-          wait_log("session restored", name, lambda m: m["policy"] == "test", "restore")
+          wait_log("session restored", name, lambda m: m["policy"] == "/etc/frisket/policies/test.json", "restore")
           [s] = [s for s in sessions() if s["name"] == name]
           assert s["restored"] and s["descriptors"] == 5, s
           # The name taken off the allowlist is refused now, and the one put
-          # on it resolves: the policy is the one the daemon has, looked up
-          # by name, and not the one the session was opened under.
+          # on it resolves: the policy is its document as it reads now, read
+          # again from its path, and not as it read when the session opened.
           out = machine.succeed(as_workload(leader, "dig +time=2 +tries=1 allowed.test @127.0.0.1"))
           assert "status: NXDOMAIN" in out, out
           [d] = wait_log("dns", name, lambda m: m.get("name") == "allowed.test" and m["decision"] == "refused",

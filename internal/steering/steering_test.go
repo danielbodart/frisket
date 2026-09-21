@@ -185,7 +185,7 @@ func TestSteerGivesTheSandboxItsCAAndTheRootsWithIt(t *testing.T) {
 	p, _ := allFile().Plan()
 	rootsPath, rootsPEM := roots(t)
 	f := &fakeRoot{}
-	if err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, Session{Name: "s", Policy: "research", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}); err != nil {
+	if err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, Session{Name: "s", Policy: "/etc/frisket/policies/research.json", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
@@ -202,7 +202,7 @@ func TestSteerGivesTheSandboxItsCAAndTheRootsWithIt(t *testing.T) {
 	}
 
 	f = &fakeRoot{}
-	err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, Session{Name: "s", Policy: "research", Mntns: "/proc/1/ns/mnt", Roots: filepath.Join(t.TempDir(), "missing")})
+	err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, Session{Name: "s", Policy: "/etc/frisket/policies/research.json", Mntns: "/proc/1/ns/mnt", Roots: filepath.Join(t.TempDir(), "missing")})
 	if err == nil || len(f.steps) != 0 {
 		t.Fatalf("steer without the host's roots: %v, steps %v", err, f.steps)
 	}
@@ -211,7 +211,7 @@ func TestSteerGivesTheSandboxItsCAAndTheRootsWithIt(t *testing.T) {
 func TestSteerInstallsRulesOnlyOnceTheDaemonHoldsTheListeners(t *testing.T) {
 	p, _ := allFile().Plan()
 	rootsPath, _ := roots(t)
-	sess := Session{Name: "s", Policy: "research", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}
+	sess := Session{Name: "s", Policy: "/etc/frisket/policies/research.json", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}
 	mount := "mount /proc/1/ns/mnt /etc/frisket"
 	for _, c := range []struct {
 		fail string
