@@ -26,7 +26,8 @@ let
         routes = lib.mapAttrsToList
           (name: r: {
             inherit name;
-            inherit (r) host upstream paths;
+            inherit (r) host upstream unmatched;
+            paths = map (lib.filterAttrs (_: v: v != null)) r.paths;
           } // lib.optionalAttrs (r.upstreamCA != null) { upstreamCA = "${r.upstreamCA}"; }
           // lib.optionalAttrs (r.credentialFile != null) { inherit (r) credentialFile; }
           // lib.optionalAttrs (r.placeholder != null) { inherit (r) placeholder; }
@@ -57,14 +58,54 @@ let
       methods = mkOption {
         type = types.nonEmptyListOf types.str;
         example = [ "GET" "POST" ];
-        description = "The methods admitted, compared exactly.";
+        description = "The methods the rule decides, compared exactly.";
       };
       prefix = mkOption {
-        type = types.strMatching "/.*";
+        type = types.nullOr (types.strMatching "/.*");
+        default = null;
         example = "/v1";
         description = ''
-          The path admitted, and everything under it, matched by segment:
-          `/v1` admits `/v1/models` and not `/v1-evil`.
+          The path the rule decides, and everything under it, matched by
+          segment: `/v1` matches `/v1/models` and not `/v1-evil`. A segment
+          that is `*` alone matches any one segment. Not with `path`.
+        '';
+      };
+      path = mkOption {
+        type = types.nullOr (types.strMatching "/.*");
+        default = null;
+        example = "/zones/*/dns_records/*";
+        description = ''
+          Exactly this path and nothing under it, matched by segment, `*`
+          alone matching any one segment: an API operation. Where several
+          rules match a request, the most specific decides -- a literal beats
+          `*`, and either beats the end of a prefix. Not with `prefix`.
+        '';
+      };
+      ask = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Put a matching request to `services.frisket.asker` instead of
+          admitting it. With no asker, it is refused.
+        '';
+      };
+      operation = mkOption {
+        type = types.nullOr (types.submodule {
+          options = {
+            id = mkOption { type = types.strMatching ".+"; description = "The operation's id, for the log."; };
+            summary = mkOption { type = types.strMatching ".+"; description = "What it does, in a line."; };
+            description = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "What it does, at more length.";
+            };
+          };
+        });
+        default = null;
+        description = ''
+          What the rule is, in its API's own words: the only prose a person
+          being asked about a matching request is shown. It comes from here,
+          never from the request.
         '';
       };
     };
@@ -168,7 +209,17 @@ let
       paths = mkOption {
         type = types.listOf pathRule;
         default = [ ];
-        description = "The route's scope, with `git`. A request neither admits is refused with a 403.";
+        description = "The route's scope, with `git`. What neither decides, `unmatched` does.";
+      };
+      unmatched = mkOption {
+        type = types.enum [ "refuse" "ask" ];
+        default = "refuse";
+        description = ''
+          A request no rule matches: refused with a 403, or put to
+          `services.frisket.asker` -- secure by default without being closed
+          by default, so an endpoint nobody has classified is asked about
+          rather than admitted or refused.
+        '';
       };
       git = mkOption {
         type = types.nullOr (types.submodule {
@@ -317,6 +368,26 @@ in
       });
     };
 
+    asker = mkOption {
+      type = types.nullOr (types.strMatching "/.*");
+      default = null;
+      example = lib.literalExpression ''"''${pkgs.writeShellScript "ask" "..."}"'';
+      description = ''
+        The program a request is put to when a route asks about it. It runs
+        as `user`, once per question and one question at a time, inside the
+        daemon's own sandbox -- no display, a private /tmp -- so a graphical
+        asker reaches the desktop some other way, `systemd-run --user` for
+        one. The question is one JSON document on stdin: `session`, `policy`,
+        `route`, `method`, `host`, `path` and `query` as sent, and the
+        matched `operation`'s `id`, `summary` and `description` if there was
+        one. Exit 0 admits the request, 1 declines it, anything else refuses
+        it and is logged as the asker failing. Everything but `operation` is
+        the workload's choosing: show it as the request, never as prose, and
+        escape it for whatever renders it. Null: every request a route asks
+        about is refused.
+      '';
+    };
+
     maxConnections = mkOption {
       type = types.ints.unsigned;
       default = 0;
@@ -342,6 +413,14 @@ in
             message = "services.frisket.policies.${name}.routes.${rname} is for ${r.host}, which is not on its allowlist: interception is how an allowed host gets its credential, not a way round the allowlist.";
           })
           p.routes
+        ++ lib.concatLists (lib.mapAttrsToList
+          (rname: r: map
+            (rule: {
+              assertion = (rule.prefix == null) != (rule.path == null);
+              message = "services.frisket.policies.${name}.routes.${rname} has a path rule with ${if rule.prefix == null then "neither a prefix nor a path" else "both a prefix and a path"}: a rule is one or the other.";
+            })
+            r.paths)
+          p.routes)
         ++ lib.mapAttrsToList
           (rname: r: {
             assertion = r.credentialFile == null || ! lib.hasPrefix builtins.storeDir r.credentialFile;
@@ -386,6 +465,7 @@ in
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve -log-level ${cfg.logLevel} -control ${cfg.controlSocket}"
           + " -config ${configFile}"
+          + lib.optionalString (cfg.asker != null) " -asker ${cfg.asker}"
           + lib.optionalString (cfg.maxConnections > 0) " -max-conns ${toString cfg.maxConnections}";
         User = cfg.user;
         Group = cfg.group;

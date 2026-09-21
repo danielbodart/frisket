@@ -10,9 +10,11 @@ import (
 	"unicode/utf8"
 )
 
-// Scope is what a route's credential may be used for. A request is admitted
-// if any part of the scope admits it, and refused otherwise: an empty scope
-// admits nothing, and New refuses to build a route with one.
+// Scope is what a route's credential may be used for. A request is admitted,
+// asked about, or refused: by the git scope if it is git-shaped, by the most
+// specific path rule that matches it, by the GitHub API scope, and otherwise
+// by Unmatched. An empty scope that refuses what it does not match admits
+// nothing, and New refuses to build a route with one.
 //
 // It is checked against the real request line, after TLS, on every request
 // (PLAN.md, decision 6). The connection being steered here says only where
@@ -29,17 +31,53 @@ type Scope struct {
 	// GitHubAPI admits GitHub REST calls under /repos/{owner}/{repo}.
 	// PROVISIONAL: see GitHubAPIScope.
 	GitHubAPI *GitHubAPIScope
+	// Unmatched is what happens to a request nothing above decides: refused,
+	// the default, or asked about. Ask is how a route is secure by default
+	// without being closed by default -- an endpoint nobody has classified is
+	// not refused, it is put to a person.
+	Unmatched Unmatched
 }
 
-// PathRule admits the listed methods at or under a path prefix.
+// Unmatched is a scope's answer to a request no rule matches.
+type Unmatched int
+
+const (
+	UnmatchedRefuse Unmatched = iota
+	UnmatchedAsk
+)
+
+// PathRule decides the listed methods at a path: exactly Path, or Prefix and
+// everything under it. One of the two, never both.
 //
-// The prefix is matched by SEGMENT, never as a string: "/backend-api/codex"
-// admits "/backend-api/codex/responses" and not "/backend-api/codex-evil".
-// A string prefix is the mistake git's insteadOf makes, where `owner/repo`
-// also matches `owner/repo-evil`.
+// Both are matched by SEGMENT, never as a string: a prefix "/backend-api/codex"
+// matches "/backend-api/codex/responses" and not "/backend-api/codex-evil". A
+// string prefix is the mistake git's insteadOf makes, where `owner/repo` also
+// matches `owner/repo-evil`. A segment that is "*" alone matches any one
+// segment that is not empty; a "*" anywhere else is refused, so a template
+// cannot say more than one segment's worth.
+//
+// Where several rules match, the most specific decides, as OpenAPI resolves a
+// request to one operation: segment by segment from the left, a literal beats
+// a "*", and either beats being past the end of a prefix. Between rules that
+// are equally specific, one that asks beats one that admits.
 type PathRule struct {
 	Methods []string
 	Prefix  string
+	Path    string
+	// Ask puts a matching request to a person instead of admitting it.
+	Ask bool
+	// Operation is what the rule is, in its API's own words, for the person
+	// being asked. Nil: the rule has none, and the question says so.
+	Operation *Operation
+}
+
+// Operation is one of an API's operations as its own description names it.
+// It is the only prose a question carries: everything else in a question is
+// the request, shown as the request.
+type Operation struct {
+	ID          string `json:"id"`
+	Summary     string `json:"summary"`
+	Description string `json:"description,omitempty"`
 }
 
 // GitScope admits git over HTTPS as GitHub serves it: /{owner}/{repo}[.git]
@@ -115,40 +153,60 @@ const (
 	ReasonPush       = "push not allowed"
 )
 
+// Outcome is what a scope decides about one request.
+type Outcome int
+
+const (
+	Refuse Outcome = iota
+	Admit
+	Ask
+)
+
+// Verdict is a scope's decision about one request. Reason is which part of
+// the scope decided -- "path", "git", "github-api", or RuleUnmatched for a
+// request no rule matched -- or, refused, why.
+type Verdict struct {
+	Outcome   Outcome
+	Reason    string
+	Operation *Operation
+}
+
+// RuleUnmatched is the reason for a request asked about because nothing
+// matched it.
+const RuleUnmatched = "unmatched"
+
+// wildcard is the template segment that matches any one segment.
+const wildcard = "*"
+
 // compiled is a Scope checked and prepared once, when the route is built.
 type compiled struct {
-	paths []compiledPath
-	git   *GitScope
-	api   *GitHubAPIScope
+	paths     []compiledPath
+	git       *GitScope
+	api       *GitHubAPIScope
+	unmatched Unmatched
 }
 
 type compiledPath struct {
 	methods []string
-	prefix  []string
+	// segs is the template; exact says whether it is the whole path or a
+	// prefix of it.
+	segs      []string
+	exact     bool
+	ask       bool
+	operation *Operation
 }
 
 func compileScope(s Scope) (*compiled, error) {
-	c := &compiled{}
+	c := &compiled{unmatched: s.Unmatched}
+	if s.Unmatched != UnmatchedRefuse && s.Unmatched != UnmatchedAsk {
+		return nil, fmt.Errorf("unmatched %d is neither refuse nor ask", s.Unmatched)
+	}
 	for _, p := range s.Paths {
-		if len(p.Methods) == 0 {
-			return nil, fmt.Errorf("path rule %q lists no methods", p.Prefix)
-		}
-		if !strings.HasPrefix(p.Prefix, "/") {
-			return nil, fmt.Errorf("path rule %q does not start with /", p.Prefix)
-		}
-		segs, err := splitPath(p.Prefix)
+		cp, err := compilePath(p)
 		if err != nil {
-			return nil, fmt.Errorf("path rule %q: %w", p.Prefix, err)
+			return nil, err
 		}
-		// "/" is the whole host; "/a/" is written as "/a". A trailing empty
-		// segment in a prefix would demand a trailing slash on every request.
-		if n := len(segs); n > 0 && segs[n-1] == "" {
-			segs = segs[:n-1]
-		}
-		if slices.Contains(segs, "") {
-			return nil, fmt.Errorf("path rule %q has an empty segment", p.Prefix)
-		}
-		c.paths = append(c.paths, compiledPath{methods: upper(p.Methods), prefix: segs})
+		c.paths = append(c.paths, cp)
 	}
 	if s.Git != nil {
 		if s.Git.AnyRepo != (len(s.Git.Repos) == 0) {
@@ -174,10 +232,54 @@ func compileScope(s Scope) (*compiled, error) {
 		a := GitHubAPIScope{Repos: s.GitHubAPI.Repos, Methods: upper(s.GitHubAPI.Methods)}
 		c.api = &a
 	}
-	if len(c.paths) == 0 && c.git == nil && c.api == nil {
+	if len(c.paths) == 0 && c.git == nil && c.api == nil && c.unmatched == UnmatchedRefuse {
 		return nil, errors.New("scope admits nothing")
 	}
 	return c, nil
+}
+
+func compilePath(p PathRule) (compiledPath, error) {
+	written, exact := p.Prefix, false
+	switch {
+	case p.Path != "" && p.Prefix != "":
+		return compiledPath{}, fmt.Errorf("path rule %q has a prefix %q too: a rule is one or the other", p.Path, p.Prefix)
+	case p.Path != "":
+		written, exact = p.Path, true
+	}
+	if len(p.Methods) == 0 {
+		return compiledPath{}, fmt.Errorf("path rule %q lists no methods", written)
+	}
+	if !strings.HasPrefix(written, "/") {
+		return compiledPath{}, fmt.Errorf("path rule %q does not start with /", written)
+	}
+	segs, err := splitPath(written)
+	if err != nil {
+		return compiledPath{}, fmt.Errorf("path rule %q: %w", written, err)
+	}
+	if n := len(segs); n > 0 && segs[n-1] == "" {
+		switch {
+		case !exact:
+			// "/" is the whole host; "/a/" is written as "/a". A trailing
+			// empty segment in a prefix would demand a trailing slash on
+			// every request.
+			segs = segs[:n-1]
+		case n > 1:
+			// An exact "/a/" would match only "/a/", and never "/a": say "/a".
+			return compiledPath{}, fmt.Errorf("path rule %q ends in a slash", written)
+		}
+	}
+	if slices.Contains(segs[:max(len(segs)-1, 0)], "") || (!exact && slices.Contains(segs, "")) {
+		return compiledPath{}, fmt.Errorf("path rule %q has an empty segment", written)
+	}
+	for _, seg := range segs {
+		if seg != wildcard && strings.Contains(seg, wildcard) {
+			return compiledPath{}, fmt.Errorf("path rule %q: a * is a whole segment or nothing", written)
+		}
+	}
+	if o := p.Operation; o != nil && (o.ID == "" || o.Summary == "") {
+		return compiledPath{}, fmt.Errorf("path rule %q: an operation needs an id and a summary", written)
+	}
+	return compiledPath{methods: upper(p.Methods), segs: segs, exact: exact, ask: p.Ask, operation: p.Operation}, nil
 }
 
 func upper(ms []string) []string {
@@ -188,35 +290,102 @@ func upper(ms []string) []string {
 	return out
 }
 
-// allow decides a request. It returns the reason for a refusal, or which part
-// of the scope admitted it.
+// decide decides a request.
 //
 // Methods are compared exactly, and a request's method is not upper-cased
 // first: "get" is not GET to every server, and a method the rule does not name
-// is refused rather than interpreted.
-func (c *compiled) allow(method string, u *url.URL) (bool, string) {
+// is not matched rather than interpreted.
+//
+// A path that is not canonical is refused whatever Unmatched says. Asking a
+// person about a request that could mean two different paths is asking them
+// to approve whichever one the upstream picks.
+func (c *compiled) decide(method string, u *url.URL) Verdict {
 	segs, err := splitPath(u.EscapedPath())
 	if err != nil {
-		return false, ReasonBadPath
+		return Verdict{Outcome: Refuse, Reason: ReasonBadPath}
 	}
 	// Git first, and its refusal stands: a route admitting GET everywhere
 	// beside a git scope without push still refuses receive-pack's ref
 	// advertisement, which is where a push is meant to stop.
 	if c.git != nil {
-		if ok, reason := c.git.allow(method, segs, u.RawQuery); ok || reason != "" {
-			return ok, reason
+		if ok, reason := c.git.allow(method, segs, u.RawQuery); ok {
+			return Verdict{Outcome: Admit, Reason: reason}
+		} else if reason != "" {
+			return Verdict{Outcome: Refuse, Reason: reason}
 		}
 	}
-	for _, p := range c.paths {
-		if slices.Contains(p.methods, method) && hasPrefix(segs, p.prefix) {
-			return true, "path"
+	var best *compiledPath
+	for i := range c.paths {
+		p := &c.paths[i]
+		if !slices.Contains(p.methods, method) || !p.matches(segs) {
+			continue
 		}
+		if best == nil {
+			best = p
+			continue
+		}
+		switch cmp := p.specificity(best, len(segs)); {
+		case cmp > 0, cmp == 0 && p.ask && !best.ask:
+			best = p
+		}
+	}
+	if best != nil {
+		if best.ask {
+			return Verdict{Outcome: Ask, Reason: "path", Operation: best.operation}
+		}
+		return Verdict{Outcome: Admit, Reason: "path", Operation: best.operation}
 	}
 	if c.api != nil && slices.Contains(c.api.Methods, method) &&
 		len(segs) >= 3 && segs[0] == "repos" && inRepos(c.api.Repos, segs[1], segs[2]) {
-		return true, "github-api"
+		return Verdict{Outcome: Admit, Reason: "github-api"}
 	}
-	return false, ReasonOutOfScope
+	if c.unmatched == UnmatchedAsk {
+		return Verdict{Outcome: Ask, Reason: RuleUnmatched}
+	}
+	return Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}
+}
+
+// matches is whether a request's segments are this template: all of them for
+// an exact rule, the first of them for a prefix.
+func (p *compiledPath) matches(segs []string) bool {
+	if len(segs) < len(p.segs) || p.exact && len(segs) != len(p.segs) {
+		return false
+	}
+	for i, t := range p.segs {
+		if t == wildcard {
+			// Any one segment, but one: not the trailing empty one a
+			// trailing slash leaves.
+			if segs[i] == "" {
+				return false
+			}
+		} else if segs[i] != t {
+			return false
+		}
+	}
+	return true
+}
+
+// specificity compares two rules that both matched a request of n segments:
+// positive if p is the more specific, negative if q is, zero if neither.
+func (p *compiledPath) specificity(q *compiledPath, n int) int {
+	for i := range n {
+		if d := p.rank(i) - q.rank(i); d != 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// rank is how specifically a rule matches the segment at i: a literal, a
+// wildcard, or nothing at all, past the end of a prefix.
+func (p *compiledPath) rank(i int) int {
+	switch {
+	case i >= len(p.segs):
+		return 0
+	case p.segs[i] == wildcard:
+		return 1
+	}
+	return 2
 }
 
 // allow for git returns ("", false) when the request is not git-shaped at
@@ -307,10 +476,6 @@ func cutSuffixFold(s, suffix string) (string, bool) {
 		return s[:len(s)-len(suffix)], true
 	}
 	return s, false
-}
-
-func hasPrefix(segs, prefix []string) bool {
-	return len(segs) >= len(prefix) && slices.Equal(segs[:len(prefix)], prefix)
 }
 
 // errBadPath is every reason a request path is refused before any scope is

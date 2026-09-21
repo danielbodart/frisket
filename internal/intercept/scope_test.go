@@ -377,3 +377,160 @@ func FuzzSplitPath(f *testing.F) {
 		}
 	})
 }
+
+// allow is decide as the older tests read it: admitted or not, and why.
+func (c *compiled) allow(method string, u *url.URL) (bool, string) {
+	v := c.decide(method, u)
+	return v.Outcome == Admit, v.Reason
+}
+
+// An API described operation by operation: GETs admitted under a prefix, the
+// operations that are not safe asked about by name, and everything else asked
+// about with nothing to say what it is.
+func TestTemplatesDecideByTheMostSpecificOperation(t *testing.T) {
+	op := func(id string) *Operation { return &Operation{ID: id, Summary: id + " summary"} }
+	reads := []string{"GET", "HEAD"}
+	c := mustCompile(t, Scope{
+		Paths: []PathRule{
+			{Methods: reads, Prefix: "/"},
+			{Methods: reads, Path: "/accounts/*/tokens/*", Ask: true, Operation: op("token-value")},
+			{Methods: reads, Path: "/accounts/*/tokens/verify", Operation: op("verify")},
+			{Methods: []string{"DELETE"}, Path: "/zones/*/dns_records/*", Ask: true, Operation: op("delete-record")},
+			{Methods: []string{"POST"}, Path: "/zones/*/dns_records", Ask: true, Operation: op("create-record")},
+			{Methods: []string{"POST"}, Path: "/graphql", Operation: op("graphql")},
+			{Methods: []string{"POST"}, Path: "/", Operation: op("root")},
+			{Methods: reads, Prefix: "/zones/*/settings", Ask: true, Operation: op("settings")},
+			{Methods: reads, Path: "/zones/*/settings/ssl", Operation: op("ssl")},
+		},
+		Unmatched: UnmatchedAsk,
+	})
+	for _, tc := range []struct {
+		method, target string
+		outcome        Outcome
+		reason         string
+		operation      string
+	}{
+		{"GET", "/accounts/a/tokens/t", Ask, "path", "token-value"},
+		{"HEAD", "/accounts/a/tokens/t", Ask, "path", "token-value"},
+		{"GET", "/accounts/a/tokens/verify", Admit, "path", "verify"},
+		{"GET", "/accounts/a/tokens", Admit, "path", ""},
+		{"GET", "/accounts/a/tokens/t/more", Admit, "path", ""},
+		{"GET", "/accounts/a/tokens/", Admit, "path", ""},
+		{"DELETE", "/zones/z/dns_records/r", Ask, "path", "delete-record"},
+		{"DELETE", "/zones/z/dns_records/r%2Fx", Ask, "path", "delete-record"},
+		{"DELETE", "/zones/z/dns_records/r/", Ask, RuleUnmatched, ""},
+		{"DELETE", "/zones/z/dns_records/", Ask, RuleUnmatched, ""},
+		{"DELETE", "/zones/z/dns_records/r/extra", Ask, RuleUnmatched, ""},
+		{"DELETE", "/zones/z/dns_records", Ask, RuleUnmatched, ""},
+		{"DELETE", "/zones//dns_records/r", Refuse, ReasonBadPath, ""},
+		{"DELETE", "/zones/z/dns_records/..", Refuse, ReasonBadPath, ""},
+		{"POST", "/zones/z/dns_records", Ask, "path", "create-record"},
+		{"POST", "/graphql", Admit, "path", "graphql"},
+		{"POST", "/graphql/", Ask, RuleUnmatched, ""},
+		{"POST", "/graphql/x", Ask, RuleUnmatched, ""},
+		{"POST", "/", Admit, "path", "root"},
+		{"PUT", "/zones/z", Ask, RuleUnmatched, ""},
+		{"get", "/zones/z", Ask, RuleUnmatched, ""},
+		{"GET", "/zones/z/settings", Ask, "path", "settings"},
+		{"GET", "/zones/z/settings/tls", Ask, "path", "settings"},
+		{"GET", "/zones/z/settings/ssl", Admit, "path", "ssl"},
+		{"GET", "/zones/z/settings/ssl/x", Ask, "path", "settings"},
+	} {
+		u, ok := parseTarget(tc.target)
+		if !ok {
+			t.Fatalf("test target %q does not parse", tc.target)
+		}
+		v := c.decide(tc.method, u)
+		got := ""
+		if v.Operation != nil {
+			got = v.Operation.ID
+		}
+		if v.Outcome != tc.outcome || v.Reason != tc.reason || got != tc.operation {
+			t.Errorf("%s %s: got (%v, %q, %q), want (%v, %q, %q)",
+				tc.method, tc.target, v.Outcome, v.Reason, got, tc.outcome, tc.reason, tc.operation)
+		}
+	}
+}
+
+// Two rules for the same operation that disagree: asking wins, whichever
+// comes first. A duplicate is a mistake, and the mistake fails closed.
+func TestEquallySpecificRulesAsk(t *testing.T) {
+	admit := PathRule{Methods: []string{"DELETE"}, Path: "/zones/*"}
+	ask := PathRule{Methods: []string{"DELETE"}, Path: "/zones/*", Ask: true}
+	u, _ := parseTarget("/zones/z")
+	for _, order := range [][]PathRule{{admit, ask}, {ask, admit}} {
+		if v := mustCompile(t, Scope{Paths: order}).decide("DELETE", u); v.Outcome != Ask {
+			t.Errorf("%v: %v, want ask", order, v.Outcome)
+		}
+	}
+}
+
+// Without Unmatched, a scope of templates refuses what they do not match, as
+// a scope of prefixes always has.
+func TestUnmatchedRefusesByDefault(t *testing.T) {
+	c := mustCompile(t, Scope{Paths: []PathRule{{Methods: []string{"GET"}, Path: "/a/*"}}})
+	for target, want := range map[string]Outcome{"/a/b": Admit, "/a/b/c": Refuse, "/a": Refuse, "/b/c": Refuse} {
+		u, _ := parseTarget(target)
+		if v := c.decide("GET", u); v.Outcome != want {
+			t.Errorf("GET %s: %v, want %v", target, v.Outcome, want)
+		}
+	}
+	// And a scope that asks about everything is a scope, with no rules at all.
+	if _, err := compileScope(Scope{Unmatched: UnmatchedAsk}); err != nil {
+		t.Errorf("a scope that asks about everything: %v", err)
+	}
+}
+
+func TestTemplateConfigurationRefusals(t *testing.T) {
+	get := []string{"GET"}
+	for name, s := range map[string]Scope{
+		"path and prefix":         {Paths: []PathRule{{Methods: get, Path: "/a", Prefix: "/a"}}},
+		"star inside a segment":   {Paths: []PathRule{{Methods: get, Path: "/a/b*"}}},
+		"star in a prefix":        {Paths: []PathRule{{Methods: get, Prefix: "/a/*.png"}}},
+		"exact with a slash":      {Paths: []PathRule{{Methods: get, Path: "/a/"}}},
+		"exact with an empty":     {Paths: []PathRule{{Methods: get, Path: "/a//b"}}},
+		"relative path":           {Paths: []PathRule{{Methods: get, Path: "a/b"}}},
+		"dotted path":             {Paths: []PathRule{{Methods: get, Path: "/a/../b"}}},
+		"operation with no id":    {Paths: []PathRule{{Methods: get, Path: "/a", Operation: &Operation{Summary: "s"}}}},
+		"operation with no words": {Paths: []PathRule{{Methods: get, Path: "/a", Operation: &Operation{ID: "a"}}}},
+		"unknown unmatched":       {Paths: []PathRule{{Methods: get, Path: "/a"}}, Unmatched: 7},
+	} {
+		if _, err := compileScope(s); err == nil {
+			t.Errorf("%s: compiled, want a refusal", name)
+		}
+	}
+}
+
+// Whatever a template admits or asks about by name, the request is that
+// operation: as many segments as the template, where it is exact, and its
+// literals where it has them, read as aggressively as any upstream might.
+func TestATemplateMatchesOnlyItsOwnShape(t *testing.T) {
+	c := mustCompile(t, Scope{Paths: []PathRule{
+		{Methods: []string{"DELETE"}, Path: "/zones/*/dns_records/*", Ask: true, Operation: &Operation{ID: "del", Summary: "s"}},
+		{Methods: []string{"GET"}, Path: "/zones/*/dns_records/export", Operation: &Operation{ID: "export", Summary: "s"}},
+	}})
+	rapid.Check(t, func(t *rapid.T) {
+		piece := rapid.OneOf(rapid.SampledFrom(pathPieces), rapid.StringMatching(`[a-z*]{1,4}`))
+		segs := rapid.SliceOfN(piece, 0, 3).Draw(t, "segs")
+		target := "/zones/" + strings.Join(segs, "/")
+		if rapid.Bool().Draw(t, "records") {
+			target = "/zones/" + rapid.SampledFrom(pathPieces).Draw(t, "zone") + "/dns_records/" + strings.Join(segs, "/")
+		}
+		method := rapid.SampledFrom([]string{"GET", "DELETE"}).Draw(t, "method")
+		u, ok := parseTarget(target)
+		if !ok {
+			return
+		}
+		v := c.decide(method, u)
+		if v.Operation == nil {
+			return
+		}
+		read, popped := climbs(u.EscapedPath())
+		if popped || len(read) != 4 || read[0] != "zones" || read[2] != "dns_records" || read[1] == "" || read[3] == "" {
+			t.Fatalf("%s %s matched %s, but reads as %v", method, target, v.Operation.ID, read)
+		}
+		if v.Operation.ID == "export" && read[3] != "export" {
+			t.Fatalf("%s %s matched export, but reads as %v", method, target, read)
+		}
+	})
+}

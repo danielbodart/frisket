@@ -193,6 +193,11 @@ func newFixture(t *testing.T, j *journal, routes ...Route) *fixture {
 
 func newFixtureAt(t *testing.T, j *journal, level slog.Level, routes ...Route) *fixture {
 	t.Helper()
+	return newFixtureAsking(t, j, level, nil, routes...)
+}
+
+func newFixtureAsking(t *testing.T, j *journal, level slog.Level, asker Asker, routes ...Route) *fixture {
+	t.Helper()
 	hosts := make([]string, len(routes))
 	for i, r := range routes {
 		hosts[i] = r.Host
@@ -201,7 +206,12 @@ func newFixtureAt(t *testing.T, j *journal, level slog.Level, routes ...Route) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	ic, err := New(Config{Routes: routes, Log: slog.New(slog.NewJSONHandler(j, &slog.HandlerOptions{Level: level}))})
+	ic, err := New(Config{
+		Routes: routes,
+		Log:    slog.New(slog.NewJSONHandler(j, &slog.HandlerOptions{Level: level})),
+		Policy: "test-policy",
+		Asker:  asker,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

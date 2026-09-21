@@ -90,9 +90,12 @@ type Route struct {
 	// the only value frisket replaces: anything else is sent on as it came.
 	Placeholder string `json:"placeholder,omitempty"`
 	// Paths and Git are the route's scope: a request either admits goes
-	// upstream, and nothing else does.
+	// upstream, one a path rule asks about goes to the asker, and Unmatched
+	// decides the rest.
 	Paths []PathRule `json:"paths,omitempty"`
 	Git   *GitRule   `json:"git,omitempty"`
+	// Unmatched is "refuse", the default, or "ask".
+	Unmatched string `json:"unmatched,omitempty"`
 }
 
 // GitRule admits git's smart-HTTP protocol, as GitHub serves it, for some
@@ -117,10 +120,22 @@ type CredentialJSON struct {
 	ExpiresJWT string `json:"expiresJWT,omitempty"`
 }
 
-// PathRule is one scope rule.
+// PathRule is one scope rule: the methods, at exactly Path or at and under
+// Prefix, either of them with "*" segments; admitted, or asked about.
 type PathRule struct {
-	Methods []string `json:"methods"`
-	Prefix  string   `json:"prefix"`
+	Methods   []string   `json:"methods"`
+	Prefix    string     `json:"prefix,omitempty"`
+	Path      string     `json:"path,omitempty"`
+	Ask       bool       `json:"ask,omitempty"`
+	Operation *Operation `json:"operation,omitempty"`
+}
+
+// Operation is what a rule is, in its API's own words: what a person is shown
+// when they are asked about a request that matched it.
+type Operation struct {
+	ID          string `json:"id"`
+	Summary     string `json:"summary"`
+	Description string `json:"description,omitempty"`
 }
 
 // Load reads a configuration file, refusing any field it does not know: a
@@ -169,6 +184,9 @@ type Deps struct {
 	Upstream dns.Exchanger
 	// Log is the daemon's; credential watchers and interceptors write to it.
 	Log *slog.Logger
+	// Asker decides what a route asks about, for every policy. Nil refuses
+	// it.
+	Asker intercept.Asker
 }
 
 // Set is every policy, built, and what must be closed when the daemon stops.
@@ -258,6 +276,8 @@ func build(name string, p Policy, d Deps, up dns.Exchanger, set *Set) (serve.Pol
 	ic, err := intercept.New(intercept.Config{
 		Routes: routes,
 		Log:    d.Log,
+		Policy: name,
+		Asker:  d.Asker,
 		// The upstream is dialled through the same structural check as every
 		// other connection frisket makes: a route pointed at the host's own
 		// address, or at the metadata service, is refused at the dial.
@@ -328,12 +348,23 @@ func sessionCA(hosts []string, authority []byte) (*intercept.CA, []byte, error) 
 
 // route builds one route and the watcher behind its credential, if it has one.
 func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
-	if len(r.Paths) == 0 && r.Git == nil {
-		return intercept.Route{}, nil, errors.New("no paths and no git: a route with no scope admits nothing")
-	}
 	out := intercept.Route{Name: r.Name, Host: r.Host, Upstream: r.Upstream}
+	switch r.Unmatched {
+	case "", "refuse":
+		if len(r.Paths) == 0 && r.Git == nil {
+			return intercept.Route{}, nil, errors.New("no paths and no git: a route with no scope admits nothing")
+		}
+	case "ask":
+		out.Scope.Unmatched = intercept.UnmatchedAsk
+	default:
+		return intercept.Route{}, nil, fmt.Errorf("unmatched %q: refuse or ask", r.Unmatched)
+	}
 	for _, p := range r.Paths {
-		out.Scope.Paths = append(out.Scope.Paths, intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix})
+		rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, Ask: p.Ask}
+		if o := p.Operation; o != nil {
+			rule.Operation = &intercept.Operation{ID: o.ID, Summary: o.Summary, Description: o.Description}
+		}
+		out.Scope.Paths = append(out.Scope.Paths, rule)
 	}
 	if g := r.Git; g != nil {
 		scope, err := gitScope(*g)

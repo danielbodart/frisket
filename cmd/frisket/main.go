@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/danielbodart/frisket/internal/ask"
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/nsnet"
 	"github.com/danielbodart/frisket/internal/policy"
@@ -135,6 +136,7 @@ func runServe(argv []string) error {
 	uid := fs.Int("control-uid", 0, "the only uid the control socket answers")
 	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
 	configPath := fs.String("config", "", "the policies, as the NixOS module writes them")
+	askerPath := fs.String("asker", "", "the program a request a route asks about is put to (none: those requests are refused)")
 	var level slog.Level
 	fs.TextVar(&level, "log-level", slog.LevelInfo, "debug adds each intercepted request's headers, credentials described and never shown")
 	if err := fs.Parse(argv); err != nil {
@@ -157,7 +159,17 @@ func runServe(argv []string) error {
 	if err != nil {
 		return err
 	}
-	policies, err := policy.Build(cfg, policy.Deps{Classifier: classifier, Dialer: dialer, Log: log})
+	deps := policy.Deps{Classifier: classifier, Dialer: dialer, Log: log}
+	if *askerPath != "" {
+		// Only when there is one: a nil *ask.Command in the interface would
+		// be an asker that panics rather than no asker at all.
+		asker, err := ask.NewCommand(*askerPath)
+		if err != nil {
+			return err
+		}
+		deps.Asker = asker
+	}
+	policies, err := policy.Build(cfg, deps)
 	if err != nil {
 		return err
 	}

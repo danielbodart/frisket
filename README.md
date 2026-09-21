@@ -133,7 +133,8 @@ Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
 |---|---|---|
 | `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
 | `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
-| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `paths`, `git` |
+| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `paths`, `git`, `unmatched` (`refuse` or `ask`) |
+| `services.frisket.asker` | `null` | the program a request a route asks about is put to; null refuses them. See [Asking](#asking) |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
 | `services.frisket.logLevel` | `info` | `debug` adds each intercepted request's headers and error bodies; credentials are described, never shown |
@@ -202,6 +203,55 @@ request, so without `push` a push is refused at its ref advertisement even
 where `paths` admits `GET`. Without `credentialFile`, the same route is
 read-only GitHub with nothing of yours on it: what the sandbox sends goes on as
 it came, for what the scope admits.
+
+## Asking
+
+A route can put a request to a person instead of deciding it. A path rule
+names one operation exactly with `path`, a `*` segment matching any one
+segment, and `ask = true` holds a matching request while the asker decides;
+`unmatched = "ask"` does the same for anything no rule matches. Where several
+rules match, the most specific decides -- a literal beats `*`, either beats
+the end of a prefix -- and between equals, asking wins.
+
+```nix
+routes.cloudflare = {
+  host = "api.cloudflare.com";
+  upstream = "https://api.cloudflare.com";
+  credentialFile = "/run/secrets/cloudflare-token";
+  placeholder = "proxy-injected";
+  unmatched = "ask";
+  paths = [
+    { methods = [ "GET" "HEAD" ]; path = "/client/v4/zones/*/dns_records/*"; }
+    {
+      methods = [ "DELETE" ];
+      path = "/client/v4/zones/*/dns_records/*";
+      ask = true;
+      operation = {
+        id = "dns-records-for-a-zone-delete-dns-record";
+        summary = "Delete DNS Record";
+        description = "Permanently removes a DNS record from the zone.";
+      };
+    }
+  ];
+};
+```
+
+frisket ships no dialog. `services.frisket.asker` names a program, run as the
+daemon's user inside its sandbox, once per question and one at a time. The
+question is one JSON document on stdin:
+
+```json
+{"session": "...", "policy": "...", "route": "cloudflare", "method": "DELETE",
+ "host": "api.cloudflare.com", "path": "/client/v4/zones/023e/dns_records/372e",
+ "query": "...", "operation": {"id": "...", "summary": "...", "description": "..."}}
+```
+
+Exit 0 admits the request, 1 declines it, and anything else refuses it and is
+logged as the asker failing. `operation` is absent when nothing matched, and it
+is the only prose in the question: it comes from the configuration, and
+everything else is the workload's, to be shown as the request. A client that
+stops waiting takes its question with it: queued, it is never asked; open, the
+asker's process group is sent SIGTERM. With no asker, every ask is refused.
 
 ## Development
 

@@ -73,7 +73,40 @@ const (
 	ReasonMisdirected     = "Host does not match SNI"
 	ReasonNoCredential    = "credential unavailable"
 	ReasonStaleCredential = "credential expired"
+	ReasonNobodyToAsk     = "nobody to ask"
+	ReasonDeclined        = "declined"
+	ReasonAskFailed       = "asking failed"
+	ReasonStoppedWaiting  = "client stopped waiting"
 )
+
+// RuleAsked is the rule of a request a person admitted.
+const RuleAsked = "asked"
+
+// Asker puts a request the scope would not decide to someone who can. It
+// answers true to admit it; false, or an error, refuses it. It is called on
+// the request's own goroutine and may take as long as a person does; ctx ends
+// when the client stops waiting.
+type Asker interface {
+	Ask(ctx context.Context, q Question) (bool, error)
+}
+
+// Question is one request put to an Asker. Operation is the only prose in it,
+// and it comes from the route's configuration, never from the request:
+// everything the workload chose -- method, path, query -- is here as the
+// request, to be shown as the request.
+type Question struct {
+	Session string `json:"session"`
+	Policy  string `json:"policy"`
+	Route   string `json:"route"`
+	Method  string `json:"method"`
+	Host    string `json:"host"`
+	// Path is escaped, exactly as it was sent; Query too, without its "?".
+	Path  string `json:"path"`
+	Query string `json:"query,omitempty"`
+	// Operation is what the request matched, or nil if it matched nothing --
+	// in which case nothing is borrowed to describe it.
+	Operation *Operation `json:"operation,omitempty"`
+}
 
 // Config is everything an Interceptor needs.
 type Config struct {
@@ -83,6 +116,11 @@ type Config struct {
 	// Log receives one line per request and one per refused handshake.
 	// Injected, never a package logger, so a test can assert on it.
 	Log *slog.Logger
+	// Policy is the name the routes are configured under, for a Question.
+	Policy string
+	// Asker decides what a scope asks about. Nil refuses it: a gate with
+	// nobody to ask fails closed, never open.
+	Asker Asker
 	// Now is the clock credential expiry is judged against. Nil is time.Now.
 	Now func() time.Time
 	// DialContext dials upstreams. Nil is a plain net.Dialer; the daemon
@@ -98,6 +136,8 @@ type Interceptor struct {
 	routes map[string]*route
 	log    *slog.Logger
 	now    func() time.Time
+	policy string
+	asker  Asker
 
 	tlsConfig *tls.Config
 	srv       *http.Server
@@ -135,6 +175,8 @@ func New(cfg Config) (*Interceptor, error) {
 		routes:  map[string]*route{},
 		log:     cfg.Log,
 		now:     cfg.Now,
+		policy:  cfg.Policy,
+		asker:   cfg.Asker,
 		ln:      newConnListener(),
 		served:  make(chan struct{}),
 		closing: make(chan struct{}),
@@ -417,13 +459,25 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(lw, http.StatusMisdirectedRequest, ReasonMisdirected)
 		return
 	}
-	ok, why := rt.scope.allow(r.Method, r.URL)
-	if !ok {
-		rec.refuse(why)
-		refuse(lw, http.StatusForbidden, why)
-		return
+	v := rt.scope.decide(r.Method, r.URL)
+	if v.Operation != nil {
+		rec.operation = v.Operation.ID
 	}
-	rec.rule = why
+	switch v.Outcome {
+	case Refuse:
+		rec.refuse(v.Reason)
+		refuse(lw, http.StatusForbidden, v.Reason)
+		return
+	case Ask:
+		if reason := i.ask(r, ic, v); reason != "" {
+			rec.refuse(reason)
+			refuse(lw, http.StatusForbidden, reason)
+			return
+		}
+		rec.rule = RuleAsked
+	default:
+		rec.rule = v.Reason
+	}
 
 	if !rt.carries(r.Header) {
 		// Not the placeholder, so not frisket's to touch: the client's own
@@ -462,6 +516,40 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), secretKey{}, sec.Value)
 	ctx = context.WithValue(ctx, recordKey{}, rec)
 	rt.proxy.ServeHTTP(lw, r.WithContext(ctx))
+}
+
+// ask puts a request to the Asker, and returns why it is refused, or "" if
+// it was admitted. Before the credential is looked at: what the person is
+// asked is whether this request may go, and that does not depend on whether
+// the token has since expired.
+func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) string {
+	if i.asker == nil {
+		return ReasonNobodyToAsk
+	}
+	ok, err := i.asker.Ask(r.Context(), Question{
+		Session:   ic.session,
+		Policy:    i.policy,
+		Route:     ic.route.Name,
+		Method:    r.Method,
+		Host:      ic.route.host,
+		Path:      r.URL.EscapedPath(),
+		Query:     r.URL.RawQuery,
+		Operation: v.Operation,
+	})
+	switch {
+	case r.Context().Err() != nil:
+		// Nobody is waiting for the answer, so there is nothing to admit and
+		// nothing wrong with the asker.
+		return ReasonStoppedWaiting
+	case err != nil:
+		// Said in the log where it happened, not in the request's line: the
+		// error is the asker's, and may quote whatever it was sent.
+		i.log.Error("ask", "session", ic.session, "conn", ic.id, "route", ic.route.Name, "error", err.Error())
+		return ReasonAskFailed
+	case !ok:
+		return ReasonDeclined
+	}
+	return ""
 }
 
 func refuse(w http.ResponseWriter, status int, reason string) {
@@ -557,6 +645,9 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 	if rec.rule != "" {
 		attrs = append(attrs, "rule", rec.rule)
 	}
+	if rec.operation != "" {
+		attrs = append(attrs, "operation", rec.operation)
+	}
 	attrs = append(attrs,
 		"status", status,
 		"req_bytes", rec.reqBytes.Load(),
@@ -605,11 +696,13 @@ type record struct {
 	decision   string
 	reason     string
 	rule       string
-	err        error
-	level      slog.Level
-	status     atomic.Int64
-	reqBytes   atomic.Int64
-	respBytes  atomic.Int64
+	// operation is the id of the operation the request matched, if any.
+	operation string
+	err       error
+	level     slog.Level
+	status    atomic.Int64
+	reqBytes  atomic.Int64
+	respBytes atomic.Int64
 }
 
 func (r *record) refuse(reason string) {

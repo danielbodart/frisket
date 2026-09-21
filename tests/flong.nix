@@ -51,6 +51,7 @@ let
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        do_DELETE = do_GET
         def log_message(self, *a):
             pass
     class S(http.server.ThreadingHTTPServer):
@@ -160,9 +161,26 @@ in
           upstreamCA = "${certs}/ca.crt";
           credentialFile = "/srv/secrets/token";
           placeholder = "frisket-placeholder";
-          paths = [{ methods = [ "GET" ]; prefix = "/v1"; }];
+          paths = [
+            { methods = [ "GET" ]; prefix = "/v1"; }
+            {
+              methods = [ "DELETE" ];
+              path = "/v1/things/*";
+              ask = true;
+              operation = { id = "delete-thing"; summary = "Delete Thing"; description = "Removes the thing."; };
+            }
+          ];
         };
       };
+      # Says what it was asked in the journal, where the test reads it, and
+      # admits only the thing called "yes". It runs inside the daemon's
+      # sandbox, which is what this proves it can do from there.
+      asker = "${pkgs.writeShellScript "asker" ''
+        q=$(${pkgs.coreutils}/bin/cat)
+        printf '%s\n' "$q" | ${pkgs.util-linux}/bin/logger -t frisket-asker
+        case $q in *'"path":"/v1/things/yes"'*) exit 0 ;; esac
+        exit 1
+      ''}";
       # The trusted shape: every name, and the same route still intercepted.
       policies.trusted = {
         allow = [ "*" ];
@@ -717,6 +735,23 @@ in
           assert upstream_saw("/admin") == "", upstream_saw("/admin")
           [r] = wait_log("request", name, lambda m: m["path"] == "/admin", "the refusal")
           assert r["decision"] == "refused" and r["reason"] == "out of scope" and r["status"] == 403, r
+
+      with subtest("a request the route asks about is put to the asker, and its answer stands"):
+          for thing, code in [("yes", "200"), ("no", "403")]:
+              out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' "
+                                                        f"-X DELETE -H 'Authorization: Bearer {placeholder}' https://api.test/v1/things/{thing}"))
+              assert out.strip() == code, (thing, out)
+          assert f"DELETE api.test /v1/things/yes auth=Bearer {token}" in upstream_saw("upstream-request DELETE"), upstream_saw("DELETE")
+          assert upstream_saw("/v1/things/no") == "", upstream_saw("/v1/things/no")
+          [yes] = wait_log("request", name, lambda m: m["path"] == "/v1/things/yes", "the admitted request")
+          assert yes["decision"] == "allowed" and yes["rule"] == "asked" and yes["operation"] == "delete-thing", yes
+          [no] = wait_log("request", name, lambda m: m["path"] == "/v1/things/no", "the declined request")
+          assert no["decision"] == "refused" and no["reason"] == "declined" and no["status"] == 403, no
+          asked = [json.loads(l) for l in machine.succeed("journalctl -t frisket-asker -o cat --no-pager").splitlines()]
+          assert [(q["method"], q["path"], q["session"], q["policy"], q["operation"]["summary"]) for q in asked] == [
+              ("DELETE", "/v1/things/yes", name, "test", "Delete Thing"),
+              ("DELETE", "/v1/things/no", name, "test", "Delete Thing"),
+          ], asked
 
       with subtest("a credential file replaced by rename is picked up"):
           new_token = "real-" + secrets.token_hex(16)

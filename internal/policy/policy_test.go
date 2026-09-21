@@ -101,11 +101,17 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"a JSON credential that expires twice": func(p *Policy) {
 			p.Routes[0].CredentialJSON = &CredentialJSON{Token: "t", ExpiresMillis: "e", ExpiresJWT: "t"}
 		},
-		"a route with no placeholder":          func(p *Policy) { p.Routes[0].Placeholder = "" },
-		"a plain-HTTP upstream":                func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
-		"a * inside an allowlist name":         func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
-		"a * glued to an allowlist name":       func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
-		"Authorization named as a bare header": func(p *Policy) { p.Routes[0].Header = "authorization" },
+		"a route with no placeholder":              func(p *Policy) { p.Routes[0].Placeholder = "" },
+		"a plain-HTTP upstream":                    func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
+		"a * inside an allowlist name":             func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
+		"a * glued to an allowlist name":           func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
+		"Authorization named as a bare header":     func(p *Policy) { p.Routes[0].Header = "authorization" },
+		"unmatched that is neither refuse nor ask": func(p *Policy) { p.Routes[0].Unmatched = "admit" },
+		"a rule with a path and a prefix":          func(p *Policy) { p.Routes[0].Paths[0].Path = "/v1/x" },
+		"a * inside a template segment":            func(p *Policy) { p.Routes[0].Paths[0].Prefix = "/v1/x*" },
+		"an operation with no summary": func(p *Policy) {
+			p.Routes[0].Paths[0].Operation = &Operation{ID: "op"}
+		},
 	} {
 		p := valid(t)
 		mutate(&p)
@@ -326,4 +332,40 @@ func TestConfiguredDNSServers(t *testing.T) {
 	if _, err := upstreamServers([]string{"resolver.example"}); err == nil {
 		t.Error("a name was accepted as a DNS server; the resolver has no resolver to resolve it with")
 	}
+}
+
+// A route described operation by operation, as the NixOS module writes it:
+// templates, rules that ask, the operations' own words, and asking about the
+// rest -- which, alone, is a scope.
+func TestARouteOfOperationsLoadsAndBuilds(t *testing.T) {
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(t.TempDir(), "frisket.json")
+	if err := os.WriteFile(conf, []byte(`{"policies": {"p": {
+		"allow": ["api.test", "other.test"],
+		"routes": [
+			{"name": "api", "host": "api.test", "upstream": "https://api.test",
+			 "credentialFile": "`+token+`", "placeholder": "proxy-injected", "unmatched": "ask",
+			 "paths": [
+				{"methods": ["GET", "HEAD"], "path": "/client/v4/zones/*/dns_records/*",
+				 "operation": {"id": "get-record", "summary": "DNS Record Details"}},
+				{"methods": ["DELETE"], "path": "/client/v4/zones/*/dns_records/*", "ask": true,
+				 "operation": {"id": "delete-record", "summary": "Delete DNS Record", "description": "Permanently removes it."}}
+			 ]},
+			{"name": "other", "host": "other.test", "upstream": "https://other.test",
+			 "credentialFile": "`+token+`", "placeholder": "proxy-injected", "unmatched": "ask"}
+		]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := Build(c, deps(t, &counting{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = set.Close()
 }
