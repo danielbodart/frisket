@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -53,6 +54,10 @@ type Daemon struct {
 	ControlUID int
 	// MaxConns caps each session's concurrent connections.
 	MaxConns int
+	// PolicyDir is where a session stored before policies were documents
+	// finds its policy: its record names one, and it is read as
+	// PolicyDir/<name>.json. Empty: such a session is not restored.
+	PolicyDir string
 
 	// own is this process's network namespace cookie; zero means "read it at
 	// Run". A listener in this namespace is refused.
@@ -469,6 +474,12 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 	if info.Name != name {
 		meta.Close()
 		return fmt.Errorf("record names session %q", info.Name)
+	}
+	// Opened under a policy named rather than a document: the name is the
+	// document of that name, so a switch to this daemon does not cut off a
+	// session that was running before it.
+	if d.PolicyDir != "" && control.ValidName(info.Policy) == nil {
+		info.Policy = filepath.Join(d.PolicyDir, info.Policy+".json")
 	}
 	if err := info.Validate(); err != nil {
 		meta.Close()

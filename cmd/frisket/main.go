@@ -145,6 +145,7 @@ func runServe(argv []string) error {
 	uid := fs.Int("control-uid", 0, "the only uid the control socket answers")
 	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
 	configPath := fs.String("config", "", "the policies, as the NixOS module writes them")
+	policyDir := fs.String("policy-dir", "/etc/frisket/policies", "where a session stored under a policy name, before policies were documents, finds that policy")
 	askerPath := fs.String("asker", "", "the program a request a route asks about is put to (none: those requests are refused)")
 	var level slog.Level
 	fs.TextVar(&level, "log-level", slog.LevelInfo, "debug adds each intercepted request's headers, credentials described and never shown")
@@ -218,6 +219,7 @@ func runServe(argv []string) error {
 		Policies:   policies,
 		ControlUID: *uid,
 		MaxConns:   *maxConns,
+		PolicyDir:  *policyDir,
 	}
 	// Assigned only when present: a nil *Notifier in the interface would be
 	// a non-nil Notifier that fails every call.

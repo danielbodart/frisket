@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -705,5 +706,47 @@ func TestEveryPolicyASessionHeldIsGivenBack(t *testing.T) {
 	waitFor(t, "the policy to be given back", func() bool { held, _ := pols.count(); return held == 0 })
 	if _, extra := pols.count(); extra != 0 {
 		t.Fatalf("a policy was given back %d times too many", extra)
+	}
+}
+
+// A session stored before policies were documents names its policy, and is
+// restored under the document of that name: a switch to a daemon that reads
+// documents does not cut off the sessions that were running before it.
+func TestALegacyRecordFindsItsDocument(t *testing.T) {
+	sd := newFakeSystemd()
+	rec := &recorder{}
+	orig := func(*net.TCPConn) netip.AddrPort { return netip.MustParseAddrPort("203.0.113.20:80") }
+	first := startDaemon(t, sd, rec, orig, nil)
+	info, files, ln := listeners(t, "netless-7-9")
+	_ = ln.Close()
+	if _, err := control.Call(context.Background(), first.path, control.Request{Op: control.OpOpen, Session: &info}, files); err != nil {
+		t.Fatal(err)
+	}
+	control.CloseAll(files)
+	first.stop()
+
+	// The record as the old daemon wrote it: the same session, by name.
+	passed := sd.passed(t)
+	legacy := info
+	legacy.Policy = "recorder"
+	replaced := false
+	for i, fd := range passed {
+		if _, err := inspect(fd.File); errors.Is(err, unix.ENOTSOCK) {
+			_ = fd.File.Close()
+			rf, err := newRecord(legacy, []byte("ca-of-netless-7-9"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			passed[i].File = rf
+			replaced = true
+		}
+	}
+	if !replaced {
+		t.Fatal("no session record among what systemd kept")
+	}
+	second := startDaemonWith(t, func(d *Daemon) { d.PolicyDir = "/etc/frisket/policies" }, sd, rec, orig, passed)
+	st := second.d.List()
+	if len(st) != 1 || !st[0].Restored || st[0].Policy != "/etc/frisket/policies/recorder.json" {
+		t.Fatalf("after a restart: %+v", st)
 	}
 }
