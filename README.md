@@ -133,7 +133,7 @@ Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
 |---|---|---|
 | `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
 | `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
-| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `paths`, `git`, `unmatched` (`refuse` or `ask`) |
+| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `paths`, `git`, `unmatched` (`refuse` or `ask`), `refusal` (the API's own error shape) |
 | `services.frisket.asker` | `null` | the program a request a route asks about is put to; null refuses them. See [Asking](#asking) |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
@@ -252,6 +252,24 @@ is the only prose in the question: it comes from the configuration, and
 everything else is the workload's, to be shown as the request. A client that
 stops waiting takes its question with it: queued, it is never asked; open, the
 asker's process group is sent SIGTERM. With no asker, every ask is refused.
+
+A refusal is plain text unless the route gives it the API's own error shape,
+which a client then reads and reports:
+
+```nix
+refusal = {
+  contentType = "application/json";
+  body = builtins.toJSON {
+    success = false;
+    errors = [{ code = 403; message = "{{message}}"; }];
+    messages = [ ];
+    result = null;
+  };
+};
+```
+
+`{{message}}` is frisket's reason and the matched operation's summary --
+`frisket: refused: declined (Create a Namespace)` -- never the request's.
 
 ## Development
 

@@ -152,6 +152,7 @@ type route struct {
 	host     string
 	upstream *url.URL
 	scope    *compiled
+	refusal  *refusalShape
 	proxy    *httputil.ReverseProxy
 	tr       *http.Transport
 }
@@ -196,7 +197,11 @@ func New(cfg Config) (*Interceptor, error) {
 		if err != nil {
 			return nil, fmt.Errorf("intercept: route %s: %w", r.Name, err)
 		}
-		rt := &route{Route: r, host: host, upstream: up, scope: sc}
+		rf, err := compileRefusal(r.Refusal)
+		if err != nil {
+			return nil, fmt.Errorf("intercept: route %s: %w", r.Name, err)
+		}
+		rt := &route{Route: r, host: host, upstream: up, scope: sc, refusal: rf}
 		rt.tr = upstreamTransport(r, up, dial)
 		rt.proxy = &httputil.ReverseProxy{
 			Rewrite:        rt.rewrite,
@@ -456,7 +461,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// credential. A request for another name on it -- HTTP/2 connection
 		// reuse, or a deliberate mismatch -- is sent back to be asked again.
 		rec.refuse(ReasonMisdirected)
-		refuse(lw, http.StatusMisdirectedRequest, ReasonMisdirected)
+		rt.refuse(lw, http.StatusMisdirectedRequest, ReasonMisdirected, nil)
 		return
 	}
 	v := rt.scope.decide(r.Method, r.URL)
@@ -466,12 +471,12 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch v.Outcome {
 	case Refuse:
 		rec.refuse(v.Reason)
-		refuse(lw, http.StatusForbidden, v.Reason)
+		rt.refuse(lw, http.StatusForbidden, v.Reason, v.Operation)
 		return
 	case Ask:
 		if reason := i.ask(r, ic, v); reason != "" {
 			rec.refuse(reason)
-			refuse(lw, http.StatusForbidden, reason)
+			rt.refuse(lw, http.StatusForbidden, reason, v.Operation)
 			return
 		}
 		rec.rule = RuleAsked
@@ -499,7 +504,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.refuse(ReasonNoCredential)
 		rec.err = err
 		rec.level = slog.LevelError
-		refuse(lw, http.StatusBadGateway, ReasonNoCredential)
+		rt.refuse(lw, http.StatusBadGateway, ReasonNoCredential, v.Operation)
 		return
 	}
 	if sec.Expired(i.now()) {
@@ -509,7 +514,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// thing that fixes this.
 		rec.refuse(ReasonStaleCredential)
 		rec.level = slog.LevelWarn
-		refuse(lw, http.StatusServiceUnavailable, ReasonStaleCredential)
+		rt.refuse(lw, http.StatusServiceUnavailable, ReasonStaleCredential, v.Operation)
 		return
 	}
 
@@ -550,11 +555,6 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 		return ReasonDeclined
 	}
 	return ""
-}
-
-func refuse(w http.ResponseWriter, status int, reason string) {
-	w.Header().Set("Cache-Control", "no-store")
-	http.Error(w, "frisket: refused: "+reason, status)
 }
 
 // rewrite is the only place a credential is put on a request.

@@ -29,6 +29,7 @@ let
             inherit (r) host upstream unmatched;
             paths = map (lib.filterAttrs (_: v: v != null)) r.paths;
           } // lib.optionalAttrs (r.upstreamCA != null) { upstreamCA = "${r.upstreamCA}"; }
+          // lib.optionalAttrs (r.refusal != null) { inherit (r) refusal; }
           // lib.optionalAttrs (r.credentialFile != null) { inherit (r) credentialFile; }
           // lib.optionalAttrs (r.placeholder != null) { inherit (r) placeholder; }
           // lib.optionalAttrs (r.header != null) { inherit (r) header; }
@@ -210,6 +211,33 @@ let
         type = types.listOf pathRule;
         default = [ ];
         description = "The route's scope, with `git`. What neither decides, `unmatched` does.";
+      };
+      refusal = mkOption {
+        type = types.nullOr (types.submodule {
+          options = {
+            contentType = mkOption {
+              type = types.strMatching ".+";
+              example = "application/json";
+              description = "The refusal's Content-Type.";
+            };
+            body = mkOption {
+              type = types.strMatching ".*[{][{]message[}][}].*";
+              example = ''{"success":false,"errors":[{"code":403,"message":"{{message}}"}]}'';
+              description = ''
+                The refusal's body, holding `{{message}}` exactly once:
+                frisket's reason, and the matched operation's summary, never
+                anything from the request. For a JSON content type it goes in
+                escaped as the inside of a JSON string.
+              '';
+            };
+          };
+        });
+        default = null;
+        description = ''
+          Refusals in the API's own error shape, so a client that reads that
+          shape says why rather than only that the request failed. Null:
+          plain text. The status is frisket's either way.
+        '';
       };
       unmatched = mkOption {
         type = types.enum [ "refuse" "ask" ];

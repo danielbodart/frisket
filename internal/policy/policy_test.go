@@ -109,6 +109,9 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"unmatched that is neither refuse nor ask": func(p *Policy) { p.Routes[0].Unmatched = "admit" },
 		"a rule with a path and a prefix":          func(p *Policy) { p.Routes[0].Paths[0].Path = "/v1/x" },
 		"a * inside a template segment":            func(p *Policy) { p.Routes[0].Paths[0].Prefix = "/v1/x*" },
+		"a refusal with no message in it": func(p *Policy) {
+			p.Routes[0].Refusal = &Refusal{ContentType: "application/json", Body: `{"error":"no"}`}
+		},
 		"an operation with no summary": func(p *Policy) {
 			p.Routes[0].Paths[0].Operation = &Operation{ID: "op"}
 		},
@@ -348,6 +351,7 @@ func TestARouteOfOperationsLoadsAndBuilds(t *testing.T) {
 		"routes": [
 			{"name": "api", "host": "api.test", "upstream": "https://api.test",
 			 "credentialFile": "`+token+`", "placeholder": "proxy-injected", "unmatched": "ask",
+			 "refusal": {"contentType": "application/json", "body": "{\"errors\":[{\"message\":\"{{message}}\"}]}"},
 			 "paths": [
 				{"methods": ["GET", "HEAD"], "path": "/client/v4/zones/*/dns_records/*",
 				 "operation": {"id": "get-record", "summary": "DNS Record Details"}},

@@ -2,6 +2,7 @@ package intercept
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -62,7 +63,7 @@ func TestAPersonDecidesWhatTheScopeAsksAbout(t *testing.T) {
 			status         int
 		}{
 			{"GET", "/v1/things/a", http.StatusOK},
-			{"DELETE", "/v1/things/a%2Fb?force=true", http.StatusOK},
+			{"DELETE", "/v1/things/a%3Ab?force=true", http.StatusOK},
 			{"PUT", "/v1/things/a", http.StatusForbidden},
 			{"POST", "/v2/other", http.StatusForbidden},
 			{"DELETE", "/v1/things/../../x", http.StatusForbidden},
@@ -78,7 +79,7 @@ func TestAPersonDecidesWhatTheScopeAsksAbout(t *testing.T) {
 		// a person: only the three in between were.
 		want := []Question{
 			{Session: "sess-test", Policy: "test-policy", Route: "api", Method: "DELETE", Host: apiHost,
-				Path: "/v1/things/a%2Fb", Query: "force=true", Operation: deleteThing},
+				Path: "/v1/things/a%3Ab", Query: "force=true", Operation: deleteThing},
 			{Session: "sess-test", Policy: "test-policy", Route: "api", Method: "PUT", Host: apiHost, Path: "/v1/things/a"},
 			{Session: "sess-test", Policy: "test-policy", Route: "api", Method: "POST", Host: apiHost, Path: "/v2/other"},
 		}
@@ -128,5 +129,76 @@ func TestNobodyToAskRefuses(t *testing.T) {
 	}
 	if l := f.journal.waitLines(t, "request", 1); l[0]["reason"] != ReasonNobodyToAsk || l[0]["operation"] != "delete-thing" {
 		t.Fatalf("%v", l[0])
+	}
+}
+
+// cloudflareShape is Cloudflare's error envelope, which wrangler reads.
+var cloudflareShape = &Refusal{
+	ContentType: "application/json",
+	Body:        `{"success":false,"errors":[{"code":403,"message":"{{message}}"}],"messages":[],"result":null}`,
+}
+
+// A refusal in the route's own shape says why, in frisket's words and the
+// operation's -- never the request's.
+func TestARefusalIsInTheRoutesOwnShape(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	r := gatedRoute(up, t, j)
+	r.Refusal = cloudflareShape
+	asker := &answers{answer: func(Question) (bool, error) { return false, nil }}
+	f := newFixtureAsking(t, j, slog.LevelInfo, asker, r)
+	c := f.client(t, false)
+
+	for _, tc := range []struct{ method, target, message string }{
+		{"DELETE", `/v1/things/%22%7D%5D,%22x%22:1`, "frisket: refused: declined (Delete Thing)"},
+		{"PUT", "/v1/other", "frisket: refused: declined"},
+	} {
+		req := newRequest(t, tc.method, "https://"+apiHost+tc.target, nil)
+		req.Header.Set("Authorization", sandboxAuth)
+		res, body := get(t, c, req)
+		if res.StatusCode != http.StatusForbidden || res.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("%s %s: %d %s", tc.method, tc.target, res.StatusCode, res.Header.Get("Content-Type"))
+		}
+		var env struct {
+			Success bool
+			Errors  []struct {
+				Code    int
+				Message string
+			}
+		}
+		if err := json.Unmarshal([]byte(body), &env); err != nil {
+			t.Fatalf("%s %s: not JSON: %q", tc.method, tc.target, body)
+		}
+		if env.Success || len(env.Errors) != 1 || env.Errors[0].Code != 403 || env.Errors[0].Message != tc.message {
+			t.Errorf("%s %s: %+v", tc.method, tc.target, env)
+		}
+	}
+}
+
+func TestARefusalShapeMustHoldItsMessage(t *testing.T) {
+	build := func(rf *Refusal) error {
+		up := newUpstream(t, nil)
+		r := apiRoute(up, nil)
+		r.Credential, r.Inject, r.Placeholder = nil, nil, ""
+		r.Refusal = rf
+		ic, err := New(Config{Routes: []Route{r}, Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
+		if err == nil {
+			_ = ic.Close()
+		}
+		return err
+	}
+	if err := build(cloudflareShape); err != nil {
+		t.Fatalf("a valid shape was refused: %v", err)
+	}
+	for name, rf := range map[string]*Refusal{
+		"no placeholder":               {ContentType: "application/json", Body: `{"message":"no"}`},
+		"two placeholders":             {ContentType: "text/plain", Body: "{{message}} {{message}}"},
+		"placeholder outside a string": {ContentType: "application/json", Body: `{"message":{{message}}}`},
+		"not JSON at all":              {ContentType: "application/problem+json", Body: `{"detail":"{{message}}"`},
+		"no content type":              {Body: "{{message}}"},
+	} {
+		if build(rf) == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

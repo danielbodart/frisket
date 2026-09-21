@@ -354,8 +354,9 @@ func (p *compiledPath) matches(segs []string) bool {
 	for i, t := range p.segs {
 		if t == wildcard {
 			// Any one segment, but one: not the trailing empty one a
-			// trailing slash leaves.
-			if segs[i] == "" {
+			// trailing slash leaves, and not one that an upstream decoding
+			// it once more would read as two.
+			if !oneSegment(segs[i]) {
 				return false
 			}
 		} else if segs[i] != t {
@@ -363,6 +364,28 @@ func (p *compiledPath) matches(segs []string) bool {
 		}
 	}
 	return true
+}
+
+// oneSegment is whether a decoded segment is one segment to any reading of
+// it: not empty, and no slash or backslash however many times it is decoded.
+// A literal needs no such check -- it matches only itself -- but a wildcard
+// that took "a%2Fb" would name an operation the upstream might not be asked
+// for. Such a request matches no template, and so is decided as unmatched.
+func oneSegment(seg string) bool {
+	if seg == "" {
+		return false
+	}
+	for range maxDecodes {
+		if strings.ContainsAny(seg, `/\`) {
+			return false
+		}
+		next, err := url.PathUnescape(seg)
+		if err != nil || next == seg {
+			return true
+		}
+		seg = next
+	}
+	return false
 }
 
 // specificity compares two rules that both matched a request of n segments:

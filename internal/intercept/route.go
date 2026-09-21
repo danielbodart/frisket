@@ -44,6 +44,8 @@ type Route struct {
 	Placeholder string
 	// Scope is what the credential may be used for.
 	Scope Scope
+	// Refusal is the shape of a refusal on this route. Nil is plain text.
+	Refusal *Refusal
 }
 
 // Injector puts a credential on an outgoing request.

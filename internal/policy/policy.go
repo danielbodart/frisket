@@ -96,6 +96,16 @@ type Route struct {
 	Git   *GitRule   `json:"git,omitempty"`
 	// Unmatched is "refuse", the default, or "ask".
 	Unmatched string `json:"unmatched,omitempty"`
+	// Refusal is the API's own error shape, for frisket's refusals. Nil is
+	// plain text.
+	Refusal *Refusal `json:"refusal,omitempty"`
+}
+
+// Refusal is a refusal's content type, and a body holding "{{message}}"
+// once.
+type Refusal struct {
+	ContentType string `json:"contentType"`
+	Body        string `json:"body"`
 }
 
 // GitRule admits git's smart-HTTP protocol, as GitHub serves it, for some
@@ -349,6 +359,9 @@ func sessionCA(hosts []string, authority []byte) (*intercept.CA, []byte, error) 
 // route builds one route and the watcher behind its credential, if it has one.
 func route(r Route, log *slog.Logger) (intercept.Route, func() error, error) {
 	out := intercept.Route{Name: r.Name, Host: r.Host, Upstream: r.Upstream}
+	if rf := r.Refusal; rf != nil {
+		out.Refusal = &intercept.Refusal{ContentType: rf.ContentType, Body: rf.Body}
+	}
 	switch r.Unmatched {
 	case "", "refuse":
 		if len(r.Paths) == 0 && r.Git == nil {
