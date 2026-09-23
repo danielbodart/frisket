@@ -126,15 +126,21 @@ was made before the host was a route.
 
 ## Other launchers
 
-Run as root, in this order, from a hook that has the sandbox's network
-namespace before anything gives it egress:
+Run as the daemon's user, in this order, from a hook that has the sandbox's
+network namespace before anything gives it egress. `$userns` is the user
+namespace that owns the sandbox's; every step inside it runs under that
+`nsenter`, since a Go program cannot join a user namespace itself. Root, with
+no user namespace to join, leaves out `-userns` and `-nsenter` -- but the
+control socket answers only the daemon's user.
 
 ```console
-# frisket steer   -netns /proc/$leader/ns/net -mntns /proc/$leader/ns/mnt \
+$ frisket steer   -userns $userns -nsenter /path/to/nsenter \
+                  -netns $netns -mntns /proc/$leader/ns/mnt \
                   -roots /etc/ssl/certs/ca-certificates.crt \
                   -steering $file -name $session -policy /etc/frisket/policies/research.json
-# frisket connect -netns /proc/$leader/ns/net -steering $file -name $session
-# frisket close   -name $session
+$ frisket connect -userns $userns -nsenter /path/to/nsenter \
+                  -netns $netns -steering $file -name $session
+$ frisket close   -name $session
 ```
 
 `$file` is `(frisket.lib.steering { set = "all"; }).json`: the ruleset and the
@@ -153,7 +159,7 @@ Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
 | `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `paths`, `git`, `unmatched` (`refuse` or `ask`), `refusal` (the API's own error shape) |
 | `services.frisket.asker` | `null` | the program a request a route asks about is put to; null refuses them. See [Asking](#asking) |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
-| `services.frisket.controlSocket` | `/run/frisket/control.sock` | root-only; never bound into a sandbox |
+| `services.frisket.controlSocket` | `/run/frisket/control.sock` | the daemon's user's, 0600, and only from the host's user namespace; never bound into a sandbox |
 | `services.frisket.logLevel` | `info` | `debug` adds each intercepted request's headers and error bodies; credentials are described, never shown |
 | `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
 | `services.frisket.maxConnections` | built in | concurrent connections per session |

@@ -48,9 +48,10 @@ type Daemon struct {
 	Policies Policies
 	// Notify is systemd, or nil.
 	Notify Notifier
-	// ControlUID is the only peer uid the control socket answers. Root in
-	// production; the socket unit makes the socket root-only 0600 as well, and
-	// this is the check that does not depend on a file mode.
+	// ControlUID is the only peer uid the control socket answers: the
+	// daemon's own user in production, who runs the launchers. The socket
+	// unit makes the socket that user's, 0600, as well, and this is the check
+	// that does not depend on a file mode.
 	ControlUID int
 	// MaxConns caps each session's concurrent connections.
 	MaxConns int
@@ -62,6 +63,9 @@ type Daemon struct {
 	// own is this process's network namespace cookie; zero means "read it at
 	// Run". A listener in this namespace is refused.
 	own uint64
+	// userns is this process's user namespace, read at Run: the only one a
+	// control peer may be in.
+	userns nsKey
 	// dst replaces the destination lookup, for tests that have no ruleset.
 	dst func(*net.TCPConn) netip.AddrPort
 
@@ -87,6 +91,11 @@ func (d *Daemon) Run(ctx context.Context, ctl *net.UnixListener, inherited []sdn
 		}
 		d.own = c
 	}
+	u, err := ownUserns()
+	if err != nil {
+		return fmt.Errorf("reading this process's user namespace: %w", err)
+	}
+	d.userns = u
 	d.mu.Lock()
 	d.ctx = ctx
 	d.sessions = make(map[string]*session)
@@ -190,28 +199,6 @@ func (d *Daemon) handle(c *net.UnixConn) {
 	if err := control.WriteResponse(c, resp); err != nil {
 		d.Log.Warn("control response", "op", req.Op, "error", err.Error())
 	}
-}
-
-// checkPeer refuses anyone but ControlUID.
-func (d *Daemon) checkPeer(c *net.UnixConn) error {
-	rc, err := c.SyscallConn()
-	if err != nil {
-		return err
-	}
-	var cred *unix.Ucred
-	var credErr error
-	if err := rc.Control(func(fd uintptr) {
-		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-	}); err != nil {
-		return err
-	}
-	if credErr != nil {
-		return fmt.Errorf("SO_PEERCRED: %w", credErr)
-	}
-	if int(cred.Uid) != d.ControlUID {
-		return fmt.Errorf("uid %d may not use the control socket", cred.Uid)
-	}
-	return nil
 }
 
 // Open creates a session from listeners root made inside a sandbox. It owns

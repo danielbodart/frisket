@@ -19,6 +19,11 @@
 # Each frisket step refuses to run out of turn, so a snippet that gets this
 # wrong fails the launch rather than leaving a session unsteered.
 #
+# The declarations are rootless: the launcher runs as whoever calls it, and
+# its hooks with it, so frisket's steps do too. The control socket answers
+# only `services.frisket.user`, so that is who runs these launchers -- the
+# person whose credentials the daemon holds.
+#
 # `frisket steer` also puts the session's own CA at /etc/frisket, on a
 # read-only tmpfs in the session's mount namespace: ca.crt, and ca-bundle.crt,
 # the host's roots with the CA after them. WHERE THE BUNDLE IS is frisket's to
@@ -33,6 +38,10 @@ let
   cfg = config.services.frisket;
   inherit (lib) mkOption types;
   control = "-control ${cfg.controlSocket}";
+  # Every step inside the session runs under this nsenter, in $userns, the
+  # user namespace that owns the session's: the hooks run as the caller, who
+  # is root only there. By store path, so no PATH decides which runs.
+  enter = "-userns \"$userns\" -nsenter ${lib.getExe' pkgs.util-linux "nsenter"}";
 
   steeringFile = name: s: pkgs.writeText "frisket-steering-${name}.json"
     (self.lib.steering ({ inherit (s) set; } // s.steering)).json;
@@ -107,15 +116,23 @@ in
     flong = lib.mapAttrs
       (name: s:
         let file = steeringFile name s; in {
+          # Rootless: the launcher, and every hook with it, runs as the user
+          # who called it, which is the daemon's user -- the one the control
+          # socket answers.
+          engine = "rootless";
+          # The control socket's directory is the one way into a session from
+          # outside, and no bind may reach it: a workload that could open the
+          # socket would steer sessions, its own included.
+          protect = [ (dirOf cfg.controlSocket) ];
           # frisket itself, and the nft and ip it runs inside the namespace,
           # resolved on the host before it enters.
           path = [ cfg.package pkgs.nftables pkgs.iproute2 ];
           # Listeners, handed over, the rules, and the session's CA in its
-          # mount namespace. A failure here ends the session: flong kills the
-          # scope of a hook that exits non-zero.
+          # mount namespace. A failure here ends the session: flong ends a
+          # session whose hook exits non-zero.
           postStart = lib.mkMerge [
             (lib.mkBefore ''
-              frisket steer ${control} -netns "$netns" -mntns "/proc/$leader/ns/mnt" \
+              frisket steer ${control} ${enter} -netns "$netns" -mntns "/proc/$leader/ns/mnt" \
                 -roots ${config.security.pki.caBundle} -steering ${file} \
                 -name "$machine" -policy ${if s.policyFile != null then ''"${s.policyFile}"'' else "/etc/frisket/policies/${s.policy}.json"} \
                 -param workspace="$workspace" ${paramFlags s}
@@ -124,7 +141,7 @@ in
             # namespace's session and its table is loaded before touching
             # anything.
             (lib.mkAfter ''
-              frisket connect ${control} -netns "$netns" -steering ${file} -name "$machine"
+              frisket connect ${control} ${enter} -netns "$netns" -steering ${file} -name "$machine"
             '')
           ];
           # Keyed on $machine alone, because on the sweep's path that is all

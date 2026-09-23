@@ -147,11 +147,14 @@ see into, at the real host, never an address of frisket's.
   to them: pointed at the CA alone, a client trusts the intercepted hosts and
   nothing else. Nothing is written on the host, so there is nothing to clean
   up: the mount goes with the namespace, however the session ends. It is
-  made after nspawn has built the container's filesystem and before the
+  made after flong has built the session's filesystem and before the
   payload starts — measured, the mount tree is complete by the time the hook
-  finds the leader — by root, in a namespace the initial user namespace owns,
-  so the workload can neither write through it nor unmount or remount it,
-  and a user namespace of its own gets it locked. A sandbox that cannot be
+  runs — by the session's own root, entered through the user namespace that
+  owns the session's, into a mount namespace where the workload holds no
+  capability, so it can neither write through it nor unmount or remount it,
+  and a user namespace of its own gets it locked. Entered, the tmpfs is made
+  after the setns, not before it: `fsopen` asks for `CAP_SYS_ADMIN` in the
+  owner of the caller's mount namespace, which outside is the host's. A sandbox that cannot be
   given its CA is closed rather than run distrusting it. Because trusting
   the CA is part of the mechanism, not a choice, the flong adapter also
   exports every variable the common runtimes read their roots from, pointing
@@ -268,12 +271,15 @@ the design wrong that was found by running it, and each gets a test:
 - **Cap concurrent connections per session.** Each one costs a host
   descriptor.
 - **`setns(CLONE_NEWNET)` needs `CAP_SYS_ADMIN` in two user namespaces** — the
-  one owning the target, and the caller's own. So the listeners are made by
-  root, in `frisket steer`, and never by the daemon: a non-root `serve` could
-  not make them even for a namespace it owns. Nor could it acquire the second,
-  since `setns(CLONE_NEWUSER)` refuses a multi-threaded caller and every Go
-  program is multi-threaded before `main` runs.
-- **The descriptors therefore cross two boundaries**, not one: root's helper
+  one owning the target, and the caller's own. So the listeners are made in
+  `frisket steer`, by a helper run under `nsenter --user --net` into the user
+  namespace that owns the sandbox's, where the launcher's user is root; and
+  never by the daemon, which could not acquire the second itself, since
+  `setns(CLONE_NEWUSER)` refuses a multi-threaded caller and every Go program
+  is multi-threaded before `main` runs (EINVAL, measured, even in `init()`;
+  frisket has no cgo to do it earlier). nft, ip and the CA's mount are
+  entered the same way.
+- **The descriptors therefore cross two boundaries**, not one: the helper
   makes them, and hands them to the daemon over the control socket. "Fork the
   helper and receive" is only the launcher-side half.
 - **If `setns` is ever done in-process, lock the thread and never unlock it.**
@@ -428,10 +434,11 @@ and the tier table is a target until they exist.
 
 ```
 flong      gives the sandbox a namespace and a hook around its lifecycle:
-             nspawn makes it; root enters it from the host once it is running
+             flong makes it, rootless; its hook enters it as the user who
+             launched it, root only in the sandbox's own user namespace
              (generic; knows nothing about frisket)
 
-steering   installed by root, in the sandbox's namespace, in this order:
+steering   installed by the hook, in the sandbox's namespace, in this order:
              listeners created inside the namespace, passed out to frisket
              policy routing and nftables steer the chosen set to them (TPROXY)
              only then is any egress provisioned -- so there is no race
@@ -453,25 +460,26 @@ frisket    on the host, four sockets per session; routes by destination:
 host                                         sandbox network namespace
 ----                                         -------------------------
 frisket serve                                nftables and policy routing
-  control.sock <-- root: open, close           (root, from the host, after start)
+  control.sock <-- the user: open, close       (the hook, from the host, after start)
   per session, in systemd's fd store:          mark, route to lo, tproxy --> 127.0.0.1
     listeners  -------- held from here, created in there ---------+---------+
     record (sealed memfd), with its CA's key     (one TCP, one DNS; the workload
                                                   has nothing of ours to talk to)
-frisket steer (root)  -- tmpfs, ro ----------> /etc/frisket: ca.crt, ca-bundle.crt
+frisket steer (entered) -- tmpfs, ro --------> /etc/frisket: ca.crt, ca-bundle.crt
                                                (sandbox mount namespace)
 ```
 
 ### Components
 
-**`frisket serve`** — the host daemon. A root-only control socket opens a
+**`frisket serve`** — the host daemon. A control socket that answers only its
+own user, and only from the host's user namespace, opens a
 session with a named policy and parameters, and closes it; closing one means
 closing its descriptors, or its namespace stays pinned. Its policies are data,
 written by the NixOS module: the allowlist and the routes, whose hosts are the
 intercepted names.
 
-**`frisket steer`** and **`frisket connect`** — the privileged half, run by
-root from a launcher's hook, in that order. `steer` enters the namespace,
+**`frisket steer`** and **`frisket connect`** — the half inside the sandbox,
+run by the launcher's hook, as the launcher's user, in that order. `steer` enters the namespace,
 creates the listeners, hands them to `serve`, installs the policy routing and
 the ruleset, and returns. It does not provision egress: `connect` does, and
 refuses unless everything before it is in place. One attrset produces both the

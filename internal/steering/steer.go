@@ -3,10 +3,12 @@ package steering
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -24,7 +26,7 @@ const (
 	CABundleFile = "ca-bundle.crt"
 )
 
-// Steerer runs root's steps. The zero value's seams are the real ones; tests
+// Steerer runs the launcher's steps. The zero value's seams are the real ones; tests
 // replace them to watch the order.
 type Steerer struct {
 	Helper  nsnet.Helper
@@ -42,7 +44,35 @@ func (s *Steerer) mountIn(mntns, dir string, files []nsmount.File) error {
 	if s.mount != nil {
 		return s.mount(mntns, dir, files)
 	}
+	if s.Helper.Rootless() {
+		return s.mountEntered(mntns, dir, files)
+	}
 	return nsmount.Attach(mntns, dir, files)
+}
+
+// mountEntered re-runs this executable as `nsmount` under nsenter, in the
+// user namespace that owns the sandbox's, with the files on its stdin: the
+// mount needs capabilities only that namespace can give a caller that is not
+// root, and a Go process cannot join it itself (nsnet.Helper).
+func (s *Steerer) mountEntered(mntns, dir string, files []nsmount.File) error {
+	exe := s.Helper.Exe
+	if exe == "" {
+		var err error
+		if exe, err = os.Executable(); err != nil {
+			return fmt.Errorf("finding this executable to re-run as nsmount: %w", err)
+		}
+	}
+	data, err := json.Marshal(files)
+	if err != nil {
+		return err
+	}
+	argv := append(s.Helper.Enter(""), exe, "nsmount", "-mntns", mntns, "-dir", dir)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdin = bytes.NewReader(data)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("nsmount: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (s *Steerer) openSet(ctx context.Context, args nsnet.HelperArgs) (*nsnet.Set, error) {

@@ -1,5 +1,8 @@
 # frisket in flong's real shape: a launcher from flong's own module, over a
-# container with privateNetwork, steered by nixosModules.flong.
+# container with privateNetwork, steered by nixosModules.flong -- run as it is
+# meant to be, by a lingering user through her own user manager, on a host
+# with no sudo at all. The launcher, its hooks and so frisket's steps all run
+# as her; root in the test is the driver, looking on and poking from outside.
 #
 # Two machines on the test VLAN and nothing else, so no real network is
 # needed: `machine` runs frisket and the sessions, `upstream` runs web servers
@@ -39,6 +42,13 @@ let
 
   # Says what it was asked, and with which Authorization, in its own journal
   # -- never in its answer, which goes back into the sandbox.
+  # Every session's first step, ahead of frisket's: where the test finds it.
+  # The leader is bwrap's child, the session's pid 1 as the host sees it.
+  mark = lib.mkOrder 100 ''
+    echo "$machine" > /tmp/last-session
+    echo "$leader" > /tmp/last-leader
+  '';
+
   https = pkgs.writeText "https.py" ''
     import http.server, socket, ssl
     class H(http.server.BaseHTTPRequestHandler):
@@ -132,8 +142,8 @@ in
     networking.interfaces.eth1.ipv4.addresses = [{ address = "203.0.113.10"; prefixLength = 24; }];
     networking.interfaces.eth1.ipv6.addresses = [{ address = "2001:db8:113::10"; prefixLength = 64; }];
 
-    # Run by root, and as the session's uid inside its namespace, to look at
-    # and poke at a session from outside it.
+    # Run by the driver, as root and as the session's uid inside its
+    # namespaces, to look at and poke at a session from outside it.
     environment.systemPackages = [ pkgs.nftables pkgs.curl pkgs.dnsutils pkgs.netcat pkgs.iproute2 pkgs.openssl ];
 
     # The host resolves through the upstream's DNS server: where the route's
@@ -147,9 +157,23 @@ in
     # file as an intercepted one, as a public host would in the field.
     security.pki.certificateFiles = [ "${certs}/ca.crt" ];
 
+    # No sudo rule can exist when there is no sudo.
+    security.sudo.enable = false;
+
     # The daemon runs as the user whose credentials it holds: a person, not a
     # DynamicUser. The token is theirs, in a directory only they can read.
-    users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; };
+    # She is also who launches, through her user manager, which lingers so
+    # the test need not log her in, and with the subordinate ids a session's
+    # other uids come from.
+    users.users.alice = {
+      isNormalUser = true;
+      uid = 1000;
+      group = "users";
+      linger = true;
+      autoSubUidGidRange = false;
+      subUidRanges = [{ startUid = 100000; count = 65536; }];
+      subGidRanges = [{ startGid = 100000; count = 65536; }];
+    };
     services.frisket = {
       user = "alice";
       group = "users";
@@ -193,7 +217,7 @@ in
       "d /srv/secrets 0700 alice users -"
     ];
 
-    # What a workload tries against what root installed. In the store, which
+    # What a workload tries against what the hook installed. In the store, which
     # every session can read, rather than quoted through three shells.
     environment.etc."frisket-tamper".source = pkgs.writeText "tamper.sh" ''
       nft list ruleset >/dev/null 2>&1 && echo listed
@@ -201,6 +225,9 @@ in
       # -r, so it holds every capability a new user namespace can give.
       unshare -Ur nft list ruleset >/dev/null 2>&1 && echo listed-from-userns
       unshare -Ur nft flush ruleset >/dev/null 2>&1 && echo flushed-from-userns
+      # The adapter protects its directory from every bind, and the
+      # session's /run is its own.
+      [ -e /run/frisket/control.sock ] && echo control-visible
       echo attempted
       curl -sS -m 5 http://allowed.test/
     '';
@@ -258,7 +285,7 @@ in
       workspace = "realpath /srv/work";
       command = [ "bash" "-c" ];
       # Ahead of frisket's own steps, so the test can find the session.
-      postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+      postStart = mark;
     };
     services.frisket.flong.strict.policy = "test";
 
@@ -272,12 +299,14 @@ in
       workspace = "realpath /srv/work";
       command = [ "bash" "-c" ];
       postStart = lib.mkMerge [
-        (lib.mkOrder 100 ''
-          echo "$machine" > /tmp/last-session
+        mark
+        (lib.mkOrder 101 ''
           # In the session's own mount namespace as well as its network one,
           # so names resolve as they do in there -- through frisket -- and
           # not through the host's nscd, which resolves outside the sandbox.
-          ${pkgs.util-linux}/bin/nsenter --target="$leader" --mount --net \
+          # Entered through the user namespace that owns the session's, as
+          # the caller that the hook is, then dropped to the session's uid.
+          ${pkgs.util-linux}/bin/nsenter --user="$userns" --net="$netns" --mount="/proc/$leader/ns/mnt" \
             ${pkgs.util-linux}/bin/setpriv --reuid=1000 --regid=100 --clear-groups \
             ${pkgs.writeShellScript "probe" ''
               end=$(( $(${pkgs.coreutils}/bin/date +%s) + 4 ))
@@ -323,7 +352,7 @@ in
       user = "alice";
       workspace = "realpath /srv/work";
       command = [ "bash" "-c" ];
-      postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+      postStart = mark;
     };
     services.frisket.flong.badpolicy.policy = "nonesuch";
 
@@ -335,7 +364,7 @@ in
       workspace = "realpath /srv/work";
       command = [ "bash" "-c" ];
       network = { };
-      postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+      postStart = mark;
     };
     services.frisket.flong.networked = { policy = "test"; set = "service"; };
 
@@ -346,7 +375,7 @@ in
       workspace = "realpath /srv/work";
       command = [ "bash" "-c" ];
       network = { };
-      postStart = lib.mkOrder 100 ''echo "$machine" > /tmp/last-session'';
+      postStart = mark;
     };
     services.frisket.flong.trusted = { policy = "trusted"; set = "service"; };
   };
@@ -380,6 +409,22 @@ in
           machine.succeed(f"echo {t} > /srv/secrets/token.new && chown alice:users /srv/secrets/token.new "
                           "&& chmod 0600 /srv/secrets/token.new && mv -f /srv/secrets/token.new /srv/secrets/token")
 
+      # A command as alice, through her own user manager, with an explicit
+      # PATH and the workspace as the current directory. `sudo` is nowhere
+      # in it.
+      def as_user(script):
+          inner = "export PATH=/run/wrappers/bin:/run/current-system/sw/bin; cd /srv/work; " + script
+          return ("systemd-run -M alice@ --user --wait --pipe --quiet --collect "
+                  f"--expand-environment=no -- /run/current-system/sw/bin/bash -c {shlex.quote(inner)} </dev/null")
+
+      # The control socket's own user, and nobody else, may use it.
+      def as_alice(cmd):
+          return f"runuser -u alice -- {cmd}"
+
+      # Where a session's record is while it lives: gone, the session and its
+      # postStop are done.
+      state = "/run/user/1000/flong/sessions"
+
       start_all()
       write_token(token)
       upstream.wait_for_unit("upstream.service")
@@ -387,6 +432,7 @@ in
       upstream.wait_for_unit("dnsmasq.service")
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("frisket.service")
+      machine.wait_for_unit("user@1000.service")
       # Both families reach the upstream from the host, which is where
       # frisket dials from. v6 waits out duplicate address detection.
       machine.wait_until_succeeds("curl -sSf -m 2 ${url4}")
@@ -417,7 +463,7 @@ in
           return machine.succeed("cat /tmp/last-session").strip()
 
       def sessions():
-          out = machine.succeed("${frisket} sessions")
+          out = machine.succeed(as_alice("${frisket} sessions"))
           return [json.loads(l) for l in out.splitlines() if l.strip()]
 
       def stored():
@@ -429,24 +475,28 @@ in
       def daemon_fds(pid):
           return int(machine.succeed(f"ls /proc/{pid}/fd | wc -l").strip())
 
+      def last_leader():
+          return machine.succeed("cat /tmp/last-leader").strip()
+
+      def gone(name):
+          machine.wait_until_succeeds(f"test ! -e {state}/{name}")
+
       # A session held open, so a test can act on it from outside -- as root,
       # or as the session's uid inside its network namespace, which for
       # networking is exactly what the workload is. Released by a file in the
       # workspace, which the session and the test share.
       def hold(launcher, ready, script="true"):
-          machine.succeed("rm -f /srv/work/release /tmp/last-session")
+          machine.succeed("rm -f /srv/work/release /tmp/last-session /tmp/last-leader")
           payload = shlex.quote(f"{script}; while [ ! -e release ]; do sleep 0.1; done")
-          machine.succeed(f"{launcher} {payload} >/tmp/hold.out 2>&1 &")
-          machine.wait_until_succeeds("test -s /tmp/last-session")
-          name = last_session()
-          machine.wait_until_succeeds(f"machinectl show {name} -P Leader")
-          leader = machine.succeed(f"machinectl show {name} -P Leader").strip()
+          machine.succeed(f"{as_user(f'{launcher} {payload}')} >/tmp/hold.out 2>&1 &")
+          machine.wait_until_succeeds("test -s /tmp/last-leader")
+          name, leader = last_session(), last_leader()
           machine.wait_until_succeeds(as_root(leader, ready))
           return name, leader
 
       def release(name):
           machine.succeed("touch /srv/work/release")
-          machine.wait_until_fails(f"machinectl show {name}")
+          gone(name)
 
       def as_root(leader, cmd):
           return f"nsenter --net=/proc/{leader}/ns/net sh -c {shlex.quote(cmd)}"
@@ -455,8 +505,12 @@ in
       # namespace -- its files, its resolv.conf, the CA bound in at
       # /etc/frisket/ca.crt -- because a lookup made with the host's files
       # goes through the host's nscd, which resolves outside the sandbox.
+      # And its user namespace: alice's uid 1000 in the host's owns the
+      # session's user namespaces, and so holds every capability over its
+      # mounts whatever her capability sets say. The caller may; the
+      # workload, uid 1000 in the innermost, may not.
       def as_workload(leader, cmd):
-          return (f"nsenter --target={leader} --mount --net setpriv --reuid=1000 --regid=100 "
+          return (f"nsenter --target={leader} --user --mount --net setpriv --reuid=1000 --regid=100 "
                   f"--clear-groups -- sh -c {shlex.quote(cmd)}")
 
       def handle(leader, chain, pattern):
@@ -472,23 +526,30 @@ in
           status, out = machine.execute(cmd)
           return status, out, time.monotonic() - t
 
-      with subtest("the daemon runs as its user, hardened, behind a socket only root can use"):
+      with subtest("the daemon runs as its user, hardened, behind a socket only that user can use"):
           props = machine.succeed(
               "systemctl show -p User -p DynamicUser -p ProtectSystem -p NotifyAccess "
               "-p FileDescriptorStorePreserve frisket.service")
           for want in ["User=alice", "DynamicUser=no", "ProtectSystem=strict",
                        "NotifyAccess=main", "FileDescriptorStorePreserve=restart"]:
               assert want in props, props
-          assert machine.succeed("stat -c '%U %a' /run/frisket/control.sock").strip() == "root 600"
-          # Not even the daemon's own user.
-          machine.fail("su alice -s /bin/sh -c '${frisket} sessions'")
+          assert machine.succeed("stat -c '%U %a' /run/frisket/control.sock").strip() == "alice 600"
+          machine.succeed(as_alice("${frisket} sessions"))
+          # Not root, whom no file mode stops, and not alice from a user
+          # namespace of her own, where SO_PEERCRED still says uid 1000: a
+          # session's workload is that, and the namespace tells it apart.
+          assert "uid 0 may not use" in machine.fail("${frisket} sessions 2>&1")
+          out = machine.fail(as_alice("unshare --user --map-current-user ${frisket} sessions 2>&1"))
+          assert "another user namespace" in out, out
+          [r] = lines_of("control refused")[-1:]
+          assert "another user namespace" in r["error"], r
           assert stored() == 0
           # It keeps nothing on disk: a session's CA is made when it opens,
           # and kept only in the daemon and the session's sealed record.
           machine.fail("test -e /var/lib/frisket")
 
       with subtest("a session is steered, and every connection logged once with where it was going"):
-          out = machine.succeed("${strict} 'curl -sS -m 5 -4 http://allowed.test/; curl -sS -m 5 -6 http://allowed.test/'")
+          out = machine.succeed(as_user("${strict} 'curl -sS -m 5 -4 http://allowed.test/; curl -sS -m 5 -6 http://allowed.test/'"))
           assert out.count("upstream-body") == 2, out
           name = last_session()
           for dst in ["${upstream4}:80", "[${upstream6}]:80"]:
@@ -504,7 +565,7 @@ in
           assert closed["descriptors"] == 5, closed
 
       with subtest("nothing is reachable before the rules land, and everything after is steered"):
-          machine.succeed("${probed} 'sleep 4'")
+          machine.succeed(as_user("${probed} 'sleep 4'"))
           name = last_session()
           # The prober is done: it stops by itself four seconds in, and the
           # session's teardown stops it if it has not.
@@ -606,7 +667,7 @@ in
           machine.succeed(as_root(leader, f"nft delete rule inet frisket steer handle {h}"))
 
       with subtest("a steered packet with no socket to take it is refused at once, not dropped"):
-          machine.succeed(f"${frisket} close -name {name}")
+          machine.succeed(as_alice(f"${frisket} close -name {name}"))
           # TCP, both families. A datagram's ICMP error fails a connected
           # client as fast (measured), but dig does not act on one -- it waits
           # out its own timeout either way -- so it proves nothing here.
@@ -659,10 +720,14 @@ in
           mnt = machine.succeed(f"grep ' /etc/frisket ' /proc/{leader}/mountinfo")
           assert " - tmpfs " in mnt and " ro," in mnt, mnt
           machine.fail("grep -q ' /etc/frisket ' /proc/self/mountinfo")
-          # Public, so readable whatever uid the workload runs as: root's,
-          # 0755 and 0644, and read here by a uid that is not the workload's.
-          assert machine.succeed(f"stat -c '%u %a' {inside} {inside}/ca.crt {inside}/ca-bundle.crt").split() == \
+          # Public, so readable whatever uid the workload runs as: root's as
+          # the session sees it -- the session's root made them, which on the
+          # host is alice's first subordinate id -- 0755 and 0644, and read
+          # here by a uid that is not the workload's.
+          assert machine.succeed(f"nsenter --target={leader} --user --mount stat -c '%u %a' "
+                                 "/etc/frisket /etc/frisket/ca.crt /etc/frisket/ca-bundle.crt").split() == \
               ["0", "755", "0", "644", "0", "644"]
+          assert machine.succeed(f"stat -c %u {inside}").strip() == "100000"
           for f in ["ca.crt", "ca-bundle.crt"]:
               machine.succeed(f"nsenter --target={leader} --mount setpriv --reuid=1001 --regid=100 "
                               f"--clear-groups -- cat /etc/frisket/{f} | grep -q 'BEGIN CERTIFICATE'")
@@ -904,18 +969,18 @@ in
           upstream.succeed("journalctl -u moved-dns -o cat | grep -qF 'query[A] allowed.test'")
           release(name)
 
-      with subtest("the workload cannot list the ruleset, even after unshare -U"):
-          out = machine.succeed("${strict} \"bash $(readlink -f /etc/frisket-tamper)\" 2>&1")
+      with subtest("the workload cannot list the ruleset, even after unshare -U, nor see the control socket"):
+          out = machine.succeed(as_user("${strict} \"bash $(readlink -f /etc/frisket-tamper)\" 2>&1"))
           lines = out.split()
           assert "attempted" in lines, out
-          for bad in ["listed", "flushed", "listed-from-userns", "flushed-from-userns"]:
+          for bad in ["listed", "flushed", "listed-from-userns", "flushed-from-userns", "control-visible"]:
               assert bad not in lines, out
           # And it is still steered afterwards.
           assert "upstream-body" in out, out
 
       with subtest("a session with a policy the daemon does not have never runs"):
-          err = machine.fail("${badpolicy} 'echo ran' 2>&1")
-          assert "ran" not in err.split(), err
+          err = machine.succeed(as_user("${badpolicy} 'echo ran' 2>&1; echo rc=$?"))
+          assert "ran" not in err.split() and err.split()[-1] != "rc=0", err
           assert "nonesuch" in err, err
           name = last_session()
           wait_log("session refused", name, lambda m: True, "the refusal")
@@ -924,14 +989,15 @@ in
 
       with subtest("a session survives the daemon restarting, through the fd store"):
           machine.succeed("rm -f /srv/work/*")
-          machine.succeed("${strict} \"bash $(readlink -f /etc/frisket-long)\" >/tmp/long.out 2>&1 &")
+          long = as_user("${strict} \"bash $(readlink -f /etc/frisket-long)\"")
+          machine.succeed(f"{long} >/tmp/long.out 2>&1 &")
           machine.wait_until_succeeds("test -e /srv/work/started")
           name = last_session()
           [s] = [s for s in sessions() if s["name"] == name]
           assert s["descriptors"] == 5 and not s["restored"], s
           assert stored() == 5
           # Root, from outside, still sees what the workload could not list.
-          leader = machine.succeed(f"machinectl show {name} -P Leader").strip()
+          leader = last_leader()
           machine.succeed(f"nsenter --net=/proc/{leader}/ns/net nft list table inet frisket")
 
           first = main_pid()
@@ -961,8 +1027,8 @@ in
           pid = main_pid()
           held = daemon_fds(pid)
           machine.succeed("touch /srv/work/release")
-          machine.wait_until_fails(f"machinectl show {name}")
-          machine.wait_until_succeeds(f"! ${frisket} sessions | grep -q {name}")
+          gone(name)
+          machine.wait_until_succeeds(f"! {as_alice('${frisket} sessions')} | grep -q {name}")
           assert stored() == 0, stored()
           # At least its five: the last session under a document takes what
           # the document built -- its credential watchers, its upstream

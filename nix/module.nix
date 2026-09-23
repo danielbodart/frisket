@@ -319,10 +319,12 @@ in
       default = "frisket";
       example = "alice";
       description = ''
-        Who the daemon runs as: the user whose credentials it holds. Not a
-        DynamicUser, because it has to read that user's credential files. The
-        default creates a system user of that name, for a frisket that holds
-        no credential yet.
+        Who the daemon runs as: the user whose credentials it holds, and the
+        one user whose launchers may steer sessions to it -- they run as the
+        caller, and the control socket answers only this user. Not a
+        DynamicUser, because it has to read that user's credential files.
+        The default creates a system user of that name, for a frisket that
+        holds no credential yet.
       '';
     };
 
@@ -336,10 +338,12 @@ in
       type = types.path;
       default = "/run/frisket/control.sock";
       description = ''
-        Where root's `frisket steer`, `connect` and `close` reach the daemon.
-        Made by a socket unit, root-owned and 0600: the daemon is not root and
-        cannot make the socket root's itself, and it also refuses any peer that
-        is not uid 0. Never bound into a sandbox.
+        Where a launcher's `frisket steer`, `connect` and `close` reach the
+        daemon. Made by a socket unit, `user`'s and 0600, and the daemon
+        refuses any peer that is not `user` in the host's user namespace: a
+        sandbox's workload runs as the same host uid, and the namespace is
+        what tells it apart. Never bound into a sandbox; the flong adapter
+        protects its directory from every bind.
       '';
     };
 
@@ -507,16 +511,18 @@ in
     };
     users.groups = lib.mkIf (cfg.group == "frisket") { frisket = { }; };
 
-    # ROOT'S SOCKET, HELD BY A USER. The daemon is not root, so anything it
-    # created would be its own; systemd makes the socket instead, root-owned
-    # and 0600, and passes it in by name.
+    # THE USER'S SOCKET, MADE BY SYSTEMD. The launchers that steer sessions
+    # run as the user whose credentials the daemon holds -- the daemon's own
+    # user -- so the socket is theirs and 0600. systemd makes it rather than
+    # the daemon so that it exists, with that mode, before the daemon does,
+    # and outlives a restart; its directory stays root's.
     systemd.sockets.frisket = {
       description = "frisket control socket";
       wantedBy = [ "sockets.target" ];
       socketConfig = {
         ListenSequentialPacket = cfg.controlSocket;
-        SocketUser = "root";
-        SocketGroup = "root";
+        SocketUser = cfg.user;
+        SocketGroup = cfg.group;
         SocketMode = "0600";
         DirectoryMode = "0755";
         FileDescriptorName = "control";
@@ -563,7 +569,7 @@ in
 
         # Everything else it could reach, taken away. It dials out from the
         # host's network namespace, so the network stays; it receives
-        # sockets from root, so AF_UNIX stays.
+        # sockets from the launchers, so AF_UNIX stays.
         UMask = "0077";
         ProtectSystem = "strict";
         ProtectHome = "read-only";

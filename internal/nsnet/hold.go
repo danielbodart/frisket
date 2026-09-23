@@ -26,6 +26,31 @@ type Helper struct {
 	// ExecVerb is the subcommand that dispatches to RunExec. Empty means
 	// "nsexec".
 	ExecVerb string
+	// Userns is the user namespace that owns the sandbox's namespaces, for a
+	// caller that is not root: every step that enters the sandbox is then
+	// re-run under Nsenter, which joins Userns, and the sandbox's network
+	// namespace with it, before the step starts. Go cannot do that itself:
+	// setns(CLONE_NEWUSER) refuses a multi-threaded caller, and a Go program
+	// is multi-threaded before main runs -- init() included -- and frisket is
+	// built without cgo, so there is no constructor to do it earlier either.
+	// Empty is a root caller, which enters with setns directly.
+	Userns string
+	// Nsenter is util-linux's nsenter, by absolute path: resolved on the host
+	// by whoever configured it, never looked up here.
+	Nsenter string
+}
+
+// Rootless says the sandbox is entered through Nsenter.
+func (h Helper) Rootless() bool { return h.Userns != "" }
+
+// Enter is the argv prefix that runs a program in Userns and, when netns is
+// not empty, in that network namespace too.
+func (h Helper) Enter(netns string) []string {
+	w := []string{h.Nsenter, "--user=" + h.Userns}
+	if netns != "" {
+		w = append(w, "--net="+netns)
+	}
+	return append(w, "--")
 }
 
 func (h Helper) argv(args HelperArgs) ([]string, error) {
@@ -39,6 +64,13 @@ func (h Helper) argv(args HelperArgs) ([]string, error) {
 	verb := h.Verb
 	if verb == "" {
 		verb = "helper"
+	}
+	if h.Rootless() {
+		// nsenter has joined the network namespace already, so the helper
+		// stays where it starts.
+		netns := args.Netns
+		args.Netns = ""
+		return append(append(h.Enter(netns), exe, verb), args.flags()...), nil
 	}
 	return append([]string{exe, verb}, args.flags()...), nil
 }

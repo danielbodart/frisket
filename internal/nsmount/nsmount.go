@@ -8,11 +8,13 @@
 // becomes inside the sandbox -- so it goes when the sandbox's namespace does,
 // however the session ends, with nothing to clean up.
 //
-// The mount is made by root, in a mount namespace owned by the initial user
-// namespace. So the workload cannot unmount it, remount it writable, or
-// write through it; and a user namespace it makes of its own gets the mount
-// locked, as the kernel locks every mount it inherits from a more privileged
-// namespace. Measured: in a flong session, every one of those refused.
+// The mount is made from outside the workload's reach: by root, in a mount
+// namespace the initial user namespace owns, or -- rootless, entered as below
+// -- by the session's own root, in a mount namespace owned by a user namespace
+// nested inside it, where the workload holds no capability. Either way the
+// workload cannot unmount it, remount it writable, or write through it; and a
+// user namespace it makes of its own gets the mount locked, as the kernel
+// locks every mount it inherits from a more privileged namespace.
 package nsmount
 
 import (
@@ -44,13 +46,8 @@ const nsGetNSType = 0xb703
 // It refuses the caller's own mount namespace: the mount would land on the
 // host.
 func Attach(mntns, dir string, files []File) error {
-	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" {
-		return fmt.Errorf("nsmount: %q is not an absolute directory to mount at", dir)
-	}
-	for _, f := range files {
-		if f.Name == "" || f.Name == "." || f.Name == ".." || strings.ContainsRune(f.Name, '/') {
-			return fmt.Errorf("nsmount: %q is not a file name", f.Name)
-		}
+	if err := check(dir, files); err != nil {
+		return err
 	}
 	ns, err := openMountNamespace(mntns)
 	if err != nil {
@@ -63,19 +60,79 @@ func Attach(mntns, dir string, files []File) error {
 		return err
 	}
 	defer unix.Close(tree)
+	return onThreadOfItsOwn(func() error {
+		if err := enter(ns); err != nil {
+			return err
+		}
+		return attachHere(tree, dir)
+	})
+}
 
-	// ONE THREAD ENTERS, AND IS NEVER GIVEN BACK. setns into a mount namespace
-	// refuses a thread that shares its filesystem context, and every thread
-	// of a Go process does; unsharing CLONE_FS gives this one its own. It is
-	// locked and never unlocked, so the runtime retires it when the goroutine
-	// ends rather than handing a thread that is in the sandbox's namespace to
-	// something else.
+// AttachEntered is Attach for a caller that is not root, run under
+// `nsenter --user` into the user namespace that owns the sandbox's: it makes
+// the tmpfs AFTER entering the mount namespace, where Attach makes it before.
+// fsopen asks for CAP_SYS_ADMIN in the user namespace that owns the CALLER's
+// mount namespace -- the host's, still, for a caller that has entered only
+// the user namespace, and there it has none. Inside, the owner is the
+// sandbox's, where it has every capability.
+func AttachEntered(mntns, dir string, files []File) error {
+	if err := check(dir, files); err != nil {
+		return err
+	}
+	ns, err := openMountNamespace(mntns)
+	if err != nil {
+		return err
+	}
+	defer ns.Close()
+	return onThreadOfItsOwn(func() error {
+		if err := enter(ns); err != nil {
+			return err
+		}
+		tree, err := filled(files)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(tree)
+		return attachHere(tree, dir)
+	})
+}
+
+func check(dir string, files []File) error {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" {
+		return fmt.Errorf("nsmount: %q is not an absolute directory to mount at", dir)
+	}
+	for _, f := range files {
+		if f.Name == "" || f.Name == "." || f.Name == ".." || strings.ContainsRune(f.Name, '/') {
+			return fmt.Errorf("nsmount: %q is not a file name", f.Name)
+		}
+	}
+	return nil
+}
+
+// onThreadOfItsOwn runs fn on a thread that is locked and NEVER GIVEN BACK.
+// setns into a mount namespace refuses a thread that shares its filesystem
+// context, and every thread of a Go process does; enter unshares CLONE_FS to
+// give this one its own. It is never unlocked, so the runtime retires it when
+// the goroutine ends rather than handing a thread that is in the sandbox's
+// namespace to something else.
+func onThreadOfItsOwn(fn func() error) error {
 	done := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
-		done <- attachInside(int(ns.Fd()), tree, dir)
+		done <- fn()
 	}()
 	return <-done
+}
+
+// enter moves this thread into the mount namespace ns.
+func enter(ns *os.File) error {
+	if err := unix.Unshare(unix.CLONE_FS); err != nil {
+		return fmt.Errorf("nsmount: unshare CLONE_FS: %w", err)
+	}
+	if err := unix.Setns(int(ns.Fd()), unix.CLONE_NEWNS); err != nil {
+		return fmt.Errorf("nsmount: entering the mount namespace: %w", err)
+	}
+	return nil
 }
 
 // openMountNamespace opens path and checks it is a mount namespace, and not
@@ -169,15 +226,8 @@ func writeFile(tree int, f File) error {
 	return file.Close()
 }
 
-// attachInside runs on a locked thread of its own: it enters the namespace
-// and attaches tree at dir there.
-func attachInside(ns, tree int, dir string) error {
-	if err := unix.Unshare(unix.CLONE_FS); err != nil {
-		return fmt.Errorf("nsmount: unshare CLONE_FS: %w", err)
-	}
-	if err := unix.Setns(ns, unix.CLONE_NEWNS); err != nil {
-		return fmt.Errorf("nsmount: entering the mount namespace: %w", err)
-	}
+// attachHere attaches tree at dir in this thread's mount namespace.
+func attachHere(tree int, dir string) error {
 	// Resolved inside, with no symlink followed anywhere on the way: a link
 	// in the sandbox's root pointing out of the directory is not followed to
 	// wherever it points. The workload has not started yet, so nothing of its

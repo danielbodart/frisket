@@ -70,6 +70,10 @@ func Command(ctx context.Context, h Helper, netns, program string, args ...strin
 	if path, err = filepath.Abs(path); err != nil {
 		return nil, err
 	}
+	if h.Rootless() {
+		argv := append(append(h.Enter(netns), path), args...)
+		return exec.CommandContext(ctx, argv[0], argv[1:]...), nil
+	}
 	exe := h.Exe
 	if exe == "" {
 		if exe, err = os.Executable(); err != nil {
