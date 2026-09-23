@@ -31,6 +31,13 @@ jobs:
       # Nix build sandbox is itself a user namespace and nesting works inside
       # it -- measured -- and where it does not, those tests skip rather than
       # fail, so this check means less on such a machine but never lies.
+      #
+      # Ubuntu's runners are such a machine: AppArmor lets an unprivileged
+      # user namespace be made and then refuses every capability in it. Lifted
+      # here, so the namespace tests run rather than skip.
+      - name: Let unprivileged user namespaces hold capabilities
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: nix flake check
         run: nix flake check --print-build-logs
 

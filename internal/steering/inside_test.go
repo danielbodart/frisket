@@ -18,8 +18,21 @@ import (
 // namespace of its own, where it can make what steer and connect make.
 const roleInside = "frisket-test-inside"
 
+// exitUnprivileged is the re-run's exit when the namespace grants it nothing:
+// Ubuntu's AppArmor, with kernel.apparmor_restrict_unprivileged_userns, lets
+// an unprivileged user namespace be made and then refuses every capability
+// in it, so bringing lo up is refused.
+const exitUnprivileged = 77
+
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == roleInside {
+		if err := loUp(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, syscall.EPERM) {
+				os.Exit(exitUnprivileged)
+			}
+			os.Exit(1)
+		}
 		if err := stepsInside(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -44,6 +57,9 @@ func TestTheStepsAreWhatConnectChecksFor(t *testing.T) {
 	if err != nil && !errors.As(err, &exit) {
 		t.Skipf("cannot create a user+network namespace to make them in: %v", err)
 	}
+	if exit != nil && exit.ExitCode() == exitUnprivileged {
+		t.Skipf("a user+network namespace, but no privilege in it: %s", out)
+	}
 	if err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
@@ -65,14 +81,20 @@ func serveJSON(r request, result any) error {
 	return json.Unmarshal(b, result)
 }
 
-func stepsInside() error {
+// loUp brings lo up: the first thing made in the namespace, and so where one
+// that grants nothing says so.
+func loUp() error {
 	lo, err := netlink.LinkByName("lo")
 	if err != nil {
 		return err
 	}
 	if err := netlink.LinkSetUp(lo); err != nil {
-		return err
+		return fmt.Errorf("bringing lo up: %w", err)
 	}
+	return nil
+}
+
+func stepsInside() error {
 	p, err := allFile().Plan()
 	if err != nil {
 		return err
