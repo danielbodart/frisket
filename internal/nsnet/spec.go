@@ -4,7 +4,8 @@
 // A socket belongs to the namespace it was created in, not to the process
 // holding it. That is the whole mechanism frisket rests on: a privileged helper
 // enters the sandbox's namespace, creates the listeners there, passes the
-// descriptors out over SCM_RIGHTS and exits. Everything frisket does afterwards
+// descriptors out over SCM_RIGHTS, does the rest of its step's work in there,
+// and exits. Everything frisket does afterwards
 // -- every upstream dial -- happens in the host's namespace, because frisket
 // itself never moved.
 //

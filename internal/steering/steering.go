@@ -256,57 +256,54 @@ func ifname(s string) bool {
 	return true
 }
 
-// RoutingBatch is the `ip -batch` input, for one family, that turns a marked
-// packet back onto loopback: a rule sending the mark to the plan's table, and
-// a table whose only route is `local default dev lo`. The output hook's route
-// chain re-routes on the mark, the packet goes to lo, and prerouting's tproxy
-// hands it to frisket's socket with its destination untouched.
+// RoutingSteps are the steps, for one family, that turn a marked packet back
+// onto loopback: a rule sending the mark to the plan's table, and a table
+// whose only route is `local default dev lo`. The output hook's route chain
+// re-routes on the mark, the packet goes to lo, and prerouting's tproxy hands
+// it to frisket's socket with its destination untouched.
 //
-// Per family, because a rule has no address to infer one from: `ip rule add`
-// with no -6 is IPv4 alone. Spelt 0.0.0.0/0 and ::/0 for the same reason
-// `default` is avoided below.
+// Per family, because a rule has no address to infer one from.
 //
-// WITHOUT IT THE `service` SET FAILS OPEN, which is why the ruleset also drops
-// anything marked that leaves by any interface but lo: measured, with the rule
-// deleted, a steered DNS query left the sandbox through its real network
-// unsteered, and with the guard in place it was refused at send.
-func (p *Plan) RoutingBatch(v6 bool) string {
-	dst := "0.0.0.0/0"
+// WITHOUT THEM THE `service` SET FAILS OPEN, which is why the ruleset also
+// drops anything marked that leaves by any interface but lo: measured, with
+// the rule deleted, a steered DNS query left the sandbox through its real
+// network unsteered, and with the guard in place it was refused at send.
+func (p *Plan) RoutingSteps(v6 bool) []Step {
+	dst := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
 	if v6 {
-		dst = "::/0"
+		dst = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
 	}
-	return fmt.Sprintf("rule add fwmark %d lookup %d\nroute add local %s dev lo table %d\n", p.Mark, p.RouteTable, dst, p.RouteTable)
+	return []Step{
+		{Kind: kindRule, V6: v6, Mark: p.Mark, Table: p.RouteTable},
+		{Kind: kindRoute, Local: true, Prefix: dst, Dev: "lo", Table: p.RouteTable},
+	}
 }
 
-// ConnectBatch is the `ip -batch` input connect runs: the service address on
-// lo, and for `all` the dummy interface, its addresses and -- LAST, because
-// they are the egress -- its default routes.
+// ConnectSteps are what connect does: the service address on lo, and for
+// `all` the dummy interface, its addresses and -- LAST, because they are the
+// egress -- its default routes.
 //
 // The service address goes on lo so that a missing rule fails closed: a
 // connection to it that nothing steered is refused by the sandbox's own
 // loopback, rather than routed out through whatever egress exists (measured).
-func (p *Plan) ConnectBatch() string {
-	var b strings.Builder
+func (p *Plan) ConnectSteps() []Step {
+	var steps []Step
 	for _, a := range p.Service {
-		fmt.Fprintf(&b, "address add %s dev lo\n", netip.PrefixFrom(a, a.BitLen()))
+		steps = append(steps, Step{Kind: kindAddress, Prefix: netip.PrefixFrom(a, a.BitLen()), Dev: "lo"})
 	}
 	if p.Set != control.SetAll {
-		return b.String()
+		return steps
 	}
-	fmt.Fprintf(&b, "link add %s type dummy\n", p.Interface)
+	steps = append(steps, Step{Kind: kindDummy, Dev: p.Interface})
 	for _, a := range p.Addresses {
-		fmt.Fprintf(&b, "address add %s dev %s", netip.PrefixFrom(a, a.BitLen()), p.Interface)
-		if a.Is6() {
-			// Or the address is tentative for the length of duplicate
-			// address detection, and a v6 client in that window picks no
-			// source at all.
-			b.WriteString(" nodad")
-		}
-		b.WriteString("\n")
+		// Or a v6 address is tentative for the length of duplicate address
+		// detection, and a v6 client in that window picks no source at all.
+		steps = append(steps, Step{Kind: kindAddress, Prefix: netip.PrefixFrom(a, a.BitLen()), Dev: p.Interface, NoDAD: a.Is6()})
 	}
-	fmt.Fprintf(&b, "link set %s up\n", p.Interface)
-	// Spelt as prefixes, because `default` means IPv4 alone.
-	fmt.Fprintf(&b, "route add 0.0.0.0/0 dev %s\n", p.Interface)
-	fmt.Fprintf(&b, "route add ::/0 dev %s\n", p.Interface)
-	return b.String()
+	steps = append(steps, Step{Kind: kindUp, Dev: p.Interface})
+	// One per family: the dummy is the way out for both.
+	for _, dst := range []netip.Prefix{netip.PrefixFrom(netip.IPv4Unspecified(), 0), netip.PrefixFrom(netip.IPv6Unspecified(), 0)} {
+		steps = append(steps, Step{Kind: kindRoute, Prefix: dst, Dev: p.Interface})
+	}
+	return steps
 }

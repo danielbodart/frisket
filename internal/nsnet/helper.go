@@ -30,8 +30,8 @@ type Manifest struct {
 	// Specs are in descriptor order. The holder matches them positionally.
 	Specs []string `json:"specs"`
 
-	// Helper is the pid that created them, already gone by the time this is
-	// read. Recorded for the log, so a failed session can be found in a journal.
+	// Helper is the pid that created them. Recorded for the log, so a failed
+	// session can be found in a journal.
 	Helper int `json:"helper"`
 }
 
@@ -39,8 +39,8 @@ type Manifest struct {
 // and the side that parses it so the two cannot drift.
 type HelperArgs struct {
 	Netns     string        // path to a network namespace; empty means "stay here"
-	Specs     []Spec        // the listeners to create
-	LoTimeout time.Duration // how long to wait for lo to come up
+	Specs     []Spec        // the listeners to create, if any
+	LoTimeout time.Duration // how long to wait for lo to come up, if there are any
 
 	// Isolated refuses a namespace that already has any interface besides lo.
 	// See requireIsolated: it is the first half of the ordering, checked from
@@ -49,7 +49,10 @@ type HelperArgs struct {
 }
 
 func (a HelperArgs) flags() []string {
-	args := []string{"-spec", FormatSpecs(a.Specs), "-lo-timeout", a.LoTimeout.String()}
+	args := []string{"-lo-timeout", a.LoTimeout.String()}
+	if len(a.Specs) > 0 {
+		args = append(args, "-spec", FormatSpecs(a.Specs))
+	}
 	if a.Netns != "" {
 		args = append(args, "-net", a.Netns)
 	}
@@ -58,6 +61,10 @@ func (a HelperArgs) flags() []string {
 	}
 	return args
 }
+
+// Serve answers one request, inside the namespace, on the thread that entered
+// it. What the requests are is the caller's business: nsnet only carries them.
+type Serve func(req json.RawMessage) (result any, err error)
 
 // RunHelper is the privileged half, and the only code in frisket that ever
 // changes namespace. It runs as a FORKED PROCESS rather than a goroutine, and
@@ -68,9 +75,11 @@ func (a HelperArgs) flags() []string {
 // process that exits cannot do that to us.
 //
 // It enters the namespace, waits for lo, creates the listeners, sends them back
-// over HelperFD with a manifest, and returns. Anything that fails must fail the
-// whole session: a session with some of its listeners is a session with a hole.
-func RunHelper(argv []string, stderr io.Writer) error {
+// over HelperFD with a manifest, and then answers requests with serve, from
+// inside, until the other end closes: one entry per step, however much the
+// step does in there. Anything that fails must fail the whole session: a
+// session with some of its listeners is a session with a hole.
+func RunHelper(argv []string, stderr io.Writer, serve Serve) error {
 	fs := flag.NewFlagSet("helper", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	netns := fs.String("net", "", "path to the network namespace to enter; empty stays in this one")
@@ -80,15 +89,19 @@ func RunHelper(argv []string, stderr io.Writer) error {
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	parsed, err := ParseSpecs(*specs)
-	if err != nil {
-		return err
+	var parsed []Spec
+	if *specs != "" {
+		var err error
+		if parsed, err = ParseSpecs(*specs); err != nil {
+			return err
+		}
 	}
 
 	// LOCKED AND NEVER UNLOCKED. setns moves one thread, and the sockets below
-	// must be created on that thread. This process exits a moment later, so
-	// nothing is leaked by refusing to unlock -- and see the note above for what
-	// unlocking costs when the process does not exit.
+	// -- and every request after them -- must be made on that thread. This
+	// process exits when the requests end, so nothing is leaked by refusing to
+	// unlock -- and see the note above for what unlocking costs when the
+	// process does not exit.
 	runtime.LockOSThread()
 
 	if *netns != "" {
@@ -101,8 +114,11 @@ func RunHelper(argv []string, stderr io.Writer) error {
 		return fmt.Errorf("reading this thread's network namespace: %w", err)
 	}
 
-	if err := waitLoopback(*loTimeout); err != nil {
-		return err
+	// Only a bind needs lo; a step with no listeners to make does not wait.
+	if len(parsed) > 0 {
+		if err := waitLoopback(*loTimeout); err != nil {
+			return err
+		}
 	}
 	if *isolated {
 		ifs, err := net.Interfaces()
@@ -113,18 +129,25 @@ func RunHelper(argv []string, stderr io.Writer) error {
 			return err
 		}
 	}
+	if err := handOver(here, parsed); err != nil {
+		return err
+	}
+	return answer(serve)
+}
 
-	fds := make([]int, 0, len(parsed))
+// handOver creates the listeners and sends them, with the manifest, over
+// HelperFD. Its copies are closed before it returns: once sent, the
+// descriptors live in the receiving socket's queue, and every copy kept here
+// is another pin on the namespace for as long as the requests go on.
+func handOver(here string, specs []Spec) error {
+	fds := make([]int, 0, len(specs))
 	defer func() {
-		// Once sent, the descriptors live in the receiving socket's queue, so
-		// closing ours is correct either way -- and on the failure path it is
-		// the difference between an aborted session and a pinned namespace.
 		for _, fd := range fds {
 			_ = unix.Close(fd)
 		}
 	}()
 	m := Manifest{Netns: here, Helper: os.Getpid()}
-	for _, s := range parsed {
+	for _, s := range specs {
 		fd, err := createSocket(s)
 		if err != nil {
 			return err
@@ -137,10 +160,44 @@ func RunHelper(argv []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := unix.Sendmsg(HelperFD, payload, unix.UnixRights(fds...), nil, 0); err != nil {
+	var rights []byte
+	if len(fds) > 0 {
+		rights = unix.UnixRights(fds...)
+	}
+	if err := unix.Sendmsg(HelperFD, payload, rights, nil, 0); err != nil {
 		return fmt.Errorf("handing %d descriptors back on fd %d: %w", len(fds), HelperFD, err)
 	}
 	return nil
+}
+
+// answer serves requests from HelperFD until the other end closes it. Blocking
+// reads and writes, on this thread, so every request is served where the
+// setns put it. A request that fails is answered with its error, and the
+// caller decides what that means for the session.
+func answer(serve Serve) error {
+	f := os.NewFile(HelperFD, "requests")
+	defer f.Close()
+	dec, enc := json.NewDecoder(f), json.NewEncoder(f)
+	for {
+		var req json.RawMessage
+		if err := dec.Decode(&req); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("reading a request: %w", err)
+		}
+		var r reply
+		result, err := serve(req)
+		if err == nil && result != nil {
+			r.Result, err = json.Marshal(result)
+		}
+		if err != nil {
+			r.Error = err.Error()
+		}
+		if err := enc.Encode(r); err != nil {
+			return fmt.Errorf("answering a request: %w", err)
+		}
+	}
 }
 
 func enterNetns(path string) error {

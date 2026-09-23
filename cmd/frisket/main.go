@@ -31,7 +31,6 @@ import (
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/dns"
 	"github.com/danielbodart/frisket/internal/egress"
-	"github.com/danielbodart/frisket/internal/nsmount"
 	"github.com/danielbodart/frisket/internal/nsnet"
 	"github.com/danielbodart/frisket/internal/policy"
 	"github.com/danielbodart/frisket/internal/sdnotify"
@@ -71,9 +70,10 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         ruleset are in place.
 
         Both take -userns PATH -nsenter NSENTER from a caller that is not
-        root: every step inside the sandbox runs under NSENTER, in the user
-        namespace at PATH that owns the sandbox's. Without them the caller is
-        root and enters directly.
+        root: each enters the sandbox once, under NSENTER, in the user
+        namespace at PATH that owns the sandbox's, and does all its work in
+        there from that one entry. Without them the caller is root and
+        enters directly.
 
   frisket close -name NAME
         End a session: the daemon closes every descriptor it holds and drops it
@@ -86,9 +86,7 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
   frisket sessions        What the daemon holds, one JSON object per line.
   frisket steering FILE   Check a steering file and print what it will do.
 
-  frisket helper ...      Not run by hand: creates listeners inside a namespace.
-  frisket nsexec ...      Not run by hand: runs nft or ip inside a namespace.
-  frisket nsmount ...     Not run by hand: mounts the session's CA, entered.
+  frisket helper ...      Not run by hand: steer's and connect's work, inside.
   frisket version
 `
 
@@ -115,12 +113,7 @@ func main() {
 	case "check":
 		err = runCheck(args)
 	case "helper":
-		err = nsnet.RunHelper(args, os.Stderr)
-	case "nsmount":
-		err = runNsmount(args)
-	case "nsexec":
-		// Returns only on failure: on success this process IS the program.
-		err = nsnet.RunExec(args, os.Stderr)
+		err = nsnet.RunHelper(args, os.Stderr, steering.Serve)
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
@@ -283,7 +276,6 @@ func rootFlags(fs *flag.FlagSet) (s *steering.Steerer, netns, file, name *string
 	s = &steering.Steerer{}
 	fs.StringVar(&s.Control, "control", control.DefaultPath, "the daemon's control socket")
 	fs.StringVar(&s.Nft, "nft", "nft", "nft, resolved on the host before entering the namespace")
-	fs.StringVar(&s.IP, "ip", "ip", "ip, likewise")
 	fs.StringVar(&s.Helper.Userns, "userns", "", "the user namespace that owns the sandbox's, for a caller that is not root (flong's $userns)")
 	fs.StringVar(&s.Helper.Nsenter, "nsenter", "", "util-linux's nsenter, by absolute path; required with -userns")
 	netns = fs.String("netns", "", "path to the sandbox's network namespace")
@@ -424,23 +416,6 @@ func runSessions(argv []string) error {
 	return nil
 }
 
-// runNsmount is steer's last step for a caller that is not root, re-run under
-// nsenter in the user namespace that owns the sandbox's: the files arrive on
-// stdin, as JSON, and never touch the host's filesystem.
-func runNsmount(argv []string) error {
-	fs := flag.NewFlagSet("nsmount", flag.ContinueOnError)
-	mntns := fs.String("mntns", "", "the sandbox's mount namespace")
-	dir := fs.String("dir", "", "where the files are mounted inside it")
-	if err := fs.Parse(argv); err != nil {
-		return err
-	}
-	var files []nsmount.File
-	if err := json.NewDecoder(os.Stdin).Decode(&files); err != nil {
-		return fmt.Errorf("nsmount: the files on stdin: %w", err)
-	}
-	return nsmount.AttachEntered(*mntns, *dir, files)
-}
-
 func runSteering(argv []string) error {
 	if len(argv) != 1 {
 		return errors.New("want one steering file")
@@ -453,9 +428,19 @@ func runSteering(argv []string) error {
 	fmt.Printf("listeners %s\n", nsnet.FormatSpecs(p.Listeners))
 	fmt.Printf("service %v\n", p.Service)
 	fmt.Printf("mark %#x, route table %d\n", p.Mark, p.RouteTable)
-	fmt.Printf("steer, ip -4:\n%s", p.RoutingBatch(false))
-	fmt.Printf("steer, ip -6:\n%s", p.RoutingBatch(true))
-	fmt.Printf("connect:\n%s", p.ConnectBatch())
+	for _, part := range []struct {
+		name  string
+		steps []steering.Step
+	}{
+		{"steer, ip -4", p.RoutingSteps(false)},
+		{"steer, ip -6", p.RoutingSteps(true)},
+		{"connect", p.ConnectSteps()},
+	} {
+		fmt.Printf("%s:\n", part.name)
+		for _, st := range part.steps {
+			fmt.Println(st)
+		}
+	}
 	return nil
 }
 

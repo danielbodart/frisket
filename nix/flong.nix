@@ -38,9 +38,10 @@ let
   cfg = config.services.frisket;
   inherit (lib) mkOption types;
   control = "-control ${cfg.controlSocket}";
-  # Every step inside the session runs under this nsenter, in $userns, the
-  # user namespace that owns the session's: the hooks run as the caller, who
-  # is root only there. By store path, so no PATH decides which runs.
+  # steer and connect each enter the session once, under this nsenter, in
+  # $userns, the user namespace that owns the session's: the hooks run as the
+  # caller, who is root only there. By store path, so no PATH decides which
+  # runs.
   enter = "-userns \"$userns\" -nsenter ${lib.getExe' pkgs.util-linux "nsenter"}";
 
   steeringFile = name: s: pkgs.writeText "frisket-steering-${name}.json"
@@ -120,9 +121,9 @@ in
           # outside, and no bind may reach it: a workload that could open the
           # socket would steer sessions, its own included.
           protect = [ (dirOf cfg.controlSocket) ];
-          # frisket itself, and the nft and ip it runs inside the namespace,
+          # frisket itself, and the nft it runs inside the namespace,
           # resolved on the host before it enters.
-          path = [ cfg.package pkgs.nftables pkgs.iproute2 ];
+          path = [ cfg.package pkgs.nftables ];
           # Listeners, handed over, the rules, and the session's CA in its
           # mount namespace. A failure here ends the session: flong ends a
           # session whose hook exits non-zero.

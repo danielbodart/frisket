@@ -23,13 +23,10 @@ type Helper struct {
 	Exe string
 	// Verb is the subcommand that dispatches to RunHelper. Empty means "helper".
 	Verb string
-	// ExecVerb is the subcommand that dispatches to RunExec. Empty means
-	// "nsexec".
-	ExecVerb string
 	// Userns is the user namespace that owns the sandbox's namespaces, for a
-	// caller that is not root: every step that enters the sandbox is then
-	// re-run under Nsenter, which joins Userns, and the sandbox's network
-	// namespace with it, before the step starts. Go cannot do that itself:
+	// caller that is not root: the helper is then started under Nsenter, which
+	// joins Userns, and the sandbox's network namespace with it, before the
+	// helper starts. Go cannot do that itself:
 	// setns(CLONE_NEWUSER) refuses a multi-threaded caller, and a Go program
 	// is multi-threaded before main runs -- init() included -- and frisket is
 	// built without cgo, so there is no constructor to do it earlier either.
@@ -43,14 +40,10 @@ type Helper struct {
 // Rootless says the sandbox is entered through Nsenter.
 func (h Helper) Rootless() bool { return h.Userns != "" }
 
-// Enter is the argv prefix that runs a program in Userns and, when netns is
-// not empty, in that network namespace too.
-func (h Helper) Enter(netns string) []string {
-	w := []string{h.Nsenter, "--user=" + h.Userns}
-	if netns != "" {
-		w = append(w, "--net="+netns)
-	}
-	return append(w, "--")
+// enter is the argv prefix that runs a program in Userns and in the network
+// namespace at netns.
+func (h Helper) enter(netns string) []string {
+	return []string{h.Nsenter, "--user=" + h.Userns, "--net=" + netns, "--"}
 }
 
 func (h Helper) argv(args HelperArgs) ([]string, error) {
@@ -70,7 +63,7 @@ func (h Helper) argv(args HelperArgs) ([]string, error) {
 		// stays where it starts.
 		netns := args.Netns
 		args.Netns = ""
-		return append(append(h.Enter(netns), exe, verb), args.flags()...), nil
+		return append(append(h.enter(netns), exe, verb), args.flags()...), nil
 	}
 	return append([]string{exe, verb}, args.flags()...), nil
 }
@@ -120,22 +113,36 @@ func (s *Set) Close() error {
 	return errors.Join(errs...)
 }
 
-// helperResultTimeout bounds the wait for the helper's message. The helper has
-// already exited by the time we read, so this only ever fires when it exited
-// without sending -- and then a hung session creation is worse than an error.
+// helperResultTimeout bounds the wait for the helper's manifest, beyond the
+// time it may spend waiting for lo: a hung session creation is worse than an
+// error.
 const helperResultTimeout = 10 * time.Second
 
-// Open creates the session's listeners inside the namespace at args.Netns and
-// returns them held from here. It forks the helper, waits for it to exit, and
-// takes the descriptors out of the socketpair it left behind.
+// Entered is a helper inside a namespace: the listeners it made there, held
+// from here, and the helper itself, still inside and serving requests until
+// Close. A step enters once and does all its work inside through Do, rather
+// than paying for a process -- and, rootless, for nsenter -- per command.
+type Entered struct {
+	// Set is the listeners asked for, already handed over and closed on the
+	// helper's side. Empty, but for Netns and HelperPID, when none were.
+	Set *Set
+
+	argv   []string
+	cmd    *exec.Cmd
+	conn   *net.UnixConn
+	dec    *json.Decoder
+	stderr bytes.Buffer
+	ended  bool
+	endErr error
+}
+
+// Enter starts the helper inside the namespace at args.Netns, takes the
+// listeners it made there, and leaves it running for Do.
 //
 // A failure anywhere aborts the whole set: half a set is a session with a hole
 // in it, and the bind that failed is very likely a workload that took the port
 // first, which is exactly the case that must not be papered over.
-func Open(ctx context.Context, h Helper, args HelperArgs) (_ *Set, err error) {
-	if len(args.Specs) == 0 {
-		return nil, errors.New("no listeners asked for")
-	}
+func Enter(ctx context.Context, h Helper, args HelperArgs) (_ *Entered, err error) {
 	for _, s := range args.Specs {
 		if err := s.Validate(); err != nil {
 			return nil, err
@@ -153,27 +160,44 @@ func Open(ctx context.Context, h Helper, args HelperArgs) (_ *Set, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("socketpair for the helper: %w", err)
 	}
-	ours := os.NewFile(uintptr(pair[0]), "helper-result")
-	theirs := os.NewFile(uintptr(pair[1]), "helper-result-child")
+	ours := os.NewFile(uintptr(pair[0]), "helper")
+	theirs := os.NewFile(uintptr(pair[1]), "helper-child")
 	defer ours.Close()
 	defer theirs.Close()
-
-	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stderr = &stderr
-	cmd.ExtraFiles = []*os.File{theirs} // becomes HelperFD in the helper
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("helper %v: %w: %s", argv[1:], err, bytes.TrimSpace(stderr.Bytes()))
-	}
-	// Close our copy of the child's end BEFORE reading, or a helper that sent
-	// nothing leaves the read below waiting on a socket we are holding open
-	// ourselves.
-	_ = theirs.Close()
-
-	m, files, err := receive(ours, len(args.Specs))
+	c, err := net.FileConn(ours)
 	if err != nil {
-		return nil, fmt.Errorf("helper %v: %w: %s", argv[1:], err, bytes.TrimSpace(stderr.Bytes()))
+		return nil, err
 	}
+	conn, ok := c.(*net.UnixConn)
+	if !ok {
+		c.Close()
+		return nil, fmt.Errorf("helper socket is a %T, not a unix socket", c)
+	}
+
+	e := &Entered{argv: argv, conn: conn}
+	e.cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
+	e.cmd.Stderr = &e.stderr
+	e.cmd.ExtraFiles = []*os.File{theirs} // becomes HelperFD in the helper
+	if err := e.cmd.Start(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("helper %v: %w", argv[1:], err)
+	}
+	// Close our copy of the child's end, or a helper that exits without
+	// sending leaves the read below waiting on a socket we hold open ourselves.
+	_ = theirs.Close()
+	defer func() {
+		if err != nil {
+			_ = e.Close()
+		}
+	}()
+
+	_ = conn.SetReadDeadline(time.Now().Add(args.LoTimeout + helperResultTimeout))
+	m, files, err := receive(conn, len(args.Specs))
+	if err != nil {
+		return nil, e.failed(err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	e.dec = json.NewDecoder(conn)
 	defer func() {
 		// Anything not converted into a net type below is still ours to close.
 		for _, f := range files {
@@ -218,24 +242,68 @@ func Open(ctx context.Context, h Helper, args HelperArgs) (_ *Set, err error) {
 		files[i] = nil
 		set.Socks = append(set.Socks, sock)
 	}
-	return set, nil
+	e.Set = set
+	return e, nil
 }
 
-// receive reads the manifest and the descriptors out of the socketpair.
-func receive(ours *os.File, want int) (Manifest, []*os.File, error) {
-	conn, err := net.FileConn(ours)
-	if err != nil {
-		return Manifest{}, nil, err
-	}
-	defer conn.Close()
-	uc, ok := conn.(*net.UnixConn)
-	if !ok {
-		return Manifest{}, nil, fmt.Errorf("helper socket is a %T, not a unix socket", conn)
-	}
-	_ = uc.SetReadDeadline(time.Now().Add(helperResultTimeout))
+// reply is the helper's answer to one request: an error, or a result.
+type reply struct {
+	Error  string          `json:"error,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
 
+// Do sends req to the helper, inside, and decodes what it answers into
+// result, which may be nil. An error the helper answered with is returned as
+// its message alone; a helper that is gone is an error with its stderr.
+func (e *Entered) Do(ctx context.Context, req, result any) error {
+	if e.ended {
+		return errors.New("the helper has already ended")
+	}
+	deadline, _ := ctx.Deadline()
+	_ = e.conn.SetDeadline(deadline)
+	if err := json.NewEncoder(e.conn).Encode(req); err != nil {
+		return e.failed(err)
+	}
+	var r reply
+	if err := e.dec.Decode(&r); err != nil {
+		return e.failed(err)
+	}
+	if r.Error != "" {
+		return errors.New(r.Error)
+	}
+	if result != nil && r.Result != nil {
+		return json.Unmarshal(r.Result, result)
+	}
+	return nil
+}
+
+// Close ends the conversation: the helper reads the end of its requests and
+// exits, and Close waits for it. Safe to call twice. It does not close Set,
+// whose listeners outlive the helper.
+func (e *Entered) Close() error {
+	if !e.ended {
+		e.ended = true
+		_ = e.conn.Close()
+		if err := e.cmd.Wait(); err != nil {
+			e.endErr = fmt.Errorf("helper %v: %w: %s", e.argv[1:], err, bytes.TrimSpace(e.stderr.Bytes()))
+		}
+	}
+	return e.endErr
+}
+
+// failed is err, from talking to a helper that stopped answering, with what
+// the helper said as it went -- which is the error worth reading.
+func (e *Entered) failed(err error) error {
+	if end := e.Close(); end != nil {
+		return end
+	}
+	return fmt.Errorf("helper %v: %w: %s", e.argv[1:], err, bytes.TrimSpace(e.stderr.Bytes()))
+}
+
+// receive reads the manifest and the descriptors from the helper.
+func receive(uc *net.UnixConn, want int) (Manifest, []*os.File, error) {
 	buf := make([]byte, 64<<10)
-	oob := make([]byte, unix.CmsgSpace(4*want))
+	oob := make([]byte, unix.CmsgSpace(4*max(want, 1)))
 
 	// ReadMsgUnix cannot ask for MSG_CMSG_CLOEXEC, so the descriptors arrive
 	// inheritable and we set the flag ourselves. ForkLock is held across both

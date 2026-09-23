@@ -3,6 +3,7 @@ package nsnet
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +26,6 @@ import (
 const (
 	roleHelper = "frisket-test-helper"
 	rolePark   = "frisket-test-park"
-	roleExec   = "frisket-test-nsexec"
 	roleWhere  = "frisket-test-whereami"
 )
 
@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case roleHelper:
-			if err := RunHelper(os.Args[2:], os.Stderr); err != nil {
+			if err := RunHelper(os.Args[2:], os.Stderr, testServe); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -48,10 +48,6 @@ func TestMain(m *testing.M) {
 		case rolePark:
 			park()
 			os.Exit(0)
-		case roleExec:
-			// Only returns on failure: success is becoming the program.
-			fmt.Fprintln(os.Stderr, RunExec(os.Args[2:], os.Stderr))
-			os.Exit(1)
 		case roleWhere:
 			ns, err := os.Readlink("/proc/self/ns/net")
 			if err != nil {
@@ -302,7 +298,38 @@ func (s *sandbox) loUp(t *testing.T) {
 	}
 }
 
-func testHelper() Helper { return Helper{Verb: roleHelper, ExecVerb: roleExec} }
+func testHelper() Helper { return Helper{Verb: roleHelper} }
+
+// testServe is the test helper's requests: where this thread is, where a
+// program it starts is, and a request that fails.
+func testServe(req json.RawMessage) (any, error) {
+	var op string
+	if err := json.Unmarshal(req, &op); err != nil {
+		return nil, err
+	}
+	switch op {
+	case "where":
+		return os.Readlink("/proc/thread-self/ns/net")
+	case "run":
+		out, err := exec.Command(os.Args[0], roleWhere).Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	return nil, fmt.Errorf("no request %q", op)
+}
+
+// open enters, takes the listeners, and ends the helper: the listeners
+// outlive it.
+func open(ctx context.Context, h Helper, args HelperArgs) (*Set, error) {
+	e, err := Enter(ctx, h, args)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.Close(); err != nil {
+		_ = e.Set.Close()
+		return nil, err
+	}
+	return e.Set, nil
+}
 
 func mustSpecs(t *testing.T, s string) []Spec {
 	t.Helper()
@@ -365,7 +392,7 @@ func sockOpt(t *testing.T, sock *Sock, level, opt int) int {
 func TestSocketsCarryTheirOptions(t *testing.T) {
 	sb := newSandbox(t)
 	sb.loUp(t)
-	set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:53,udp6:[::1]:53")})
+	set, err := open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:53,udp6:[::1]:53")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +444,7 @@ func TestListenersLiveInTheSandboxAndAreHeldFromHere(t *testing.T) {
 	}
 
 	specs := mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:53")
-	set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
+	set, err := open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +521,7 @@ func TestListenersLiveInTheSandboxAndAreHeldFromHere(t *testing.T) {
 func TestAMarkedDatagramIsAnsweredAndAnUnmarkedOneRefused(t *testing.T) {
 	sb := newSandbox(t)
 	sb.loUp(t)
-	set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: mustSpecs(t, "udp4:127.0.0.1:53,udp6:[::1]:53")})
+	set, err := open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: mustSpecs(t, "udp4:127.0.0.1:53,udp6:[::1]:53")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,13 +583,13 @@ func TestOpenAbortsWhenThePortIsTaken(t *testing.T) {
 	sb.loUp(t)
 
 	specs := mustSpecs(t, "tcp4:127.0.0.1:15001")
-	first, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
+	first, err := open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Close()
 
-	second, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
+	second, err := open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
 	if err == nil {
 		second.Close()
 		t.Fatal("the second session bound the same address; SO_REUSEPORT must be off and the bind must fail")
@@ -590,7 +617,7 @@ func TestOpenAbortsWhenThePortIsTaken(t *testing.T) {
 func TestOpenWaitsForLoopbackAndSaysSoWhenItNeverComes(t *testing.T) {
 	sb := newSandbox(t) // lo deliberately left down
 
-	_, err := Open(t.Context(), testHelper(), HelperArgs{
+	_, err := open(t.Context(), testHelper(), HelperArgs{
 		Netns:     sb.path,
 		Specs:     mustSpecs(t, "tcp6:[::1]:15001"),
 		LoTimeout: 150 * time.Millisecond,
@@ -614,7 +641,7 @@ func TestOpenRetriesUntilLoopbackIsUp(t *testing.T) {
 		sb.loUp(t)
 	}()
 
-	set, err := Open(t.Context(), testHelper(), HelperArgs{
+	set, err := open(t.Context(), testHelper(), HelperArgs{
 		Netns:     sb.path,
 		Specs:     mustSpecs(t, "tcp6:[::1]:15001"),
 		LoTimeout: 10 * time.Second,
@@ -641,7 +668,7 @@ func TestCloseReleasesEveryDescriptor(t *testing.T) {
 
 	specs := mustSpecs(t, "tcp4:127.0.0.1:15001,tcp6:[::1]:15001,udp4:127.0.0.1:53")
 	cycle := func() {
-		set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
+		set, err := open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: specs})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -666,7 +693,7 @@ func TestClosedListenerRefusesFurtherAccepts(t *testing.T) {
 	sb := newSandbox(t)
 	sb.loUp(t)
 
-	set, err := Open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: mustSpecs(t, "tcp4:127.0.0.1:15001")})
+	set, err := open(t.Context(), testHelper(), HelperArgs{Netns: sb.path, Specs: mustSpecs(t, "tcp4:127.0.0.1:15001")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -679,16 +706,10 @@ func TestClosedListenerRefusesFurtherAccepts(t *testing.T) {
 	}
 }
 
-func TestOpenRefusesAnEmptySet(t *testing.T) {
-	if _, err := Open(context.Background(), testHelper(), HelperArgs{}); err == nil {
-		t.Error("Open with no specs was accepted")
-	}
-}
-
 func TestOpenReportsTheHelpersOwnError(t *testing.T) {
 	// A namespace path that is not one: the helper's setns fails, and the
 	// message the caller sees has to be the helper's, not "exit status 1".
-	_, err := Open(context.Background(), testHelper(), HelperArgs{
+	_, err := open(context.Background(), testHelper(), HelperArgs{
 		Netns: "/proc/self/ns/net-does-not-exist",
 		Specs: mustSpecs(t, "tcp4:127.0.0.1:15001"),
 	})
@@ -728,7 +749,7 @@ func TestRequireIsolatedRefusesAnythingButLoopback(t *testing.T) {
 func TestOpenIsolatedAcceptsANamespaceWithOnlyLoopback(t *testing.T) {
 	sb := newSandbox(t)
 	sb.loUp(t)
-	set, err := Open(t.Context(), testHelper(), HelperArgs{
+	set, err := open(t.Context(), testHelper(), HelperArgs{
 		Netns:    sb.path,
 		Specs:    mustSpecs(t, "tcp4:127.0.0.1:15001"),
 		Isolated: true,
@@ -739,10 +760,12 @@ func TestOpenIsolatedAcceptsANamespaceWithOnlyLoopback(t *testing.T) {
 	set.Close()
 }
 
-// nsexec becomes the program, inside the namespace, and nothing else changes
-// namespace: the test process asking the question is still where it was.
-func TestCommandRunsTheProgramInsideTheNamespace(t *testing.T) {
-	sb := newSandbox(t)
+// One entry does a whole step: the helper answers from inside the namespace,
+// as does a program it starts, and nothing else changes namespace -- the test
+// process asking is still where it was. With no listeners asked for, it makes
+// none and waits for no lo, which is connect's case.
+func TestTheHelperAnswersFromInsideTheNamespace(t *testing.T) {
+	sb := newSandbox(t) // lo left down: nothing here binds
 	want, err := os.Readlink(sb.path)
 	if err != nil {
 		t.Fatal(err)
@@ -751,32 +774,33 @@ func TestCommandRunsTheProgramInsideTheNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd, err := Command(t.Context(), testHelper(), sb.path, os.Args[0], roleWhere)
+	e, err := Enter(t.Context(), testHelper(), HelperArgs{Netns: sb.path, LoTimeout: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("nsexec: %v: %s", err, out)
+	defer e.Close()
+	if len(e.Set.Socks) != 0 || e.Set.Netns != want {
+		t.Errorf("entered %s holding %d listeners, want %s and none", e.Set.Netns, len(e.Set.Socks), want)
 	}
-	if got := strings.TrimSpace(string(out)); got != want {
-		t.Errorf("the program ran in %s, want the sandbox's %s", got, want)
+	for _, op := range []string{"where", "run", "where"} {
+		var got string
+		if err := e.Do(t.Context(), op, &got); err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		if got != want {
+			t.Errorf("%s: answered from %s, want the sandbox's %s", op, got, want)
+		}
+	}
+	if err := e.Do(t.Context(), "nonsense", nil); err == nil || !strings.Contains(err.Error(), "nonsense") {
+		t.Errorf("a failed request: %v, want the helper's own error", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Errorf("ending the helper: %v", err)
+	}
+	if err := e.Do(t.Context(), "where", nil); err == nil {
+		t.Error("a request after Close was answered")
 	}
 	if after, _ := os.Readlink("/proc/self/ns/net"); after != here {
 		t.Errorf("this process moved from %s to %s", here, after)
-	}
-}
-
-func TestExecRefusesWhatWouldRunOnTheHost(t *testing.T) {
-	for name, argv := range map[string][]string{
-		// No namespace would load a sandbox's ruleset into the host.
-		"no namespace": {"--", "/bin/true"},
-		// A relative name is a PATH search, and the PATH is the caller's.
-		"relative program": {"-net", "/proc/self/ns/net", "--", "true"},
-		"no program":       {"-net", "/proc/self/ns/net"},
-	} {
-		if err := RunExec(argv, io.Discard); err == nil {
-			t.Errorf("%s: accepted", name)
-		}
 	}
 }

@@ -30,7 +30,7 @@ machine.
 
 ## Locked decisions
 
-**1. Go, standard library first, and two dependencies.** `CGO_ENABLED = 0`, so
+**1. Go, standard library first, and three dependencies.** `CGO_ENABLED = 0`, so
 the binary is static. The stdlib covers almost all of it: `httputil.ReverseProxy`
 for credential routes, `crypto/tls` and `crypto/x509` for interception, `net`
 and `io.Copy` for egress (splice on Linux — measured), and `crypto/rsa` for
@@ -54,6 +54,16 @@ and control messages steering rests on — `IP_TRANSPARENT`, `SO_RCVMARK`,
 `IPV6_RECVORIGDSTADDR`, `IP_PKTINFO` — which `syscall` does not export, and the
 alternative is architecture-specific constants written out by hand. Same test,
 same answer — Go team, no dependencies of its own.
+
+The third is `github.com/vishvananda/netlink`, for the links, addresses, rules
+and routes `frisket steer` and `frisket connect` make and read inside a
+sandbox. Each was an `ip` run under `nsenter`, and each of those a process and
+an entry into the sandbox; the messages themselves are not hard, but their
+attributes, alignment and dump replies per family are the kind of code that is
+right only once many people have run it. It is what runc and the reference
+CNI plugins use, and it brings `vishvananda/netns` and x/sys, nothing else. It
+parses only what the kernel answers, about a namespace the workload has not
+started in yet.
 
 `vendorHash` is therefore a pinned hash and not `null`. That is a cost, not a
 loss: `vendorHash = null` is a nice property, never a security one.
@@ -277,8 +287,12 @@ the design wrong that was found by running it, and each gets a test:
   never by the daemon, which could not acquire the second itself, since
   `setns(CLONE_NEWUSER)` refuses a multi-threaded caller and every Go program
   is multi-threaded before `main` runs (EINVAL, measured, even in `init()`;
-  frisket has no cgo to do it earlier). nft, ip and the CA's mount are
-  entered the same way.
+  frisket has no cgo to do it earlier). The helper stays inside for the rest
+  of its step: steer's routing and connect's checks and links are netlink
+  messages from it, the ruleset is one nft it starts from in there, and the
+  CA's mount is made from it too. Each step enters once, where it was an
+  nsenter per command: measured, twelve entries made the hook 40 ms of a
+  67 ms launch, and two make it 23 ms of 50.
 - **The descriptors therefore cross two boundaries**, not one: the helper
   makes them, and hands them to the daemon over the control socket. "Fork the
   helper and receive" is only the launcher-side half.

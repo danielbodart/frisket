@@ -128,7 +128,7 @@ was made before the host was a route.
 
 Run as the daemon's user, in this order, from a hook that has the sandbox's
 network namespace before anything gives it egress. `$userns` is the user
-namespace that owns the sandbox's; every step inside it runs under that
+namespace that owns the sandbox's; each step enters it once, under that
 `nsenter`, since a Go program cannot join a user namespace itself. Root, with
 no user namespace to join, leaves out `-userns` and `-nsenter` -- but the
 control socket answers only the daemon's user.
