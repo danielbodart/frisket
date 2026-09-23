@@ -122,7 +122,7 @@
               };
             in
             pkgs.writeText "frisket-modules"
-              (builtins.toJSON { inherit (eval.config.services.frisket) enable user; });
+              (builtins.toJSON { inherit (eval.config.services.frisket) enable; });
 
           # Formatting as a gate rather than a habit: this is one repository
           # with one formatter and no argument to have about it.

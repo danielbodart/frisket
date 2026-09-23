@@ -316,29 +316,24 @@ in
 
     user = mkOption {
       type = types.str;
-      default = "frisket";
       example = "alice";
       description = ''
         Who the daemon runs as: the user whose credentials it holds, and the
         one user whose launchers may steer sessions to it -- they run as the
         caller, and the control socket answers only this user. Not a
         DynamicUser, because it has to read that user's credential files.
-        The default creates a system user of that name, for a frisket that
-        holds no credential yet.
       '';
     };
 
     group = mkOption {
       type = types.str;
-      default = if cfg.user == "frisket" then "frisket" else config.users.users.${cfg.user}.group;
-      defaultText = lib.literalExpression ''
-        if user == "frisket" then "frisket" else config.users.users.''${user}.group'';
+      default = config.users.users.${cfg.user}.group;
+      defaultText = lib.literalExpression "config.users.users.\${user}.group";
       description = ''
         The daemon's group: the user's primary group, so that the control
         socket can read who is asking. The socket learns a peer's user
         namespace through the peer's pidfd, and the kernel answers that only
-        to a process whose gid is the peer's too. With the default user it is
-        a group of that name, which is created.
+        to a process whose gid is the peer's too.
       '';
     };
 
@@ -482,7 +477,7 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.user == "frisket" || cfg.group == config.users.users.${cfg.user}.group;
+        assertion = cfg.group == config.users.users.${cfg.user}.group;
         message = "services.frisket.group is ${cfg.group}, not ${cfg.user}'s primary group: the control socket could read no launcher's user namespace, and would refuse every one.";
       }
     ] ++ lib.concatLists (lib.mapAttrsToList
@@ -518,11 +513,6 @@ in
     # A directory of the documents, so the path a session names stays the
     # same across a switch while what it holds changes.
     environment.etc."frisket/policies".source = policies;
-
-    users.users = lib.mkIf (cfg.user == "frisket") {
-      frisket = { isSystemUser = true; inherit (cfg) group; };
-    };
-    users.groups = lib.mkIf (cfg.group == "frisket") { frisket = { }; };
 
     # THE USER'S SOCKET, MADE BY SYSTEMD. The launchers that steer sessions
     # run as the user whose credentials the daemon holds -- the daemon's own
