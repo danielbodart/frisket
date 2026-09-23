@@ -115,6 +115,25 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"an operation with no summary": func(p *Policy) {
 			p.Routes[0].Paths[0].Operation = &Operation{ID: "op"}
 		},
+		"graphql with no path":      func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{}} },
+		"graphql at a path not /":   func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{Path: "graphql"}} },
+		"graphql unmatched admit":   func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Unmatched: "admit"}} },
+		"graphql at one path twice": func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql"}, {Path: "/graphql"}} },
+		"a graphql query by its field": func(p *Policy) {
+			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Query: &GraphQLField{Field: "viewer"}}}
+		},
+		"a graphql mutation with no field": func(p *Policy) {
+			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Mutations: []GraphQLField{{Ask: true}}}}
+		},
+		"a graphql field twice": func(p *Policy) {
+			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Mutations: []GraphQLField{{Field: "a"}, {Field: "a", Ask: true}}}}
+		},
+		"a graphql field asking and refusing": func(p *Policy) {
+			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Mutations: []GraphQLField{{Field: "a", Ask: true, Refuse: true}}}}
+		},
+		"a graphql operation of no class": func(p *Policy) {
+			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Mutations: []GraphQLField{{Field: "a", Operation: &Operation{ID: "a", Summary: "A", Class: "delete"}}}}}
+		},
 	} {
 		p := valid(t)
 		mutate(&p)
@@ -144,6 +163,28 @@ func TestGitRoutesBuild(t *testing.T) {
 			Git:   &GitRule{Repos: []string{"*"}},
 		},
 	)
+	if err := check(t, "p", p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A GraphQL endpoint is a route's whole scope, if it is all the route is for:
+// a query, each mutation by its field, and what neither names.
+func TestGraphQLRoutesBuild(t *testing.T) {
+	p := valid(t)
+	p.Routes[0].Paths = nil
+	p.Routes[0].GraphQL = []GraphQLRule{
+		{
+			Path:  "/graphql",
+			Query: &GraphQLField{Operation: &Operation{ID: "graphql-query", Summary: "A GraphQL query", Class: "read"}},
+			Mutations: []GraphQLField{
+				{Field: "closePullRequest", Ask: true, Operation: &Operation{ID: "closePullRequest", Summary: "Close a pull request.", Class: "write", Category: "pulls"}},
+				{Field: "deleteIssue", Refuse: true},
+			},
+			Unmatched: "allow",
+		},
+		{Path: "/accounts/*/graphql", Query: &GraphQLField{}, Unmatched: "ask"},
+	}
 	if err := check(t, "p", p); err != nil {
 		t.Fatal(err)
 	}

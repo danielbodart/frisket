@@ -30,6 +30,7 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -138,6 +139,11 @@ type Question struct {
 	// Operation is what the request matched, or nil if it matched nothing --
 	// in which case nothing is borrowed to describe it.
 	Operation *Operation `json:"operation,omitempty"`
+	// Operations are every operation the request holds, where it holds more
+	// than one: a GraphQL request with several fields at its root. Operation
+	// is the one that decided, the strictest; a field no rule names is in the
+	// body, and in none of these.
+	Operations []*Operation `json:"operations,omitempty"`
 }
 
 // Config is everything an Interceptor needs.
@@ -512,7 +518,18 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := rt.scope.decide(r.Method, r.URL)
-	if v.Operation != nil {
+	if v.graphql != nil {
+		v = v.graphql.decide(r)
+	}
+	rec.graphql = v.GraphQL
+	switch {
+	case len(v.Operations) > 0:
+		ids := make([]string, len(v.Operations))
+		for i, o := range v.Operations {
+			ids[i] = o.ID
+		}
+		rec.operation = strings.Join(ids, ",")
+	case v.Operation != nil:
 		rec.operation = v.Operation.ID
 	}
 	switch v.Outcome {
@@ -579,15 +596,16 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 		return ReasonNobodyToAsk
 	}
 	q := Question{
-		Session:   ic.session,
-		Workspace: ic.workspace,
-		Policy:    i.policy,
-		Route:     ic.route.Name,
-		Method:    r.Method,
-		Host:      ic.route.host,
-		Path:      r.URL.EscapedPath(),
-		Query:     r.URL.RawQuery,
-		Operation: v.Operation,
+		Session:    ic.session,
+		Workspace:  ic.workspace,
+		Policy:     i.policy,
+		Route:      ic.route.Name,
+		Method:     r.Method,
+		Host:       ic.route.host,
+		Path:       r.URL.EscapedPath(),
+		Query:      r.URL.RawQuery,
+		Operation:  v.Operation,
+		Operations: v.Operations,
 	}
 	// The body is what a write does, so it is read before the question is
 	// asked and what goes upstream is exactly what was read: a person
@@ -720,6 +738,9 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 	if rec.operation != "" {
 		attrs = append(attrs, "operation", rec.operation)
 	}
+	if rec.graphql != "" {
+		attrs = append(attrs, "graphql", rec.graphql)
+	}
 	attrs = append(attrs,
 		"status", status,
 		"req_bytes", rec.reqBytes.Load(),
@@ -768,8 +789,11 @@ type record struct {
 	decision   string
 	reason     string
 	rule       string
-	// operation is the id of the operation the request matched, if any.
+	// operation is the id of the operation the request matched, if any, or
+	// of each, for a GraphQL request holding several.
 	operation string
+	// graphql is what a GraphQL request was read as.
+	graphql   string
 	err       error
 	level     slog.Level
 	status    atomic.Int64

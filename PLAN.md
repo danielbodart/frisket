@@ -683,7 +683,7 @@ inject.
 
 | Tool | Where it authenticates | To decide |
 |---|---|---|
-| gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`, GraphQL |
+| gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`; *GraphQL decided, below* |
 | hf | `huggingface.co` | *decided, in chase's `apps/huggingface.nix` and `docs/huggingface.md`*: rules generated from the Hub's own OpenAPI description, reads admitted and writes and token-minting reads asked; strict refuses what would ask; `huggingface.co` and `*.hf.co` allowed; the token in sops |
 | Cloudflare | `api.cloudflare.com` | account and zone scoping, the credential's source |
 | GCP client libraries, gcloud | a metadata server on the service address | where its tokens come from, and what they may do |
@@ -749,6 +749,40 @@ holds nothing private to read out through them.
 - **Not SSH.** Agent forwarding, destination-constrained keys and GitHub's SSH
   CAs are all per-user, never per-repository or read-only; terminating SSH
   would give what HTTPS already gives, with a second protocol to hold.
+
+### GraphQL (decided)
+
+- **A rule kind, as git is.** A route's `graphql` names an endpoint by path;
+  a query is decided by one rule, and a mutation or subscription by a rule
+  per field at its root, the strictest of several deciding. frisket knows
+  GraphQL, not any API: which fields there are, and what each is, is the
+  consumer's configuration, generated from the provider's schema.
+- **The strictest of everything it shows.** A request is decided by every
+  field of every operation in its document, the strictest deciding, so
+  nothing sent beside a field -- another operation, a key frisket does not
+  know -- loosens that field's rule. A field no rule names is the endpoint's
+  `unmatched`: refused, asked about or allowed, as a path no rule names is.
+- **What it cannot see is never admitted.** A request that may run something
+  its document does not show -- a persisted query's hash, a key it does not
+  know -- or that it cannot read at all -- a GET, a batch, a body over 1 MiB,
+  a document it refuses -- is asked about, or refused where `unmatched`
+  refuses. Allowing it would allow whatever the sandbox chose to hide.
+- **Read before deciding, forwarded as read.** Every request at the endpoint
+  has its body read, to 1 MiB -- which bounds what a sandbox can make the
+  daemon hold per request, as no question does -- and the bytes read are the
+  bytes sent. Over it, the request is unmatched, and asked about, read on to
+  the asker's 16 MiB.
+- **A hand reader, strict.** Measured against vektah/gqlparser, graphql-js and
+  graphql-ruby (GitHub's reader) on real gh and wrangler traffic and on
+  fuzzed documents: every reader agreed on the real traffic, and gqlparser,
+  following the spec, missed mutations graphql-ruby would run, through a
+  comment the spec ends at a lone CR and graphql-ruby does not. The reader is
+  frisket's own, about 700 lines, refusing what readers disagree about;
+  the rules for that are where the grammar is, in one file.
+- **Held to GitHub's reader.** `internal/graphql/testdata/ruby.json` is
+  graphql-ruby's reading of documents made to find disagreements; the tests
+  require that whatever frisket accepts, graphql-ruby reads the same way.
+  `scripts/graphql-oracle` makes it again.
 
 ### Claude Code
 
@@ -875,8 +909,9 @@ as well as close the descriptors.
 **Go tests.** Unit tests, fuzz targets and property-based tests, because most of
 this is a parser or a classifier facing hostile input:
 
-- Fuzz the DNS handling and the ClientHello peek — the two places that parse
-  bytes the sandbox chose.
+- Fuzz the DNS handling, the ClientHello peek and the GraphQL reader — the
+  places that parse bytes the sandbox chose — and hold the GraphQL reader to
+  graphql-ruby, the upstream's own, on documents made to find disagreements.
 - Property tests for the address classifier (a refusal is never turned into an
   acceptance by any allowlist; every spelling of an address classifies as the
   address), the allowlist matcher (`evil-google.com` never matches

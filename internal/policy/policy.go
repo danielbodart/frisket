@@ -69,8 +69,8 @@ type Policy struct {
 
 // Route is one intercepted host, as data: a bearer token, Basic with a fixed
 // user, or a bare header, from a file -- the whole of it, or a field of its
-// JSON -- or no credential at all; scoped by method and path prefix, and by
-// git's smart-HTTP protocol per repository.
+// JSON -- or no credential at all; scoped by method and path prefix, by
+// git's smart-HTTP protocol per repository, and by GraphQL operation.
 type Route struct {
 	Name string `json:"name"`
 	// Host is the name the sandbox connects to.
@@ -98,11 +98,12 @@ type Route struct {
 	// Placeholder is what the sandbox holds in the credential's place, and
 	// the only value frisket replaces: anything else is sent on as it came.
 	Placeholder string `json:"placeholder,omitempty"`
-	// Paths and Git are the route's scope: a request either admits goes
-	// upstream, one a path rule asks about goes to the asker, and Unmatched
-	// decides the rest.
-	Paths []PathRule `json:"paths,omitempty"`
-	Git   *GitRule   `json:"git,omitempty"`
+	// Paths, Git and GraphQL are the route's scope: a request any of them
+	// admits goes upstream, one they ask about goes to the asker, and
+	// Unmatched decides the rest.
+	Paths   []PathRule    `json:"paths,omitempty"`
+	Git     *GitRule      `json:"git,omitempty"`
+	GraphQL []GraphQLRule `json:"graphql,omitempty"`
 	// Unmatched is "refuse", the default, or "ask".
 	Unmatched string `json:"unmatched,omitempty"`
 	// Refusal is the API's own error shape, for frisket's refusals. Nil is
@@ -124,6 +125,32 @@ type GitRule struct {
 	Repos []string `json:"repos"`
 	// Push is "refuse", the default, "ask" or "allow".
 	Push string `json:"push,omitempty"`
+}
+
+// GraphQLRule is a GraphQL endpoint, decided by what each request's body
+// holds: a query by Query, and a mutation or subscription by the rule for
+// each field at its root, the strictest of them deciding.
+type GraphQLRule struct {
+	// Path is the endpoint's, exactly, with "*" segments.
+	Path string `json:"path"`
+	// Query decides every query. Absent, a query is unmatched.
+	Query *GraphQLField `json:"query,omitempty"`
+	// Mutations and Subscriptions decide each field they name.
+	Mutations     []GraphQLField `json:"mutations,omitempty"`
+	Subscriptions []GraphQLField `json:"subscriptions,omitempty"`
+	// Unmatched is "refuse", the default, "ask" or "allow": for a query or a
+	// field no rule names. What frisket cannot see is asked about where this
+	// allows.
+	Unmatched string `json:"unmatched,omitempty"`
+}
+
+// GraphQLField decides one field at a mutation's or subscription's root, or,
+// with no field, every query: admitted, asked about, or refused.
+type GraphQLField struct {
+	Field     string     `json:"field,omitempty"`
+	Ask       bool       `json:"ask,omitempty"`
+	Refuse    bool       `json:"refuse,omitempty"`
+	Operation *Operation `json:"operation,omitempty"`
 }
 
 // CredentialJSON is where a JSON credential file keeps its token, and when
@@ -538,8 +565,8 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 	}
 	switch r.Unmatched {
 	case "", "refuse":
-		if len(r.Paths) == 0 && r.Git == nil {
-			return intercept.Route{}, nil, errors.New("no paths and no git: a route with no scope admits nothing")
+		if len(r.Paths) == 0 && r.Git == nil && len(r.GraphQL) == 0 {
+			return intercept.Route{}, nil, errors.New("no paths, no git and no graphql: a route with no scope admits nothing")
 		}
 	case "ask":
 		out.Scope.Unmatched = intercept.UnmatchedAsk
@@ -548,15 +575,19 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 	}
 	for _, p := range r.Paths {
 		rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, Ask: p.Ask, Refuse: p.Refuse}
-		if o := p.Operation; o != nil {
-			switch o.Class {
-			case "", "read", "write", "guarded":
-			default:
-				return intercept.Route{}, nil, fmt.Errorf("operation %s: class %q: read, write or guarded", o.ID, o.Class)
-			}
-			rule.Operation = &intercept.Operation{ID: o.ID, Summary: o.Summary, Description: o.Description, Class: o.Class, Category: o.Category}
+		o, err := operation(p.Operation)
+		if err != nil {
+			return intercept.Route{}, nil, err
 		}
+		rule.Operation = o
 		out.Scope.Paths = append(out.Scope.Paths, rule)
+	}
+	for _, g := range r.GraphQL {
+		scope, err := graphqlScope(g)
+		if err != nil {
+			return intercept.Route{}, nil, err
+		}
+		out.Scope.GraphQL = append(out.Scope.GraphQL, scope)
 	}
 	if g := r.Git; g != nil {
 		scope, err := gitScope(*g)
@@ -620,6 +651,86 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 	}
 	out.Credential = f
 	return out, f.Close, nil
+}
+
+// operation is a rule's operation, its class one of the three.
+func operation(o *Operation) (*intercept.Operation, error) {
+	if o == nil {
+		return nil, nil
+	}
+	switch o.Class {
+	case "", "read", "write", "guarded":
+	default:
+		return nil, fmt.Errorf("operation %s: class %q: read, write or guarded", o.ID, o.Class)
+	}
+	return &intercept.Operation{ID: o.ID, Summary: o.Summary, Description: o.Description, Class: o.Class, Category: o.Category}, nil
+}
+
+// graphqlScope reads a GraphQL endpoint's rules.
+func graphqlScope(g GraphQLRule) (intercept.GraphQLScope, error) {
+	s := intercept.GraphQLScope{Path: g.Path}
+	switch g.Unmatched {
+	case "", "refuse":
+		s.Unmatched = intercept.Refuse
+	case "ask":
+		s.Unmatched = intercept.Ask
+	case "allow":
+		s.Unmatched = intercept.Admit
+	default:
+		return s, fmt.Errorf("graphql %s: unmatched %q: refuse, ask or allow", g.Path, g.Unmatched)
+	}
+	rule := func(what string, f GraphQLField) (intercept.GraphQLRule, error) {
+		if f.Ask && f.Refuse {
+			return intercept.GraphQLRule{}, fmt.Errorf("graphql %s %s both asks and refuses", g.Path, what)
+		}
+		o, err := operation(f.Operation)
+		if err != nil {
+			return intercept.GraphQLRule{}, err
+		}
+		r := intercept.GraphQLRule{Outcome: intercept.Admit, Operation: o}
+		switch {
+		case f.Ask:
+			r.Outcome = intercept.Ask
+		case f.Refuse:
+			r.Outcome = intercept.Refuse
+		}
+		return r, nil
+	}
+	if q := g.Query; q != nil {
+		if q.Field != "" {
+			return s, fmt.Errorf("graphql %s: a query is decided whole, not by field %q", g.Path, q.Field)
+		}
+		r, err := rule("query", *q)
+		if err != nil {
+			return s, err
+		}
+		s.Query = &r
+	}
+	fields := func(kind string, list []GraphQLField) (map[string]intercept.GraphQLRule, error) {
+		out := map[string]intercept.GraphQLRule{}
+		for _, f := range list {
+			if f.Field == "" {
+				return nil, fmt.Errorf("graphql %s: a %s with no field", g.Path, kind)
+			}
+			if _, ok := out[f.Field]; ok {
+				return nil, fmt.Errorf("graphql %s: %s %s twice", g.Path, kind, f.Field)
+			}
+			r, err := rule(kind+" "+f.Field, f)
+			if err != nil {
+				return nil, err
+			}
+			out[f.Field] = r
+		}
+		return out, nil
+	}
+	var err error
+	if s.Mutations, err = fields("mutation", g.Mutations); err != nil {
+		return s, err
+	}
+	if s.Subscriptions, err = fields("subscription", g.Subscriptions); err != nil {
+		return s, err
+	}
+	return s, nil
 }
 
 // gitScope reads a git rule's repositories: "*" alone for all of them, or

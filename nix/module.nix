@@ -30,6 +30,14 @@ let
         inherit name;
         inherit (r) host upstream unmatched;
         paths = map (lib.filterAttrs (_: v: v != null)) r.paths;
+      } // lib.optionalAttrs (r.graphql != [ ]) {
+        graphql = map
+          (g: {
+            inherit (g) path unmatched;
+            mutations = map (lib.filterAttrs (_: v: v != null)) g.mutations;
+            subscriptions = map (lib.filterAttrs (_: v: v != null)) g.subscriptions;
+          } // lib.optionalAttrs (g.query != null) { query = lib.filterAttrs (_: v: v != null) g.query; })
+          r.graphql;
       } // lib.optionalAttrs (r.upstreamCA != null) { upstreamCA = "${r.upstreamCA}"; }
       // lib.optionalAttrs (r.refusal != null) { inherit (r) refusal; }
       // lib.optionalAttrs (r.credentialFile != null) { inherit (r) credentialFile; }
@@ -72,6 +80,42 @@ let
 
   # A "*" is the whole entry, or a leading "*.", and nowhere else.
   starPlaced = w: w == "*" || ! lib.hasInfix "*" (lib.removePrefix "*." w);
+
+  # What a rule is, in its API's own words.
+  operation = types.submodule {
+    options = {
+      id = mkOption { type = types.strMatching ".+"; description = "The operation's id, for the log."; };
+      summary = mkOption { type = types.strMatching ".+"; description = "What it does, in a line."; };
+      description = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "What it does, at more length.";
+      };
+      class = mkOption {
+        type = types.nullOr (types.enum [ "read" "write" "guarded" ]);
+        default = null;
+        description = ''
+          What kind of operation the consumer judged it, shown to the
+          person asked. Never matched on: `ask` and `refuse` decide.
+        '';
+      };
+      category = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "The API's own grouping of it, shown to the person asked.";
+      };
+    };
+  };
+
+  operationOption = mkOption {
+    type = types.nullOr operation;
+    default = null;
+    description = ''
+      What the rule is, in its API's own words: the only prose a person
+      being asked about a matching request is shown. It comes from here,
+      never from the request.
+    '';
+  };
 
   pathRule = types.submodule {
     options = {
@@ -119,36 +163,64 @@ let
           Not with `ask`.
         '';
       };
-      operation = mkOption {
-        type = types.nullOr (types.submodule {
-          options = {
-            id = mkOption { type = types.strMatching ".+"; description = "The operation's id, for the log."; };
-            summary = mkOption { type = types.strMatching ".+"; description = "What it does, in a line."; };
-            description = mkOption {
-              type = types.nullOr types.str;
-              default = null;
-              description = "What it does, at more length.";
-            };
-            class = mkOption {
-              type = types.nullOr (types.enum [ "read" "write" "guarded" ]);
-              default = null;
-              description = ''
-                What kind of operation the consumer judged it, shown to the
-                person asked. Never matched on: `ask` and `refuse` decide.
-              '';
-            };
-            category = mkOption {
-              type = types.nullOr types.str;
-              default = null;
-              description = "The API's own grouping of it, shown to the person asked.";
-            };
-          };
-        });
+      operation = operationOption;
+    };
+  };
+
+  # One field at a GraphQL mutation's or subscription's root, or, with no
+  # field, every query.
+  graphqlField = types.submodule {
+    options = {
+      field = mkOption {
+        type = types.nullOr (types.strMatching "[_A-Za-z][_0-9A-Za-z]*");
         default = null;
+        example = "closePullRequest";
+        description = "The field, by name. Null for `query`, which decides every query.";
+      };
+      ask = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Put a request holding it to `services.frisket.asker`.";
+      };
+      refuse = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Refuse a request holding it. Not with `ask`.";
+      };
+      operation = operationOption;
+    };
+  };
+
+  graphqlRule = types.submodule {
+    options = {
+      path = mkOption {
+        type = types.strMatching "/.*";
+        example = "/graphql";
+        description = "The endpoint's path, exactly, `*` alone matching any one segment.";
+      };
+      query = mkOption {
+        type = types.nullOr graphqlField;
+        default = null;
+        description = "Decides every query. Null: a query is unmatched.";
+      };
+      mutations = mkOption {
+        type = types.listOf graphqlField;
+        default = [ ];
+        description = "Each mutation field, by name.";
+      };
+      subscriptions = mkOption {
+        type = types.listOf graphqlField;
+        default = [ ];
+        description = "Each subscription field, by name.";
+      };
+      unmatched = mkOption {
+        type = types.enum [ "refuse" "ask" "allow" ];
+        default = "refuse";
         description = ''
-          What the rule is, in its API's own words: the only prose a person
-          being asked about a matching request is shown. It comes from here,
-          never from the request.
+          A query or a field no rule names. What frisket cannot see -- a
+          GET, a batch, a persisted query, a body over 1 MiB, a document it
+          will not read -- is asked about, or refused where this refuses:
+          never allowed.
         '';
       };
     };
@@ -252,7 +324,17 @@ let
       paths = mkOption {
         type = types.listOf pathRule;
         default = [ ];
-        description = "The route's scope, with `git`. What neither decides, `unmatched` does.";
+        description = "The route's scope, with `git` and `graphql`. What none decides, `unmatched` does.";
+      };
+      graphql = mkOption {
+        type = types.listOf graphqlRule;
+        default = [ ];
+        description = ''
+          GraphQL endpoints, decided by what each request's body holds: a
+          query by `query`, and a mutation or subscription by the rule for
+          each field at its root, the strictest deciding. Before any path
+          rule, and whatever the method.
+        '';
       };
       refusal = mkOption {
         type = types.nullOr (types.submodule {
@@ -474,7 +556,8 @@ in
         one. The question is one JSON document on stdin: `session`, `policy`,
         `route`, `method`, `host`, `path` and `query` as sent, and the
         matched `operation`'s `id`, `summary` and `description` if there was
-        one. Exit 0 admits the request, 1 declines it, anything else refuses
+        one -- and, for a GraphQL request holding several fields, every one's
+        in `operations`, `operation` being the one that decided. Exit 0 admits the request, 1 declines it, anything else refuses
         it and is logged as the asker failing. Everything but `operation` is
         the workload's choosing: show it as the request, never as prose, and
         escape it for whatever renders it. Null: every request a route asks

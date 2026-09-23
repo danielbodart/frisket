@@ -11,9 +11,9 @@ import (
 )
 
 // Scope is what a route's credential may be used for. A request is admitted,
-// asked about, or refused: by the git scope if it is git-shaped, by the most
-// specific path rule that matches it, by the GitHub API scope, and otherwise
-// by Unmatched. An empty scope that refuses what it does not match admits
+// asked about, or refused: by the git scope if it is git-shaped, by a GraphQL
+// endpoint's rules if it is for one, by the most specific path rule that
+// matches it, by the GitHub API scope, and otherwise by Unmatched. An empty scope that refuses what it does not match admits
 // nothing, and New refuses to build a route with one.
 //
 // It is checked against the real request line, after TLS, on every request
@@ -28,6 +28,9 @@ type Scope struct {
 	// Git admits git's smart-HTTP protocol, GitHub-shaped, for a set of
 	// repositories or all of them.
 	Git *GitScope
+	// GraphQL are the route's GraphQL endpoints, each decided by what its
+	// body holds.
+	GraphQL []GraphQLScope
 	// GitHubAPI admits GitHub REST calls under /repos/{owner}/{repo}.
 	// PROVISIONAL: see GitHubAPIScope.
 	GitHubAPI *GitHubAPIScope
@@ -191,6 +194,16 @@ type Verdict struct {
 	Outcome   Outcome
 	Reason    string
 	Operation *Operation
+	// Operations are every operation a GraphQL request holds, where it holds
+	// more than one; Operation is the one that decided.
+	Operations []*Operation
+	// GraphQL is what a GraphQL request was read as, for the log: its type
+	// and root fields, or why it could not be classified.
+	GraphQL string
+
+	// graphql is the endpoint whose body decides, before it is read. Such a
+	// verdict refuses until compiledGraphQL.decide replaces it.
+	graphql *compiledGraphQL
 }
 
 // RuleUnmatched is the reason for a request asked about because nothing
@@ -204,6 +217,7 @@ const wildcard = "*"
 type compiled struct {
 	paths     []compiledPath
 	git       *GitScope
+	graphql   []compiledGraphQL
 	api       *GitHubAPIScope
 	unmatched Unmatched
 }
@@ -268,6 +282,18 @@ func compileScope(s Scope) (*compiled, error) {
 		g := *s.Git
 		c.git = &g
 	}
+	for _, g := range s.GraphQL {
+		cg, err := compileGraphQL(g)
+		if err != nil {
+			return nil, err
+		}
+		for _, other := range c.graphql {
+			if slices.Equal(other.path.segs, cg.path.segs) {
+				return nil, fmt.Errorf("graphql %s twice", g.Path)
+			}
+		}
+		c.graphql = append(c.graphql, cg)
+	}
 	if s.GitHubAPI != nil {
 		if len(s.GitHubAPI.Repos) == 0 || len(s.GitHubAPI.Methods) == 0 {
 			return nil, errors.New("GitHub API scope needs repositories and methods")
@@ -280,7 +306,7 @@ func compileScope(s Scope) (*compiled, error) {
 		a := GitHubAPIScope{Repos: s.GitHubAPI.Repos, Methods: upper(s.GitHubAPI.Methods)}
 		c.api = &a
 	}
-	if len(c.paths) == 0 && c.git == nil && c.api == nil && c.unmatched == UnmatchedRefuse {
+	if len(c.paths) == 0 && c.git == nil && len(c.graphql) == 0 && c.api == nil && c.unmatched == UnmatchedRefuse {
 		return nil, errors.New("scope admits nothing")
 	}
 	return c, nil
@@ -377,6 +403,18 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 			return v
 		}
 	}
+	// Then GraphQL, whose body decides -- at its path, and at any path that
+	// may reach its handler, which must not reach it as whatever a path rule
+	// says.
+	if len(c.graphql) > 0 {
+		whole, split := lenient(segs)
+		for i := range c.graphql {
+			g := &c.graphql[i]
+			if g.path.matches(segs) || g.near(whole) || g.near(split) {
+				return Verdict{Outcome: Refuse, Reason: "graphql body unread", graphql: g}
+			}
+		}
+	}
 	if best := c.best(method, segs, true); best != nil {
 		return c.verdict(method, segs, best)
 	}
@@ -449,19 +487,7 @@ func outranks(rule, stricter *compiledPath, n int) bool {
 // request however leniently an upstream might read it: the strictest first,
 // and among those the most specific.
 func (c *compiled) stricterLeniently(method string, segs []string, than Outcome) []*compiledPath {
-	// Two readings: a slash a segment decodes to is part of it, or -- to an
-	// upstream that decodes before it splits -- the end of it.
-	var whole, split []string
-	for _, s := range segs {
-		whole = append(whole, fold(s))
-		for _, piece := range strings.FieldsFunc(decode(s), func(r rune) bool { return r == '/' || r == '\\' }) {
-			split = append(split, foldDecoded(piece))
-		}
-	}
-	// A trailing slash is nothing, to a lenient reader.
-	if n := len(whole); n > 0 && whole[n-1] == "" {
-		whole = whole[:n-1]
-	}
+	whole, split := lenient(segs)
 	var out []*compiledPath
 	for i := range c.paths {
 		p := &c.paths[i]
@@ -484,6 +510,23 @@ func (c *compiled) stricterLeniently(method string, segs []string, than Outcome)
 		return -a.specificity(b, n)
 	})
 	return out
+}
+
+// lenient is a request's segments as the most lenient upstream might read
+// them, two ways: a slash a segment decodes to is part of it, or -- to an
+// upstream that decodes before it splits -- the end of it. Each is folded, and
+// a trailing slash is nothing.
+func lenient(segs []string) (whole, split []string) {
+	for _, s := range segs {
+		whole = append(whole, fold(s))
+		for _, piece := range strings.FieldsFunc(decode(s), func(r rune) bool { return r == '/' || r == '\\' }) {
+			split = append(split, foldDecoded(piece))
+		}
+	}
+	if n := len(whole); n > 0 && whole[n-1] == "" {
+		whole = whole[:n-1]
+	}
+	return whole, split
 }
 
 // matchesFolded is matches, against folded segments and the rule's folded

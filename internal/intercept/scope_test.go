@@ -2,6 +2,7 @@ package intercept
 
 import (
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -162,7 +163,7 @@ func TestAPushCanBeAskedAbout(t *testing.T) {
 		if !ok {
 			t.Fatalf("test target %q does not parse", tc.target)
 		}
-		if got := c.decide(tc.method, u); got != tc.want {
+		if got := c.decide(tc.method, u); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s %s: got %+v, want %+v", tc.method, tc.target, got, tc.want)
 		}
 	}

@@ -232,6 +232,55 @@ its pack, so one asked about is held to the asker's 16 MiB. Without `credentialF
 read-only GitHub with nothing of yours on it: what the sandbox sends goes on as
 it came, for what the scope admits.
 
+## GraphQL
+
+A GraphQL endpoint is one path whose body says what each request does, so a
+route's `graphql` rules decide it by the body: a query by `query`, and a
+mutation or subscription by the rule for each field at its root, named as the
+schema names it. A request is decided by the strictest of everything its
+document holds -- every field of every operation -- so nothing sent beside a
+field loosens its rule. A field no rule names is the endpoint's `unmatched`
+-- `refuse`, the default, `ask` or `allow`. frisket knows GraphQL and no API's schema: the fields come from the
+configuration, and chase generates them from the provider's published one.
+
+```nix
+graphql = [{
+  path = "/graphql";
+  query.operation = { id = "graphql-query"; summary = "A GraphQL query"; class = "read"; };
+  mutations = [
+    { field = "closePullRequest"; ask = true; operation = { id = "closePullRequest"; summary = "Close a pull request."; class = "write"; category = "pulls"; }; }
+    { field = "deleteRepository"; refuse = true; }
+  ];
+  unmatched = "ask";
+}];
+```
+
+The body is read (1 MiB at most) before anything is decided, and what goes
+upstream is exactly what was read. A field is found through fragment spreads
+and inline fragments at the root, by its name and never its alias, and a
+skipped one counts as run; a fragment is followed once however often it is
+spread. The rule decides at its path and at any spelling that may reach the
+same handler -- `/graphql/`, `/GraphQL`, `/graphql/v4`, `/graphql.json`.
+
+What frisket cannot see is never admitted: it is asked about, or refused
+where `unmatched` refuses. That is a request that may run something its
+document does not show -- a key other than `query`, `operationName` and
+`variables`, a persisted query's hash among them -- and one frisket cannot
+read at all: anything but a POST of `application/json` with no query string
+and no `Content-Encoding`, a batch, a key twice, a body over 1 MiB, a
+document it refuses, or one with more than 16384 selections to follow at its
+roots. Beside what the document does show, the strictest decides. The rule decides every request at its path, whatever the method,
+before any path rule.
+
+Documents are read strictly, to the October 2021 grammar, and anything two
+readers could disagree about is refused rather than resolved: outside a
+string, only printable ASCII, tab, LF and CRLF -- a CR alone ends a comment to
+the spec and not to graphql-ruby, GitHub's reader, which reads on past it into
+what the spec calls code; a comment is printable ASCII; a string holds no
+escaped surrogate. `internal/graphql`'s tests hold frisket to graphql-ruby on
+documents made to find where readers disagree (`scripts/graphql-oracle`):
+whatever frisket reads, graphql-ruby reads the same way.
+
 ## Asking
 
 A route can put a request to a person instead of deciding it. A path rule
@@ -283,6 +332,9 @@ question is one JSON document on stdin:
  "operation": {"id": "...", "summary": "...", "description": "...",
                "class": "write", "category": "..."}}
 ```
+
+A GraphQL request holding several fields has every one's in `operations`, and
+`operation` is the one that decided.
 
 A request with a body is read whole (16 MiB at most; more is refused) before
 it is asked about, and what goes upstream is exactly that body: `body` is its
