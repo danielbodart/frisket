@@ -116,10 +116,6 @@ in
     flong = lib.mapAttrs
       (name: s:
         let file = steeringFile name s; in {
-          # Rootless: the launcher, and every hook with it, runs as the user
-          # who called it, which is the daemon's user -- the one the control
-          # socket answers.
-          engine = "rootless";
           # The control socket's directory is the one way into a session from
           # outside, and no bind may reach it: a workload that could open the
           # socket would steer sessions, its own included.

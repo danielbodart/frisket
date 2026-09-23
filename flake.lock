@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1790121574,
-        "narHash": "sha256-eI8X0kf34t0mrrvtbvbgWYM0Ahpvm4+V24o+VnajAPU=",
+        "lastModified": 1790122883,
+        "narHash": "sha256-blNK4olVg4SRHOFaoA4o4TZPvq3ovQQtbeYcch4UM5o=",
         "owner": "danielbodart",
         "repo": "flong",
-        "rev": "57cf16661f772b256d7158db7ccc51d7c1d768cf",
+        "rev": "cda634111565e7df3b351ef6b50e411b41d7ec0a",
         "type": "github"
       },
       "original": {
