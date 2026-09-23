@@ -330,8 +330,16 @@ in
 
     group = mkOption {
       type = types.str;
-      default = "frisket";
-      description = "The daemon's group. The default creates it.";
+      default = if cfg.user == "frisket" then "frisket" else config.users.users.${cfg.user}.group;
+      defaultText = lib.literalExpression ''
+        if user == "frisket" then "frisket" else config.users.users.''${user}.group'';
+      description = ''
+        The daemon's group: the user's primary group, so that the control
+        socket can read who is asking. The socket learns a peer's user
+        namespace through the peer's pidfd, and the kernel answers that only
+        to a process whose gid is the peer's too. With the default user it is
+        a group of that name, which is created.
+      '';
     };
 
     controlSocket = mkOption {
@@ -472,7 +480,12 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = lib.concatLists (lib.mapAttrsToList
+    assertions = [
+      {
+        assertion = cfg.user == "frisket" || cfg.group == config.users.users.${cfg.user}.group;
+        message = "services.frisket.group is ${cfg.group}, not ${cfg.user}'s primary group: the control socket could read no launcher's user namespace, and would refuse every one.";
+      }
+    ] ++ lib.concatLists (lib.mapAttrsToList
       (name: p:
         map
           (w: {
