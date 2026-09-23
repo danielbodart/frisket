@@ -129,6 +129,19 @@ let
               default = null;
               description = "What it does, at more length.";
             };
+            class = mkOption {
+              type = types.nullOr (types.enum [ "read" "write" "guarded" ]);
+              default = null;
+              description = ''
+                What kind of operation the consumer judged it, shown to the
+                person asked. Never matched on: `ask` and `refuse` decide.
+              '';
+            };
+            category = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "The API's own grouping of it, shown to the person asked.";
+            };
           };
         });
         default = null;
@@ -287,9 +300,14 @@ let
               description = ''`owner/name`, or `"*"` alone for every repository.'';
             };
             push = mkOption {
-              type = types.bool;
-              default = false;
-              description = "Admit git-receive-pack. Without it a push is refused at its first request.";
+              type = types.enum [ "refuse" "ask" "allow" ];
+              default = "refuse";
+              description = ''
+                git-receive-pack. `refuse`: a push is refused at its first
+                request. `ask`: its ref advertisement is admitted and the push
+                itself put to `services.frisket.asker`, which is shown the refs
+                it would update. `allow`: admitted.
+              '';
             };
           };
         });

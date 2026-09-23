@@ -264,3 +264,41 @@ func TestAnAskedBodyIsShownAndSentAsShown(t *testing.T) {
 		t.Fatalf("upstream got a different body from the one asked about")
 	}
 }
+
+// A push asked about is shown as git-receive-pack, with the start of its body,
+// which is the refs it would update: what the person is deciding.
+func TestAPushAskedAboutShowsTheRefsItUpdates(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	cred, _ := tokenFile(t, j, realToken)
+	asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+	route := Route{
+		Name: "git", Host: gitHost, Upstream: up.URL, UpstreamCAs: up.pool(),
+		Credential: cred, Inject: BasicUser("x-access-token"), Placeholder: placeholder,
+		Scope: Scope{Git: &GitScope{AnyRepo: true, Push: Ask}},
+	}
+	f := newFixtureAsking(t, j, slog.LevelInfo, asker, route)
+	c := f.client(t, false)
+
+	update := "0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 refs/heads/main"
+	for _, r := range []struct{ method, target, body string }{
+		{"GET", "/owner/repo.git/info/refs?service=git-receive-pack", ""},
+		{"POST", "/owner/repo.git/git-receive-pack", "0068" + update + "\x00report-status\n0000PACK"},
+	} {
+		req := newRequest(t, r.method, "https://"+gitHost+r.target, strings.NewReader(r.body))
+		req.SetBasicAuth("x-access-token", placeholder)
+		if res, _ := get(t, c, req); res.StatusCode != http.StatusOK {
+			t.Errorf("%s %s: %d", r.method, r.target, res.StatusCode)
+		}
+	}
+	if len(asker.questions) != 1 {
+		t.Fatalf("asked %d questions, want the push alone: %+v", len(asker.questions), asker.questions)
+	}
+	q := asker.questions[0]
+	if q.Operation != ReceivePack || !strings.Contains(q.Body, "refs/heads/main") {
+		t.Errorf("question: %+v", q)
+	}
+	if n := len(up.requests()); n != 2 {
+		t.Errorf("upstream saw %d requests, want both", n)
+	}
+}

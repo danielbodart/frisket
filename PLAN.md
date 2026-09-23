@@ -730,7 +730,8 @@ holds nothing private to read out through them.
   `git@github.com:` and `ssh://git@github.com/` to HTTPS, and git's credential
   helper hands out the placeholder. `~/.ssh` is no longer mounted.
 - **Scope** is a `git` rule: `info/refs`, `git-upload-pack`, and
-  `git-receive-pack` only with `push`, for listed repositories or `*`. It
+  `git-receive-pack` as `push` says -- refused, asked about or allowed -- for
+  listed repositories or `*`. It
   decides every git-shaped request before any path rule, so `GET /` beside it
   does not admit receive-pack's advertisement.
 - **Strict's route carries no credential.** A route may leave out

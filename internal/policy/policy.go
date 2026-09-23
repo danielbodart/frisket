@@ -118,11 +118,12 @@ type Refusal struct {
 }
 
 // GitRule admits git's smart-HTTP protocol, as GitHub serves it, for some
-// repositories or all of them: clone and fetch, and push only if it says so.
+// repositories or all of them: clone and fetch, and push as it says.
 type GitRule struct {
 	// Repos are "owner/name", or "*" alone for every repository.
 	Repos []string `json:"repos"`
-	Push  bool     `json:"push,omitempty"`
+	// Push is "refuse", the default, "ask" or "allow".
+	Push string `json:"push,omitempty"`
 }
 
 // CredentialJSON is where a JSON credential file keeps its token, and when
@@ -157,6 +158,10 @@ type Operation struct {
 	ID          string `json:"id"`
 	Summary     string `json:"summary"`
 	Description string `json:"description,omitempty"`
+	// Class is "read", "write" or "guarded", and Category the API's own
+	// grouping: shown to the person asked, never matched on.
+	Class    string `json:"class,omitempty"`
+	Category string `json:"category,omitempty"`
 }
 
 // Load reads the daemon's configuration file.
@@ -544,7 +549,12 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 	for _, p := range r.Paths {
 		rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, Ask: p.Ask, Refuse: p.Refuse}
 		if o := p.Operation; o != nil {
-			rule.Operation = &intercept.Operation{ID: o.ID, Summary: o.Summary, Description: o.Description}
+			switch o.Class {
+			case "", "read", "write", "guarded":
+			default:
+				return intercept.Route{}, nil, fmt.Errorf("operation %s: class %q: read, write or guarded", o.ID, o.Class)
+			}
+			rule.Operation = &intercept.Operation{ID: o.ID, Summary: o.Summary, Description: o.Description, Class: o.Class, Category: o.Category}
 		}
 		out.Scope.Paths = append(out.Scope.Paths, rule)
 	}
@@ -615,10 +625,21 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 // gitScope reads a git rule's repositories: "*" alone for all of them, or
 // each "owner/name".
 func gitScope(g GitRule) (*intercept.GitScope, error) {
-	if len(g.Repos) == 1 && g.Repos[0] == "*" {
-		return &intercept.GitScope{AnyRepo: true, Push: g.Push}, nil
+	var push intercept.Outcome
+	switch g.Push {
+	case "", "refuse":
+		push = intercept.Refuse
+	case "ask":
+		push = intercept.Ask
+	case "allow":
+		push = intercept.Admit
+	default:
+		return nil, fmt.Errorf("git push %q: refuse, ask or allow", g.Push)
 	}
-	s := &intercept.GitScope{Push: g.Push}
+	if len(g.Repos) == 1 && g.Repos[0] == "*" {
+		return &intercept.GitScope{AnyRepo: true, Push: push}, nil
+	}
+	s := &intercept.GitScope{Push: push}
 	for _, name := range g.Repos {
 		repo, err := intercept.ParseRepo(name)
 		if err != nil {

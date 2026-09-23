@@ -82,6 +82,12 @@ type Operation struct {
 	ID          string `json:"id"`
 	Summary     string `json:"summary"`
 	Description string `json:"description,omitempty"`
+	// Class is what kind of operation the consumer judged it -- "read",
+	// "write" or "guarded" -- and Category is the API's own grouping of it.
+	// Carried to the person being asked and never matched on: the rule's
+	// outcome is what decides.
+	Class    string `json:"class,omitempty"`
+	Category string `json:"category,omitempty"`
 }
 
 // GitScope admits git over HTTPS as GitHub serves it: /{owner}/{repo}[.git]
@@ -92,12 +98,23 @@ type GitScope struct {
 	// be listed.
 	Repos   []Repo
 	AnyRepo bool
-	// Push admits git-receive-pack. Without it, fetch and clone work and a
-	// push is refused at its first request, the ref advertisement -- which is
-	// the one agents-container enforced by inspecting `git`'s command line.
-	// Here it is the request line, which a workload cannot route around by
-	// running git some other way.
-	Push bool
+	// Push decides git-receive-pack. Refuse, the zero value: fetch and clone
+	// work and a push is refused at its first request, the ref advertisement
+	// -- which is the one agents-container enforced by inspecting `git`'s
+	// command line. Here it is the request line, which a workload cannot route
+	// around by running git some other way. Ask admits the advertisement,
+	// which says no more than a fetch's does, and asks at the push itself,
+	// whose body opens with the refs it would update: one question, showing
+	// what it is about. Admit admits both.
+	Push Outcome
+}
+
+// ReceivePack is what a push is, for the person asked about one.
+var ReceivePack = &Operation{
+	ID:          "git-receive-pack",
+	Summary:     "Push to a repository",
+	Description: "Updates the refs listed at the start of the body, to commits it carries.",
+	Class:       "write",
 }
 
 // GitHubAPIScope admits /repos/{owner}/{repo} and everything under it, with
@@ -240,6 +257,9 @@ func compileScope(s Scope) (*compiled, error) {
 		if s.Git.AnyRepo != (len(s.Git.Repos) == 0) {
 			return nil, errors.New("git scope needs repositories, or any repository, and not both")
 		}
+		if s.Git.Push != Refuse && s.Git.Push != Ask && s.Git.Push != Admit {
+			return nil, fmt.Errorf("git push %d is not refuse, ask or admit", s.Git.Push)
+		}
 		for _, r := range s.Git.Repos {
 			if err := r.validate(); err != nil {
 				return nil, err
@@ -353,10 +373,8 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 	// beside a git scope without push still refuses receive-pack's ref
 	// advertisement, which is where a push is meant to stop.
 	if c.git != nil {
-		if ok, reason := c.git.allow(method, segs, u.RawQuery); ok {
-			return Verdict{Outcome: Admit, Reason: reason}
-		} else if reason != "" {
-			return Verdict{Outcome: Refuse, Reason: reason}
+		if v, ok := c.git.decide(method, segs, u.RawQuery); ok {
+			return v
 		}
 	}
 	if best := c.best(method, segs, true); best != nil {
@@ -576,17 +594,19 @@ func (p *compiledPath) rank(i int) int {
 	return 2
 }
 
-// allow for git returns ("", false) when the request is not git-shaped at
-// all, so the caller reports it as out of scope; it names a reason only when
-// the request IS a git request and something about it is refused.
-func (g *GitScope) allow(method string, segs []string, rawQuery string) (bool, string) {
+// decide for git is false when the request is not git-shaped at all, so the
+// caller goes on to the other rules; true, with the verdict, when the request
+// IS a git request, refused if something about it is out of scope.
+func (g *GitScope) decide(method string, segs []string, rawQuery string) (Verdict, bool) {
 	if len(segs) < 3 {
-		return false, ""
+		return Verdict{}, false
 	}
 	name, _ := cutSuffixFold(segs[1], ".git")
 	if !g.AnyRepo && !inRepos(g.Repos, segs[0], name) {
-		return false, ""
+		return Verdict{}, false
 	}
+	admit := Verdict{Outcome: Admit, Reason: "git"}
+	outOfScope := Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}
 	rest := segs[2:]
 	switch {
 	case method == http.MethodGet && len(rest) == 2 && rest[0] == "info" && rest[1] == "refs":
@@ -596,32 +616,35 @@ func (g *GitScope) allow(method string, segs []string, rawQuery string) (bool, s
 		// which service this is, and that is refused rather than resolved.
 		q, err := url.ParseQuery(rawQuery)
 		if err != nil || len(q["service"]) != 1 {
-			return false, ReasonOutOfScope
+			return outOfScope, true
 		}
 		switch q.Get("service") {
 		case "git-upload-pack":
-			return true, "git"
+			return admit, true
 		case "git-receive-pack":
-			if g.Push {
-				return true, "git"
+			if g.Push == Refuse {
+				return Verdict{Outcome: Refuse, Reason: ReasonPush}, true
 			}
-			return false, ReasonPush
+			return admit, true
 		}
-		return false, ReasonOutOfScope
+		return outOfScope, true
 	case method == http.MethodPost && len(rest) == 1 && rawQuery != "":
 		// git never sends a query with a POST. One that arrives is somebody
 		// asking a server that might read `service=` from it to disagree
 		// with the path about which service this is.
-		return false, ReasonOutOfScope
+		return outOfScope, true
 	case method == http.MethodPost && len(rest) == 1 && rest[0] == "git-upload-pack":
-		return true, "git"
+		return admit, true
 	case method == http.MethodPost && len(rest) == 1 && rest[0] == "git-receive-pack":
-		if g.Push {
-			return true, "git"
+		switch g.Push {
+		case Admit:
+			return admit, true
+		case Ask:
+			return Verdict{Outcome: Ask, Reason: "git", Operation: ReceivePack}, true
 		}
-		return false, ReasonPush
+		return Verdict{Outcome: Refuse, Reason: ReasonPush}, true
 	}
-	return false, ""
+	return Verdict{}, false
 }
 
 // inRepos matches owner and name against the set, as whole segments and

@@ -136,7 +136,7 @@ func TestGitRoutesBuild(t *testing.T) {
 		Route{
 			Name: "git", Host: "git.test", Upstream: "https://git.test",
 			CredentialFile: p.Routes[0].CredentialFile, Placeholder: "proxy-injected", BasicUser: "x-access-token",
-			Git: &GitRule{Repos: []string{"owner/repo", "Owner/Other.js"}, Push: true},
+			Git: &GitRule{Repos: []string{"owner/repo", "Owner/Other.js"}, Push: "allow"},
 		},
 		Route{
 			Name: "anon", Host: "anon.test", Upstream: "https://anon.test",
@@ -146,6 +146,29 @@ func TestGitRoutesBuild(t *testing.T) {
 	)
 	if err := check(t, "p", p); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A push is refused, asked about or allowed, and nothing else; an operation's
+// class is one of the three a consumer judges by.
+func TestGitPushAndOperationClassAreOneOfTheirWords(t *testing.T) {
+	for _, push := range []string{"", "refuse", "ask", "allow"} {
+		if _, err := gitScope(GitRule{Repos: []string{"*"}, Push: push}); err != nil {
+			t.Errorf("push %q: %v", push, err)
+		}
+	}
+	for _, push := range []string{"true", "Allow", "admit"} {
+		if _, err := gitScope(GitRule{Repos: []string{"*"}, Push: push}); err == nil {
+			t.Errorf("push %q was accepted", push)
+		}
+	}
+	for class, ok := range map[string]bool{"": true, "read": true, "write": true, "guarded": true, "delete": false} {
+		p := valid(t)
+		p.Routes[0].Paths = []PathRule{{Methods: []string{"DELETE"}, Path: "/x", Ask: true,
+			Operation: &Operation{ID: "x", Summary: "X", Class: class, Category: "things"}}}
+		if err := check(t, "p", p); (err == nil) != ok {
+			t.Errorf("class %q: %v", class, err)
+		}
 	}
 }
 

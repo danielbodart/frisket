@@ -39,7 +39,7 @@ func parseTarget(target string) (*url.URL, bool) {
 
 func TestScopeDecisions(t *testing.T) {
 	c := mustCompile(t, testScope)
-	push := mustCompile(t, Scope{Git: &GitScope{Repos: []Repo{ownerRepo}, Push: true}})
+	push := mustCompile(t, Scope{Git: &GitScope{Repos: []Repo{ownerRepo}, Push: Admit}})
 	anyRepo := mustCompile(t, Scope{Git: &GitScope{AnyRepo: true}})
 	readOnly := mustCompile(t, Scope{
 		Paths: []PathRule{{Methods: []string{"GET", "HEAD"}, Prefix: "/"}},
@@ -139,6 +139,35 @@ func TestScopeDecisions(t *testing.T) {
 		if got != tc.ok || reason != tc.reason {
 			t.Errorf("%s %s: got (%v, %q), want (%v, %q)", tc.method, tc.target, got, reason, tc.ok, tc.reason)
 		}
+	}
+}
+
+// A push that asks admits its ref advertisement, which says no more than a
+// fetch's, and asks once, at the push itself, as git-receive-pack. Only the
+// push: a fetch beside it is not asked about.
+func TestAPushCanBeAskedAbout(t *testing.T) {
+	c := mustCompile(t, Scope{Git: &GitScope{Repos: []Repo{ownerRepo}, Push: Ask}})
+	for _, tc := range []struct {
+		method, target string
+		want           Verdict
+	}{
+		{"GET", "/owner/repo.git/info/refs?service=git-receive-pack", Verdict{Outcome: Admit, Reason: "git"}},
+		{"POST", "/owner/repo.git/git-receive-pack", Verdict{Outcome: Ask, Reason: "git", Operation: ReceivePack}},
+		{"GET", "/owner/repo.git/info/refs?service=git-upload-pack", Verdict{Outcome: Admit, Reason: "git"}},
+		{"POST", "/owner/repo.git/git-upload-pack", Verdict{Outcome: Admit, Reason: "git"}},
+		{"POST", "/owner/repo.git/git-receive-pack?service=git-receive-pack", Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}},
+		{"POST", "/owner/repo-evil.git/git-receive-pack", Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}},
+	} {
+		u, ok := parseTarget(tc.target)
+		if !ok {
+			t.Fatalf("test target %q does not parse", tc.target)
+		}
+		if got := c.decide(tc.method, u); got != tc.want {
+			t.Errorf("%s %s: got %+v, want %+v", tc.method, tc.target, got, tc.want)
+		}
+	}
+	if _, err := compileScope(Scope{Git: &GitScope{AnyRepo: true, Push: Outcome(7)}}); err == nil {
+		t.Error("a push that is neither refused, asked about nor admitted was accepted")
 	}
 }
 

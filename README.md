@@ -207,7 +207,7 @@ routes.github = {
   credentialFile = "/run/secrets/gh-token";
   placeholder = "proxy-injected";
   basicUser = "x-access-token";
-  git = { repos = [ "*" ]; push = true; };   # or [ "owner/repo" ... ]
+  git = { repos = [ "*" ]; push = "ask"; };   # or [ "owner/repo" ... ]
   paths = [ { methods = [ "GET" "HEAD" ]; prefix = "/"; } ];  # releases, archives
 };
 ```
@@ -221,10 +221,14 @@ routes.github = {
 	helper = !gh auth git-credential   # GH_TOKEN=proxy-injected
 ```
 
-`git` admits `info/refs`, `git-upload-pack` and, with `push`, `git-receive-pack`,
-for the listed repositories, matched by segment; it decides every git-shaped
-request, so without `push` a push is refused at its ref advertisement even
-where `paths` admits `GET`. Without `credentialFile`, the same route is
+`git` admits `info/refs` and `git-upload-pack` for the listed repositories,
+matched by segment, and decides `git-receive-pack` as `push` says: `refuse`,
+the default, `ask` or `allow`. It decides every git-shaped request, so a
+refused push is refused at its ref advertisement even where `paths` admits
+`GET`. One asked about admits the advertisement, which says no more than a
+fetch's, and asks once, at the push, as the operation `git-receive-pack`: the
+body the asker is shown opens with the refs it would update. A push's body is
+its pack, so one asked about is held to the asker's 16 MiB. Without `credentialFile`, the same route is
 read-only GitHub with nothing of yours on it: what the sandbox sends goes on as
 it came, for what the scope admits.
 
@@ -259,6 +263,8 @@ routes.cloudflare = {
         id = "dns-records-for-a-zone-delete-dns-record";
         summary = "Delete DNS Record";
         description = "Permanently removes a DNS record from the zone.";
+        class = "guarded";   # read, write or guarded: shown, never matched on
+        category = "DNS Records for a Zone";
       };
     }
   ];
@@ -274,7 +280,8 @@ question is one JSON document on stdin:
  "route": "cloudflare", "method": "PATCH", "host": "api.cloudflare.com",
  "path": "/client/v4/zones/023e/dns_records/372e", "query": "...",
  "body": "{\"content\":\"203.0.113.9\"}", "bodyBytes": 26, "bodySHA256": "...",
- "operation": {"id": "...", "summary": "...", "description": "..."}}
+ "operation": {"id": "...", "summary": "...", "description": "...",
+               "class": "write", "category": "..."}}
 ```
 
 A request with a body is read whole (16 MiB at most; more is refused) before
