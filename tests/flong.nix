@@ -44,10 +44,19 @@ let
   # -- never in its answer, which goes back into the sandbox.
   # Every session's first step, ahead of frisket's: where the test finds it.
   # The leader is bwrap's child, the session's pid 1 as the host sees it.
-  mark = lib.mkOrder 100 ''
+  mark = lib.mkOrder 100 (hook "mark" ''
     echo "$machine" > /tmp/last-session
     echo "$leader" > /tmp/last-leader
-  '';
+  '');
+
+  # A flong hook is a list of commands, and `workspace` one: each snippet
+  # here is a script of its own, under the options the snippets had.
+  script = name: text: "${pkgs.writeShellScript "frisket-test-${name}" ''
+    set -euo pipefail
+    ${text}
+  ''}";
+  hook = name: text: [ [ (script name text) ] ];
+  workspace = [ (script "workspace" "realpath /srv/work") ];
 
   https = pkgs.writeText "https.py" ''
     import http.server, socket, ssl
@@ -282,7 +291,7 @@ in
     # The session under test: steered, in the `all` set, under the policy.
     flong.strict = {
       user = "alice";
-      workspace = "realpath /srv/work";
+      inherit workspace;
       command = [ "bash" "-c" ];
       # Ahead of frisket's own steps, so the test can find the session.
       postStart = mark;
@@ -296,11 +305,11 @@ in
     flong.probed = {
       container = "strict";
       user = "alice";
-      workspace = "realpath /srv/work";
+      inherit workspace;
       command = [ "bash" "-c" ];
       postStart = lib.mkMerge [
         mark
-        (lib.mkOrder 101 ''
+        (lib.mkOrder 101 (hook "probe-start" ''
           # In the session's own mount namespace as well as its network one,
           # so names resolve as they do in there -- through frisket -- and
           # not through the host's nscd, which resolves outside the sandbox.
@@ -332,17 +341,17 @@ in
             [ "$(wc -l < "/tmp/probe-$machine")" -ge 5 ] && break
             sleep 0.01
           done
-        '')
+        ''))
         # After frisket steer (mkBefore), before frisket connect (mkAfter).
-        ''
+        (hook "delay" ''
           date +%s.%N > "/tmp/rules-at-$machine"
           sleep 1
           date +%s.%N > "/tmp/connect-at-$machine"
-        ''
+        '')
       ];
-      postStop = lib.mkAfter ''
+      postStop = lib.mkAfter (hook "probe-stop" ''
         [ -e "/tmp/probe-pid-$machine" ] && kill "$(cat "/tmp/probe-pid-$machine")" 2>/dev/null || true
-      '';
+      '');
     };
     services.frisket.flong.probed.policy = "test";
 
@@ -350,7 +359,7 @@ in
     flong.badpolicy = {
       container = "strict";
       user = "alice";
-      workspace = "realpath /srv/work";
+      inherit workspace;
       command = [ "bash" "-c" ];
       postStart = mark;
     };
@@ -361,7 +370,7 @@ in
     flong.networked = {
       container = "strict";
       user = "alice";
-      workspace = "realpath /srv/work";
+      inherit workspace;
       command = [ "bash" "-c" ];
       network = { };
       postStart = mark;
@@ -372,7 +381,7 @@ in
     flong.trusted = {
       container = "strict";
       user = "alice";
-      workspace = "realpath /srv/work";
+      inherit workspace;
       command = [ "bash" "-c" ];
       network = { };
       postStart = mark;

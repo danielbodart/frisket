@@ -47,6 +47,15 @@ let
   steeringFile = name: s: pkgs.writeText "frisket-steering-${name}.json"
     (self.lib.steering ({ inherit (s) set; } // s.steering)).json;
 
+  # A flong hook is a command, never shell: each step here is a script of
+  # its own, under the options flong's snippets once ran with. It finds
+  # frisket and nft on the PATH flong gives it, from `path`, and reads
+  # $machine, $workspace, $leader, $userns and $netns from its environment.
+  hookScript = name: text: "${pkgs.writeShellScript "frisket-${name}" ''
+    set -euo pipefail
+    ${text}
+  ''}";
+
   paramFlags = s: lib.concatMapStringsSep " "
     (k: "-param ${lib.escapeShellArg "${k}=${s.params.${k}}"}")
     (lib.attrNames s.params);
@@ -128,24 +137,24 @@ in
           # mount namespace. A failure here ends the session: flong ends a
           # session whose hook exits non-zero.
           postStart = lib.mkMerge [
-            (lib.mkBefore ''
+            (lib.mkBefore [ [ (hookScript "${name}-steer" ''
               frisket steer ${control} ${enter} -netns "$netns" -mntns "/proc/$leader/ns/mnt" \
                 -roots ${config.security.pki.caBundle} -steering ${file} \
                 -name "$machine" -policy ${if s.policyFile != null then ''"${s.policyFile}"'' else "/etc/frisket/policies/${s.policy}.json"} \
                 -param workspace="$workspace" ${paramFlags s}
-            '')
+            '') ] ])
             # Connectivity, last. It checks the daemon holds this
             # namespace's session and its table is loaded before touching
             # anything.
-            (lib.mkAfter ''
+            (lib.mkAfter [ [ (hookScript "${name}-connect" ''
               frisket connect ${control} ${enter} -netns "$netns" -steering ${file} -name "$machine"
-            '')
+            '') ] ])
           ];
           # Keyed on $machine alone, because on the sweep's path that is all
           # there is; and safe for a session that is already gone.
-          postStop = ''
+          postStop = [ [ (hookScript "${name}-close" ''
             frisket close ${control} -name "$machine"
-          '';
+          '') ] ];
         })
       cfg.flong;
 
