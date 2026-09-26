@@ -684,7 +684,7 @@ inject.
 | Tool | Where it authenticates | To decide |
 |---|---|---|
 | gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`; *GraphQL decided, below* |
-| hf | `huggingface.co` | *decided, in chase's `apps/huggingface.nix` and `docs/huggingface.md`*: rules generated from the Hub's own OpenAPI description, reads admitted and writes and token-minting reads asked; strict refuses what would ask; `huggingface.co` and `*.hf.co` allowed; the token in sops |
+| hf | `huggingface.co` | *decided, in chase's `apps/huggingface.nix` and `docs/huggingface.md`*: rules generated from the Hub's own OpenAPI description, reads admitted and writes and token-minting reads asked; a tier for other people's code refuses what would ask; `huggingface.co` and `*.hf.co` allowed; the token in sops |
 | Cloudflare | `api.cloudflare.com` | account and zone scoping, the credential's source |
 | GCP client libraries, gcloud | a metadata server on the service address | where its tokens come from, and what they may do |
 | Postgres, Redis, MongoDB | — | nothing of frisket's in trusted; unreachable in strict |
