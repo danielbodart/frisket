@@ -49,6 +49,10 @@ var (
 	readHeaderTimeout = 30 * time.Second
 	// idleTimeout closes a keep-alive connection with no request on it.
 	idleTimeout = 5 * time.Minute
+	// maxWildNames bounds the names a wildcard route's upstream connections
+	// are kept idle for: the sandbox chooses them, and one past it closes
+	// every idle one.
+	maxWildNames = 64
 )
 
 // maxLoggedPath bounds the path in a log line.
@@ -244,9 +248,13 @@ func New(cfg Config) (*Interceptor, error) {
 		}
 		rt := &route{Route: r, host: host, wild: wild, upstream: up, scope: sc, refusal: rf}
 		rt.tr = upstreamTransport(rt, dial)
+		var tr http.RoundTripper = rt.tr
+		if wild {
+			tr = &boundedNames{Transport: rt.tr, names: map[string]struct{}{}}
+		}
 		rt.proxy = &httputil.ReverseProxy{
 			Rewrite:        rt.rewrite,
-			Transport:      rt.tr,
+			Transport:      tr,
 			ModifyResponse: inspect,
 			ErrorLog:       errLog,
 			ErrorHandler:   upstreamFailed,
@@ -337,6 +345,27 @@ func upstreamTransport(rt *route, dial func(context.Context, string, string) (ne
 		// non-streaming model request can take minutes to produce headers,
 		// and a stream can last as long as it likes.
 	}
+}
+
+// boundedNames is a wildcard route's Transport, kept idle for at most
+// maxWildNames upstream names at once.
+type boundedNames struct {
+	*http.Transport
+	mu    sync.Mutex
+	names map[string]struct{}
+}
+
+func (b *boundedNames) RoundTrip(r *http.Request) (*http.Response, error) {
+	b.mu.Lock()
+	if _, ok := b.names[r.URL.Host]; !ok {
+		if len(b.names) >= maxWildNames {
+			b.Transport.CloseIdleConnections()
+			clear(b.names)
+		}
+		b.names[r.URL.Host] = struct{}{}
+	}
+	b.mu.Unlock()
+	return b.Transport.RoundTrip(r)
 }
 
 // Close stops the server, closes every connection it holds and waits for its

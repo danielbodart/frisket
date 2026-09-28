@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -11,7 +12,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"pgregory.net/rapid"
 )
@@ -24,6 +27,7 @@ type namedUpstream struct {
 	ca     *CA
 	mu     sync.Mutex
 	dialed []string
+	open   atomic.Int64
 }
 
 func newNamedUpstream(t *testing.T, suffix string) *namedUpstream {
@@ -42,6 +46,14 @@ func newNamedUpstream(t *testing.T, suffix string) *namedUpstream {
 		_, _ = io.WriteString(w, "upstream says hello")
 	}))
 	u.EnableHTTP2 = true
+	u.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		switch s {
+		case http.StateNew:
+			n.open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			n.open.Add(-1)
+		}
+	}
 	u.TLS = &tls.Config{GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) { return ca.Leaf(h.ServerName) }}
 	u.StartTLS()
 	t.Cleanup(u.Close)
@@ -277,6 +289,35 @@ func TestLookupIsExactThenTheNearestWildcard(t *testing.T) {
 			if r := i.lookup(bad); r != nil {
 				t.Fatalf("lookup(%q) = %v, for what is not a name", bad, r)
 			}
+		}
+	})
+}
+
+// A wildcard route's names are the sandbox's to choose, so the upstream
+// connections it keeps idle are bounded by name, not only by time.
+func TestAWildcardRouteKeepsIdleConnectionsForBoundedNames(t *testing.T) {
+	defer func(n int) { maxWildNames = n }(maxWildNames)
+	maxWildNames = 3
+	protos(t, func(t *testing.T, h2 bool) {
+		j := &journal{}
+		up := newNamedUpstream(t, "wild.test")
+		f := newNamedFixture(t, j, up, Route{
+			Name: "wild", Host: "*.wild.test", Upstream: "https://*.wild.test", UpstreamCAs: up.pool(),
+			Scope: Scope{Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
+		})
+		c := f.client(t, h2)
+		for i := range 20 {
+			name := fmt.Sprintf("n%d.wild.test", i)
+			if res, _ := get(t, c, newRequest(t, "GET", "https://"+name+"/", nil)); res.StatusCode != 200 {
+				t.Fatalf("%s: %d", name, res.StatusCode)
+			}
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for up.open.Load() > int64(maxWildNames) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%d upstream connections open after 20 names, want at most %d", up.open.Load(), maxWildNames)
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
 	})
 }

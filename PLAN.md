@@ -871,7 +871,8 @@ the session.
   asked for -- the route's is written `https://*.suffix[:port]`, its own host,
   so only a port can differ -- dialled through the same structural check as
   egress and verified against that name; a request for another name on the
-  same connection is 421. A leaf is issued per name (about 110 µs); a wildcard
+  same connection is 421. Upstream connections are kept idle for at most 64
+  names, the sandbox's to choose. A leaf is issued per name (about 110 µs); a wildcard
   leaf would cover one label, and Google's regional hosts have two. The
   session's CA is constrained to the suffix, which Go and OpenSSL both read as
   the subtree. That an exact host's constraint also permits its subdomains is
