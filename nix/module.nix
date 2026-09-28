@@ -45,6 +45,7 @@ let
       // lib.optionalAttrs (r.header != null) { inherit (r) header; }
       // lib.optionalAttrs (r.basicUser != null) { inherit (r) basicUser; }
       // lib.optionalAttrs (r.git != null) { git = { inherit (r.git) repos push; }; }
+      // lib.optionalAttrs (r.sessionKey != null) { sessionKey = { inherit (r.sessionKey) publicKey issuer grants; }; }
       // lib.optionalAttrs (r.credentialJSON != null) {
         credentialJSON = { inherit (r.credentialJSON) token; }
           // lib.optionalAttrs (r.credentialJSON.expiresMillis != null) { inherit (r.credentialJSON) expiresMillis; }
@@ -241,14 +242,56 @@ let
   route = types.submodule {
     options = {
       host = mkOption {
-        type = types.str;
+        type = types.strMatching "([*][.])?[^*]+";
         example = "api.example.com";
-        description = "The name the sandbox connects to, intercepted because this route is for it. It must be on the policy's `allow`.";
+        description = ''
+          The name the sandbox connects to, intercepted because this route is
+          for it, or `*.name` for every name below it at any depth, each
+          served as itself. A name's exact route serves it, and failing that
+          the nearest wildcard above it. It must be on the policy's `allow`.
+        '';
       };
       upstream = mkOption {
         type = types.strMatching "https://.*";
         example = "https://api.example.com";
-        description = "Where its requests go. Never plain HTTP: the credential crosses this hop.";
+        description = ''
+          Where its requests go. Never plain HTTP: the credential crosses this
+          hop. A wildcard route's is its own host, `https://*.name[:port]`:
+          each request goes to the name it was made to.
+        '';
+      };
+      sessionKey = mkOption {
+        type = types.nullOr (types.submodule {
+          options = {
+            publicKey = mkOption {
+              type = types.str;
+              description = "The public half of a key made for the session, PEM, RSA of 2048 bits or more.";
+            };
+            issuer = mkOption {
+              type = types.strMatching "[^[:space:]]+";
+              example = "agent@project.iam.gserviceaccount.com";
+              description = "The `iss` every JWT the key signs must carry, and the only `sub` one may.";
+            };
+            grants = mkOption {
+              type = types.listOf (types.strMatching "[^/*]+/.*");
+              default = [ ];
+              example = [ "oauth2.googleapis.com/token" "www.googleapis.com/oauth2/v4/token" ];
+              description = ''
+                Token URLs, host and path, each a host this route serves.
+                A JWT-bearer grant the key signed, posted there, is answered
+                by frisket with `placeholder`; anything else there is 400.
+                Nothing sent to one ever leaves.
+              '';
+            };
+          };
+        });
+        default = null;
+        description = ''
+          A key the sandbox's clients sign with. A bearer JWT it signed, for
+          the host asked, in date, is the placeholder too; one it signed that
+          is not is refused. Needs `credentialFile` and `placeholder`, and
+          the default `Authorization: Bearer`.
+        '';
       };
       upstreamCA = mkOption {
         type = types.nullOr types.path;

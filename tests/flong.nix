@@ -35,7 +35,7 @@ let
       -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
       -keyout server.key -out server.csr -subj /CN=api.test
-    printf '%s\n' 'subjectAltName=DNS:api.test,DNS:allowed.test' 'extendedKeyUsage=serverAuth' > ext
+    printf '%s\n' 'subjectAltName=DNS:api.test,DNS:allowed.test,DNS:*.wild.test,DNS:eu.rep.wild.test' 'extendedKeyUsage=serverAuth' > ext
     openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
       -days 3650 -extfile ext -out server.crt
   '';
@@ -56,6 +56,23 @@ let
     ${text}
   ''}";
   hook = name: text: [ [ (script name text) ] ];
+
+  # A JWT as a Google client signs one with its key file's key: RS256, the
+  # service account as issuer and subject, an hour long, and an audience or
+  # a scope.
+  jwt = pkgs.writeShellScript "frisket-test-jwt" ''
+    set -eu
+    key=$1 iss=$2 aud=$3 scope=''${4:-}
+    b64() { ${pkgs.openssl}/bin/openssl base64 -A | ${pkgs.coreutils}/bin/tr '+/' '-_' | ${pkgs.coreutils}/bin/tr -d '='; }
+    now=$(${pkgs.coreutils}/bin/date +%s)
+    claims="\"iss\":\"$iss\",\"sub\":\"$iss\",\"iat\":$now,\"exp\":$((now + 3600))"
+    if [ -n "$aud" ]; then claims="$claims,\"aud\":\"$aud\""; fi
+    if [ -n "$scope" ]; then claims="$claims,\"scope\":\"$scope\""; fi
+    h=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64)
+    c=$(printf '{%s}' "$claims" | b64)
+    s=$(printf '%s.%s' "$h" "$c" | ${pkgs.openssl}/bin/openssl dgst -sha256 -sign "$key" | b64)
+    printf '%s.%s.%s' "$h" "$c" "$s"
+  '';
   workspace = [ (script "workspace" "realpath /srv/work") ];
 
   https = pkgs.writeText "https.py" ''
@@ -111,6 +128,9 @@ in
           "/allowed.test/${upstream6}"
           "/api.test/${upstream4}"
           "/api.test/${upstream6}"
+          # And every name below it.
+          "/wild.test/${upstream4}"
+          "/wild.test/${upstream6}"
           "/denied.test/${upstream4}"
           # On no allowlist: only a policy that allows every name resolves it.
           "/unlisted.test/${upstream4}"
@@ -218,12 +238,38 @@ in
       policies.trusted = {
         allow = [ "*" ];
         routes.api = config.services.frisket.policies.test.routes.api;
+        # Through the module, and so through the build's `frisket check`: a
+        # wildcard route with a session key, whose private half is nowhere.
+        routes.wild = {
+          host = "*.wild.test";
+          upstream = "https://*.wild.test";
+          upstreamCA = "${certs}/ca.crt";
+          credentialFile = "/srv/secrets/token";
+          placeholder = "frisket-placeholder";
+          sessionKey = {
+            publicKey = ''
+              -----BEGIN PUBLIC KEY-----
+              MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArnYXAM6/0q2N+okVSJlD
+              7R/J5L2Yf+jxw7yV343UUc9Lj70G0XeUT7cZ+RZsCMKFZI2LVFdKRNFCVXSM2HBw
+              pqiFc45Gf0rmDNsr83X8BLS+4TLWsO58ByIvSW2QjxLeD38TWBAcSBJad/kqHe14
+              b8PuO/y41zXGUxrymr41egBPDcVw0VCRi/vbZNjEDFIKW6GjtWTENgciPypXpAv8
+              Fq4xD8LZ3xpykgq8vG2B+gVKX1pTYVNZIpgMehVHW1w0GIPaxJaecTpD/5W6sUhf
+              4ZtEcs1vy5AS5c9DB8j8quJNl6VHy2lExUsnoLb8B8+oULVVhnYAKjddiYJP7a1G
+              mQIDAQAB
+              -----END PUBLIC KEY-----
+            '';
+            issuer = "agent@project.iam.gserviceaccount.test";
+            grants = [ "oauth2.wild.test/token" ];
+          };
+          paths = [{ methods = [ "GET" ]; prefix = "/v1"; }];
+        };
       };
     };
 
     systemd.tmpfiles.rules = [
       "d /srv/work 0777 root root -"
       "d /srv/secrets 0700 alice users -"
+      "d /srv/policies 0755 root root -"
     ];
 
     # What a workload tries against what the hook installed. In the store, which
@@ -387,6 +433,18 @@ in
       postStart = mark;
     };
     services.frisket.flong.trusted = { policy = "trusted"; set = "service"; };
+
+    # A session under a document written for it, as a launcher writes one
+    # holding the public half of a key made for the session.
+    flong.gapi = {
+      container = "strict";
+      user = "alice";
+      inherit workspace;
+      command = [ "bash" "-c" ];
+      postStart = mark;
+    };
+    services.frisket.flong.gapi = { policy = "test"; policyFile = "/srv/policies/gapi.json"; };
+    services.frisket.policyRoots = [ "/srv/policies" ];
   };
 
   testScript = { nodes, ... }:
@@ -396,6 +454,7 @@ in
       badpolicy = lib.getExe nodes.machine.flong.badpolicy.launcher;
       networked = lib.getExe nodes.machine.flong.networked.launcher;
       trusted = lib.getExe nodes.machine.flong.trusted.launcher;
+      gapi = lib.getExe nodes.machine.flong.gapi.launcher;
       frisket = lib.getExe nodes.machine.services.frisket.package;
       roots = nodes.machine.security.pki.caBundle;
     in
@@ -937,6 +996,56 @@ in
           machine.succeed("cp /tmp/first-session-ca.crt /srv/work/other.crt")
           status, out = machine.execute(as_workload(leader, "curl -sS -m 10 --cacert /srv/work/other.crt https://api.test/v1/models"))
           assert status == 60, (status, out)
+          release(name)
+
+      with subtest("a wildcard route serves every name below it, and a session key's grants and JWTs are its placeholder"):
+          sa = "agent@project.iam.gserviceaccount.test"
+          machine.succeed("openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /srv/work/session.key "
+                          "&& chmod 0644 /srv/work/session.key")
+          doc = {"name": "gapi", "allow": ["*.wild.test"], "routes": [{
+              "name": "gapi", "host": "*.wild.test", "upstream": "https://*.wild.test", "upstreamCA": "${certs}/ca.crt",
+              "credentialFile": "/srv/secrets/token", "placeholder": placeholder,
+              "sessionKey": {"publicKey": machine.succeed("openssl pkey -in /srv/work/session.key -pubout"),
+                             "issuer": sa, "grants": ["oauth2.wild.test/token"]},
+              "paths": [{"methods": ["GET"], "prefix": "/v1"}]}]}
+          machine.succeed(f"printf '%s' {shlex.quote(json.dumps(doc))} > /srv/policies/gapi.json && chmod 0644 /srv/policies/gapi.json")
+          name, leader = hold("${gapi}", "ip link show frisket0")
+          text = machine.succeed(f"openssl x509 -noout -text -in /proc/{leader}/root/etc/frisket/ca.crt")
+          assert re.search(r"Permitted:\n\s+DNS:wild\.test\n", text), text
+          for n in ["storage.wild.test", "eu.rep.wild.test"]:
+              out = machine.succeed(as_workload(leader, f"dig +short A {n} @127.0.0.1"))
+              assert out.strip() == "192.0.2.2", (n, out)
+
+          def jwt(aud, scope=""):
+              return f"$(${jwt} /srv/work/session.key {sa} '{aud}' '{scope}')"
+          grant = ("curl -sS -m 10 --cacert /etc/frisket/ca.crt -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer "
+                   f"-d assertion={jwt('https://oauth2.wild.test/token', 'https://www.googleapis.com/auth/cloud-platform')} "
+                   "https://oauth2.wild.test/token")
+          answer = json.loads(machine.succeed(as_workload(leader, grant)))
+          assert answer == {"access_token": placeholder, "expires_in": 3599, "token_type": "Bearer"}, answer
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' "
+                                            "-d grant_type=refresh_token -d refresh_token=x https://oauth2.wild.test/token"))
+          assert out == "400", out
+          assert upstream_saw("/token") == "", upstream_saw("/token")
+
+          for n, auth in [("storage.wild.test", placeholder), ("eu.rep.wild.test", jwt("https://eu.rep.wild.test/")),
+                          ("storage.wild.test", jwt("", "https://www.googleapis.com/auth/cloud-platform"))]:
+              out = machine.succeed(as_workload(leader, f"curl -sS -m 10 --cacert /etc/frisket/ca.crt "
+                                                f"-H \"Authorization: Bearer {auth}\" https://{n}/v1/things"))
+              assert out.strip() == "upstream-api-ok", (n, out)
+          assert f"GET eu.rep.wild.test /v1/things auth=Bearer {token}" in upstream_saw("eu.rep.wild.test"), upstream_saw(".")
+          assert "eyJ" not in upstream_saw("."), "a JWT the session key signed reached the upstream"
+
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' "
+                                            f"-H \"Authorization: Bearer {jwt('https://other.wild.test/')}\" https://storage.wild.test/v1/things"))
+          assert out == "403", out
+          status, out = machine.execute(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt https://wild.test/"))
+          assert status != 0, out
+
+          [g] = wait_log("request", name, lambda m: m.get("credential") == "answered", "the grant")
+          assert g["host"] == "oauth2.wild.test" and g["route"] == "gapi" and g["status"] == 200, g
+          hosts = {m["host"] for m in lines_of("request", name) if m.get("credential") == "injected"}
+          assert hosts == {"storage.wild.test", "eu.rep.wild.test"}, hosts
           release(name)
 
       with subtest("the host's resolv.conf rewritten mid-session: the next query reaches the new resolver"):
