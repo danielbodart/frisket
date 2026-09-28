@@ -280,7 +280,8 @@ file -- is given a key made for the session, and its route the public half:
   frisket: `{"access_token": <placeholder>, "expires_in": 3599, "token_type":
   "Bearer"}`, or an ID token signed by nobody when it asks for
   `target_audience`. The log says `credential: answered`. Anything else sent
-  there is 400, and nothing sent to a grant URL ever leaves.
+  there is 400, and nothing sent to a grant URL, however it is spelt, ever
+  leaves.
 - A bearer JWT the key signed, RS256, as `issuer`, in date and at most an hour
   long, whose audience is `https://<host>/` or which has a `scope` and no
   audience, is the placeholder, and replaced. One the key signed that fails

@@ -887,7 +887,8 @@ the session.
   <placeholder>, "expires_in": 3599, "token_type": "Bearer"}`, or, when it
   asks for `target_audience`, an ID token shaped like a JWT and signed by
   nobody. Anything else sent there is 400, whatever the scope says, and
-  nothing leaves. Google's
+  nothing leaves -- nor from a URL any upstream might read as one: another
+  case, a trailing slash, a `;parameter`, a trailing dot. Google's
   clients post to `oauth2.googleapis.com/token`, except Node's storage
   library, which posts to `www.googleapis.com/oauth2/v4/token` whatever the
   key file says (measured), so both are the route's.

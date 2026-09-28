@@ -117,13 +117,15 @@ func compileSessionKey(k *SessionKey, route string, serves func(string) bool) (*
 	c := &sessionKey{SessionKey: *k, grants: map[string]bool{}, auds: map[string]bool{}, seen: map[[sha256.Size]byte]verified{}}
 	for _, g := range k.Grants {
 		host, path, ok := strings.Cut(g, "/")
-		if !ok || host != dns.Normalize(host) || !dns.ValidQueryName(host) || strings.ContainsAny(path, "?#") {
+		segs, err := splitPath("/" + path)
+		if !ok || err != nil || host != dns.Normalize(host) || !dns.ValidQueryName(host) || strings.ContainsAny(path, "?#") {
 			return nil, fmt.Errorf("route %s: session key grant %q: host/path", route, g)
 		}
 		if !serves(host) {
 			return nil, fmt.Errorf("route %s: session key grant %q: %s is not this route's", route, g, host)
 		}
-		c.grants[g] = true
+		whole, _ := lenient(segs)
+		c.grants[host+"/"+strings.Join(whole, "/")] = true
 		c.auds["https://"+g] = true
 	}
 	return c, nil
@@ -190,6 +192,17 @@ func (k *sessionKey) bearer(tok, host string, now time.Time) (bool, string) {
 		return true, ""
 	}
 	return true, errAudience.Error()
+}
+
+// grant is whether a request to host at an escaped path is to one of the
+// token URLs, read as leniently as any upstream might read it.
+func (k *sessionKey) grant(host, escaped string) bool {
+	segs, err := splitPath(escaped)
+	if err != nil {
+		return false
+	}
+	whole, split := lenient(segs)
+	return k.grants[host+"/"+strings.Join(whole, "/")] || k.grants[host+"/"+strings.Join(split, "/")]
 }
 
 func (k *sessionKey) remember(sum [sha256.Size]byte, v verified, now time.Time) {

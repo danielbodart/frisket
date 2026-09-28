@@ -374,6 +374,40 @@ func TestAnythingElseAtAGrantURLIsRefusedHere(t *testing.T) {
 	}
 }
 
+// A TOKEN URL SPELT ANOTHER WAY IS STILL ONE: answered here, never sent on,
+// even on a route whose scope would admit anything there.
+func TestAGrantURLSpeltAnotherWayIsAnsweredHere(t *testing.T) {
+	j := &journal{}
+	up := newNamedUpstream(t, "gapi.test")
+	cred, _ := tokenFile(t, j, realToken)
+	rt := gapiRoute(up, cred)
+	rt.Scope = Scope{Paths: []PathRule{{Methods: []string{"GET", "POST"}, Prefix: "/"}}}
+	c := newNamedFixture(t, j, up, rt).client(t, true)
+	now := time.Now()
+	form := url.Values{"grant_type": {jwtBearer}, "assertion": {sign(t, jose.RS256, sessionPriv(), claimsAt(now, tokenURL))}}
+	for _, target := range []string{
+		tokenURL + "/", "https://oauth2.gapi.test/Token", "https://oauth2.gapi.test/token;x", "https://oauth2.gapi.test/token.",
+		"https://oauth2.gapi.test/%74oken", legacyURL + "/", "https://www.gapi.test/oauth2%2Fv4%2Ftoken", "https://www.gapi.test/OAuth2/v4/token",
+	} {
+		req := newRequest(t, "POST", target, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		res, body := get(t, c, req)
+		if res.StatusCode != 200 || !strings.Contains(body, placeholder) {
+			t.Errorf("POST %s: %d %q", target, res.StatusCode, body)
+		}
+	}
+	for _, target := range []string{"https://oauth2.gapi.test//token", "https://oauth2.gapi.test/./token"} {
+		req := newRequest(t, "POST", target, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if res, _ := get(t, c, req); res.StatusCode != http.StatusForbidden {
+			t.Errorf("POST %s: %d, want 403", target, res.StatusCode)
+		}
+	}
+	if n := len(up.requests()); n != 0 {
+		t.Fatalf("%d requests to a grant URL reached the upstream", n)
+	}
+}
+
 func TestNewRefusesABadSessionKey(t *testing.T) {
 	cred, _ := tokenFile(t, &journal{}, realToken)
 	up := &namedUpstream{ca: mustCA(t, "gapi.test")}

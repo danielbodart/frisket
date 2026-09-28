@@ -563,7 +563,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec.sentMethod = sent
-	if rt.key != nil && rt.key.grants[ic.sni+r.URL.Path] {
+	if rt.key != nil && rt.key.grant(ic.sni, r.URL.EscapedPath()) {
 		// Answered here whatever the scope says: nothing sent to a token
 		// URL ever leaves.
 		rec.rule = RuleGrant
