@@ -16,7 +16,8 @@ const (
 // method: X-HTTP-Method-Override by Google's front end (measured), Rack,
 // Symfony, Laravel, Express's method-override and ASP.NET Core;
 // X-HTTP-Method by OData and SharePoint; X-Method-Override by ASP.NET
-// Web API's override handlers.
+// Web API's override handlers. A name is compared with '_' read as '-', as
+// CGI does, which is how PHP's frameworks see headers.
 var overrideHeaders = []string{"X-Http-Method-Override", "X-Http-Method", "X-Method-Override"}
 
 // overrideParams are the query parameters read the same way, compared
@@ -30,11 +31,14 @@ var overrideParams = []string{"$httpmethod", "_method"}
 // it is refused if it is.
 func override(r *http.Request) (sent, reason string) {
 	var named []string
-	for _, h := range overrideHeaders {
-		for _, v := range r.Header.Values(h) {
+	for k, vs := range r.Header {
+		if !isOverrideHeader(k) {
+			continue
+		}
+		for _, v := range vs {
 			named = append(named, strings.Trim(v, " \t"))
 		}
-		r.Header.Del(h)
+		delete(r.Header, k)
 	}
 	query, params, ok := stripOverrideParams(r.URL.RawQuery)
 	if !ok {
@@ -56,6 +60,16 @@ func override(r *http.Request) (sent, reason string) {
 	sent, r.Method = r.Method, method
 	r.URL.RawQuery = query
 	return sent, ""
+}
+
+func isOverrideHeader(name string) bool {
+	name = strings.ReplaceAll(name, "_", "-")
+	for _, h := range overrideHeaders {
+		if strings.EqualFold(name, h) {
+			return true
+		}
+	}
+	return false
 }
 
 // stripOverrideParams is a raw query without its override parameters, and

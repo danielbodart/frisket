@@ -26,6 +26,7 @@ func TestAMethodOverrideIsTheMethod(t *testing.T) {
 			{"GET", "/v1/things/a", "X-HTTP-Method-Override", "DELETE", ""},
 			{"GET", "/v1/things/a", "X-HTTP-Method", "delete", ""},
 			{"GET", "/v1/things/a", "x-method-override", "Delete", ""},
+			{"GET", "/v1/things/a", "X_HTTP_METHOD_OVERRIDE", "DELETE", ""},
 			{"GET", "/v1/things/a?$httpMethod=DELETE", "", "", ""},
 			{"GET", "/v1/things/a?x=1&%24httpMethod=DELETE&y=2", "", "", "x=1&y=2"},
 			{"GET", "/v1/things/a?x=1;%2524HTTPMETHOD=delete", "", "", "x=1"},
@@ -50,14 +51,14 @@ func TestAMethodOverrideIsTheMethod(t *testing.T) {
 			if got.Method != "DELETE" || got.URL.RawQuery != tc.query {
 				t.Errorf("%s %s %s: upstream saw %s ?%s", tc.method, tc.target, tc.header, got.Method, got.URL.RawQuery)
 			}
-			for _, h := range overrideHeaders {
-				if _, ok := got.Header[h]; ok {
+			for h := range got.Header {
+				if isOverrideHeader(h) {
 					t.Errorf("%s %s: upstream saw %s", tc.method, tc.target, h)
 				}
 			}
 		}
 
-		for _, l := range f.journal.waitLines(t, "request", 8) {
+		for _, l := range f.journal.waitLines(t, "request", 9) {
 			if l["method"] != "DELETE" || l["method_sent"] == nil || l["rule"] != RuleAsked || l["operation"] != "delete-thing" {
 				t.Errorf("log: %v", l)
 			}
@@ -98,6 +99,7 @@ func TestAMethodOverrideItCannotApplyIsRefused(t *testing.T) {
 	}{
 		{"/v1/things/a?$httpMethod=POST", map[string][]string{"X-HTTP-Method-Override": {"DELETE"}}, ReasonOverrideConflict},
 		{"/v1/things/a", map[string][]string{"X-HTTP-Method-Override": {"DELETE"}, "X-HTTP-Method": {"GET"}}, ReasonOverrideConflict},
+		{"/v1/things/a", map[string][]string{"X-HTTP-Method-Override": {"DELETE"}, "X_HTTP_METHOD_OVERRIDE": {"GET"}}, ReasonOverrideConflict},
 		{"/v1/things/a", map[string][]string{"X-HTTP-Method-Override": {"DELETE", "PUT"}}, ReasonOverrideConflict},
 		{"/v1/things/a?$httpMethod=DELETE&%24httpMethod=GET", nil, ReasonOverrideConflict},
 		{"/v1/things/a?_method=PUT&$httpMethod=DELETE", nil, ReasonOverrideConflict},
