@@ -330,6 +330,99 @@ func TestABodyThatPausesIsAskedAboutByWhatItSent(t *testing.T) {
 	})
 }
 
+// A body is waited for until it starts: headers and then, after longer than a
+// body may pause, the body are asked about by that body, never by nothing.
+func TestABodyThatStartsLateIsAskedAboutByItself(t *testing.T) {
+	defer func(d time.Duration) { previewIdle = d }(previewIdle)
+	previewIdle = 20 * time.Millisecond
+	protos(t, func(t *testing.T, h2 bool) {
+		j := &journal{}
+		var got []byte
+		up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			got, _ = io.ReadAll(r.Body)
+		})
+		asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+		f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
+		pr, pw := io.Pipe()
+		go func() {
+			time.Sleep(20 * previewIdle)
+			_, _ = pw.Write([]byte(`{"name":"www"}`))
+			_ = pw.Close()
+		}()
+		req := newRequest(t, "PUT", "https://"+apiHost+"/v2/records", pr)
+		req.ContentLength = -1
+		if res, _ := get(t, f.client(t, h2), req); res.StatusCode != http.StatusOK {
+			t.Fatalf("%d", res.StatusCode)
+		}
+		if q := asker.questions[0]; q.Body != `{"name":"www"}` || q.BodyMore {
+			t.Fatalf("question: %q, more %v", q.Body, q.BodyMore)
+		}
+		if string(got) != `{"name":"www"}` {
+			t.Fatalf("upstream got %q", got)
+		}
+	})
+}
+
+// A body declared and never sent is never asked about: the request waits for
+// the client, and goes when it does.
+func TestABodyNeverSentIsNeverAskedAbout(t *testing.T) {
+	defer func(d time.Duration) { previewIdle = d }(previewIdle)
+	previewIdle = 20 * time.Millisecond
+	protos(t, func(t *testing.T, h2 bool) {
+		j := &journal{}
+		up := newUpstream(t, nil)
+		asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+		f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
+		pr, pw := io.Pipe()
+		done := make(chan error, 1)
+		go func() {
+			req := newRequest(t, "PUT", "https://"+apiHost+"/v2/records", pr)
+			req.ContentLength = 64
+			res, err := f.client(t, h2).Do(req)
+			if err == nil {
+				res.Body.Close()
+			}
+			done <- err
+		}()
+		time.Sleep(20 * previewIdle)
+		_ = pw.CloseWithError(errors.New("gave up"))
+		if err := <-done; err == nil {
+			t.Fatal("a request with no body had an answer")
+		}
+		if l := f.journal.waitLines(t, "request", 1)[0]; l["reason"] != ReasonStoppedWaiting {
+			t.Fatalf("log: %v", l)
+		}
+		if n := len(asker.questions); n != 0 {
+			t.Fatalf("asked %d times", n)
+		}
+		if n := len(up.requests()); n != 0 {
+			t.Fatalf("upstream saw %d requests", n)
+		}
+	})
+}
+
+// A request with no body is asked about at once, with none.
+func TestARequestWithNoBodyIsAskedAboutAtOnce(t *testing.T) {
+	defer func(d time.Duration) { previewIdle = d }(previewIdle)
+	previewIdle = time.Hour
+	protos(t, func(t *testing.T, h2 bool) {
+		j := &journal{}
+		up := newUpstream(t, nil)
+		asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+		f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
+		for _, body := range []io.Reader{nil, strings.NewReader("")} {
+			asker.questions = nil
+			req := newRequest(t, "POST", "https://"+apiHost+"/v2/records", body)
+			if res, _ := get(t, f.client(t, h2), req); res.StatusCode != http.StatusOK {
+				t.Fatalf("%d", res.StatusCode)
+			}
+			if q := asker.questions[0]; q.Body != "" || q.BodyMore || q.BodyLength != 0 {
+				t.Fatalf("question: %q, more %v, length %d", q.Body, q.BodyMore, q.BodyLength)
+			}
+		}
+	})
+}
+
 // A declined body sends nothing upstream, however much of it there is.
 func TestADeclinedBodyGoesNowhere(t *testing.T) {
 	j := &journal{}

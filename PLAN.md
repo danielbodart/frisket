@@ -942,9 +942,12 @@ the session.
   4 KiB, since a person reads it, and asks with that, the length if one was
   declared, and whether more followed; on an allow it sends the preview and
   then streams the rest. There is no limit on an asked body. The preview also
-  ends where the body pauses for 500 ms: a streaming RPC sends its first
-  message and waits, and a client on this machine with its body ready never
-  pauses that long. Nothing else about gRPC changes (unary and bidirectional
+  ends where the body pauses for 500 ms after its first byte: a streaming RPC
+  sends its first message and waits, and a client on this machine with its
+  body ready never pauses that long. Before its first byte the body is waited
+  for, as long as the client keeps the request open, so nobody is asked with
+  an empty preview of a body still to come; a request with none is asked at
+  once. Nothing else about gRPC changes (unary and bidirectional
   calls, trailers and 8 MiB messages pass the interceptor unchanged,
   measured). What a person allows is the start of a body, not all of it, so
   the question's `bodyBytes` and `bodySHA256` are gone. GraphQL's read, to

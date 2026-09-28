@@ -404,7 +404,9 @@ A GraphQL request holding several fields has every one's in `operations`, and
 A request with a body is asked about by its start: `body` is its first 4 KiB,
 or what arrived before it paused for half a second -- a streaming RPC sends
 one message and waits -- `bodyMore` whether it went on past that, and
-`bodyLength` the length it declared, if it did. On an allow, `body` goes
+`bodyLength` the length it declared, if it did. A body is waited for until
+its first byte, so a question never shows an empty start of a body still to
+come; one without a body is asked about at once. On an allow, `body` goes
 upstream first and the rest streams after it, however long it is: what a
 person admits is the start of a body.
 

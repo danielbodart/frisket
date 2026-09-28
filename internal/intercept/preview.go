@@ -11,11 +11,12 @@ import (
 // dialog, a git push's ref updates, a write's JSON, a stream's first message.
 const BodyPreview = 4096
 
-// previewIdle is how long a body may produce nothing before it is asked about
-// with what it has sent. A client streaming an RPC sends its first message
-// and waits for an answer, and a preview waiting for more would wait for
-// ever. The sandbox is on this machine, so a body that is ready arrives in
-// far less.
+// previewIdle is how long a body, once it has started, may produce nothing
+// before it is asked about with what it has sent. A client streaming an RPC
+// sends its first message and waits for an answer, and a preview waiting for
+// more would wait for ever. The sandbox is on this machine, so a body that is
+// ready arrives in far less. Before its first byte a body is waited for: a
+// question never shows an empty preview of a body still to come.
 var previewIdle = 500 * time.Millisecond
 
 type chunk struct {
@@ -24,7 +25,7 @@ type chunk struct {
 }
 
 // preview reads the start of body: up to BodyPreview bytes, until it ends,
-// or until it produces nothing for previewIdle. more is whether the body had
+// or until, having started, it produces nothing for previewIdle. more is whether the body had
 // not ended there. rest is the whole body again, the preview first, for
 // sending on.
 func preview(ctx context.Context, body io.ReadCloser) (head []byte, more bool, rest io.ReadCloser, err error) {
@@ -37,6 +38,7 @@ func preview(ctx context.Context, body io.ReadCloser) (head []byte, more bool, r
 		}()
 	}
 	idle := time.NewTimer(previewIdle)
+	idle.Stop()
 	defer idle.Stop()
 	read(BodyPreview + 1)
 	for {
