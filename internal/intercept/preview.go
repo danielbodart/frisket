@@ -44,12 +44,12 @@ func preview(ctx context.Context, body io.ReadCloser) (head []byte, more bool, r
 		case c := <-reads:
 			head = append(head, c.b...)
 			switch {
-			case c.err == io.EOF:
-				return head, false, &resumed{head: head, err: io.EOF, body: body}, nil
-			case c.err != nil:
+			case c.err != nil && c.err != io.EOF:
 				return nil, false, nil, c.err
 			case len(head) > BodyPreview:
-				return head[:BodyPreview], true, &resumed{head: head, body: body}, nil
+				return head[:BodyPreview], true, &resumed{head: head, err: c.err, body: body}, nil
+			case c.err == io.EOF:
+				return head, false, &resumed{head: head, err: io.EOF, body: body}, nil
 			}
 			if len(c.b) > 0 {
 				idle.Reset(previewIdle)
