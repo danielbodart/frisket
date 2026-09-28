@@ -195,6 +195,9 @@ credentialJSON = {
 };
 ```
 
+Clients retry a 503 quietly, so a credential that stays expired is logged once,
+at error, when requests first find it so, and once more when it is fresh again.
+
 ## git
 
 GitHub takes a token for git only as Basic auth's password. With the
@@ -372,6 +375,9 @@ A method override is the method: `X-HTTP-Method-Override`, `X-HTTP-Method`,
 stripped, and everything after -- every rule, the question, the log line and
 the request upstream -- is that method. Overrides that disagree, or name no
 method, are 400.
+
+A gRPC call's log line carries its `grpc_status`, from its trailers: its HTTP
+status is 200 whatever happened.
 
 A refusal is plain text unless the route gives it the API's own error shape,
 which a client then reads and reports:

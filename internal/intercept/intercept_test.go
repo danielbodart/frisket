@@ -617,6 +617,81 @@ func TestExpiredCredentialAnswers503(t *testing.T) {
 	}
 }
 
+// A credential that stays expired while requests keep arriving is said once,
+// loudly, and its renewal once: clients retry a 503 quietly, and a renewer
+// that has stopped otherwise looks like a slow one.
+func TestAStaleCredentialIsSaidOncePerEpisode(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	path := filepath.Join(t.TempDir(), "creds.json")
+	write := func(exp time.Time) {
+		t.Helper()
+		b := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q,"expiresAt":%d}}`, realToken, exp.UnixMilli())
+		if err := os.WriteFile(path, []byte(b), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(time.Now().Add(-time.Minute))
+	cred, err := credential.WatchFile(path,
+		credential.JSON{Token: "claudeAiOauth.accessToken", ExpiresMillis: "claudeAiOauth.expiresAt"}.Extract,
+		slog.New(slog.NewJSONHandler(j, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cred.Close() })
+	f := newFixture(t, j, apiRoute(up, cred))
+	c := f.client(t, true)
+	until := func(status int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			res, _ := get(t, c, newRequest(t, "GET", "https://"+apiHost+"/v1/messages", nil))
+			if res.StatusCode == status {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("still %d, want %d", res.StatusCode, status)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	for range 5 {
+		until(http.StatusServiceUnavailable)
+	}
+	write(time.Now().Add(time.Hour))
+	until(http.StatusOK)
+	until(http.StatusOK)
+	write(time.Now().Add(-time.Second))
+	until(http.StatusServiceUnavailable)
+	until(http.StatusServiceUnavailable)
+
+	lines := f.journal.lines(t, "credential")
+	var states []any
+	for _, l := range lines {
+		if l["route"] != "api" {
+			continue
+		}
+		states = append(states, l["outcome"])
+		switch l["outcome"] {
+		case "stale":
+			if l["level"] != "ERROR" || l["expires"] == nil {
+				t.Errorf("%v", l)
+			}
+		case "fresh":
+			if l["level"] != "INFO" || l["stale_ms"] == nil {
+				t.Errorf("%v", l)
+			}
+		}
+	}
+	if fmt.Sprint(states) != "[stale fresh stale]" {
+		t.Fatalf("credential lines: %v", states)
+	}
+	if n := len(f.journal.lines(t, "request")); n < 9 {
+		t.Fatalf("%d request lines", n)
+	}
+}
+
 // A credential file replaced by temp-file-and-rename is used from the next
 // request on.
 func TestCredentialFileReplacedByRenameIsUsed(t *testing.T) {

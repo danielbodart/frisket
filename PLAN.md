@@ -930,12 +930,14 @@ the session.
   the question's `bodyBytes` and `bodySHA256` are gone. GraphQL's read, to
   1 MiB, is a different thing and stays: it classifies the whole document.
 - **Rough edges the prototype found:** a gRPC call is logged by its HTTP
-  status, 200, where the `grpc-status` trailer says what happened; a
+  status, 200, where the `grpc-status` trailer says what happened (*built*:
+  `grpc_status`, from the trailers or a trailers-only response); a
   credential that stays expired while requests arrive should be said in the
   log once, since clients retry the 503 quietly for two minutes and a dead
-  renewer looks like a slow one; and a JWT the session key signed but with bad
-  claims could be refused here with a clear error, where today it goes
-  upstream and comes back 401.
+  renewer looks like a slow one (*built*: once when a request first finds it
+  stale, at error, and once when one finds it fresh); and a JWT the session
+  key signed but with bad claims could be refused here with a clear error,
+  where today it goes upstream and comes back 401.
 
 ---
 

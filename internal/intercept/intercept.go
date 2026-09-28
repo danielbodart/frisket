@@ -27,6 +27,7 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,6 +178,9 @@ type route struct {
 	refusal  *refusalShape
 	proxy    *httputil.ReverseProxy
 	tr       *http.Transport
+	// staleSince is when requests began finding the credential expired, in
+	// Unix nanoseconds, or 0 while it is fresh.
+	staleSince atomic.Int64
 }
 
 var _ steer.Handler = sessionHandler{}
@@ -464,6 +468,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	lw := &logWriter{ResponseWriter: w, rec: rec}
+	rec.header = w.Header()
 	if r.Body != nil && r.Body != http.NoBody {
 		r.Body = &countingBody{ReadCloser: r.Body, n: &rec.reqBytes}
 	}
@@ -557,8 +562,16 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// thing that fixes this.
 		rec.refuse(ReasonStaleCredential)
 		rec.level = slog.LevelWarn
+		if rt.staleSince.CompareAndSwap(0, i.now().UnixNano()) {
+			i.log.Error("credential", "policy", i.policy, "route", rt.Name, "host", rt.host,
+				"outcome", "stale", "expires", sec.Expires.UTC())
+		}
 		rt.refuse(lw, http.StatusServiceUnavailable, ReasonStaleCredential, v.Operation)
 		return
+	}
+	if since := rt.staleSince.Swap(0); since != 0 {
+		i.log.Info("credential", "policy", i.policy, "route", rt.Name, "host", rt.host,
+			"outcome", "fresh", "stale_ms", i.now().Sub(time.Unix(0, since)).Milliseconds())
 	}
 
 	ctx := context.WithValue(r.Context(), secretKey{}, sec.Value)
@@ -650,6 +663,23 @@ func inspect(res *http.Response) error {
 	return nil
 }
 
+// grpcStatus is a gRPC call's status: from its trailers, or its headers where
+// it had no body.
+func grpcStatus(r *http.Request, h http.Header) (int, bool) {
+	if h == nil || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+		return 0, false
+	}
+	v := h.Get("Grpc-Status")
+	if v == "" {
+		v = h.Get(http.TrailerPrefix + "Grpc-Status")
+	}
+	code, err := strconv.Atoi(v)
+	if err != nil || code < 0 {
+		return 0, false
+	}
+	return code, true
+}
+
 // loggedPath is a request's path as the log shows it: no query, and bounded.
 func loggedPath(r *http.Request) string {
 	path := r.URL.EscapedPath()
@@ -715,8 +745,11 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 	if rec.graphql != "" {
 		attrs = append(attrs, "graphql", rec.graphql)
 	}
+	attrs = append(attrs, "status", status)
+	if code, ok := grpcStatus(r, rec.header); ok {
+		attrs = append(attrs, "grpc_status", code)
+	}
 	attrs = append(attrs,
-		"status", status,
 		"req_bytes", rec.reqBytes.Load(),
 		"resp_bytes", rec.respBytes.Load(),
 		"duration_ms", d.Milliseconds(),
@@ -770,11 +803,13 @@ type record struct {
 	graphql string
 	// sentMethod is the request line's method, where an override replaced it.
 	sentMethod string
-	err        error
-	level      slog.Level
-	status     atomic.Int64
-	reqBytes   atomic.Int64
-	respBytes  atomic.Int64
+	// header is the response's, trailers and all once it has finished.
+	header    http.Header
+	err       error
+	level     slog.Level
+	status    atomic.Int64
+	reqBytes  atomic.Int64
+	respBytes atomic.Int64
 }
 
 func (r *record) refuse(reason string) {
