@@ -1,10 +1,12 @@
 package intercept
 
 import (
+	"io"
 	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -82,6 +84,74 @@ func TestAMethodOverrideCanNameAReadOnlyMethod(t *testing.T) {
 	if l := f.journal.waitLines(t, "request", 1)[0]; l["method"] != "GET" || l["method_sent"] != "POST" || l["rule"] != "path" {
 		t.Fatalf("log: %v", l)
 	}
+}
+
+// A POST's form is read for an override as Rack, Laravel and Symfony read
+// it, and stripped from it. A form a POST names GET for is its query, as
+// Google's clients send a long GET: it goes upstream as a GET with that
+// query and no body, and is decided with it.
+func TestAMethodOverrideInAFormIsTheMethod(t *testing.T) {
+	protos(t, func(t *testing.T, h2 bool) {
+		j := &journal{}
+		var mu sync.Mutex
+		var bodies []string
+		up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			bodies = append(bodies, string(b))
+			mu.Unlock()
+			_, _ = io.WriteString(w, "upstream says hello")
+		})
+		asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+		f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
+		c := f.client(t, h2)
+
+		for _, tc := range []struct {
+			target, header, contentType, body string
+			method, query, sentBody           string
+			asked                             bool
+		}{
+			{"/v1/things/a", "", "application/x-www-form-urlencoded", "_method=DELETE&x=1", "DELETE", "", "x=1", true},
+			{"/v1/things/a", "", "", "x=1&%5Fmethod=delete", "DELETE", "", "x=1", true},
+			{"/v1/things/a", "", "Application/X-WWW-Form-Urlencoded; charset=utf-8", "%24httpMethod=DELETE", "DELETE", "", "", true},
+			{"/v1/things?alt=json", "GET", "application/x-www-form-urlencoded", "filter=a%3Db&pageToken=t", "GET", "alt=json&filter=a%3Db&pageToken=t", "", false},
+			{"/v1/things", "", "application/x-www-form-urlencoded", "filter=x&$httpMethod=GET", "GET", "filter=x", "", false},
+			{"/v1/things", "GET", "", "x=1", "GET", "", "x=1", false},
+			{"/v1/things/a", "", "application/json", `{"_method":"DELETE"}`, "POST", "", `{"_method":"DELETE"}`, true},
+		} {
+			req := newRequest(t, "POST", "https://"+apiHost+tc.target, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", tc.contentType)
+			if tc.header != "" {
+				req.Header.Set("X-HTTP-Method-Override", tc.header)
+			}
+			asker.questions = nil
+			if res, _ := get(t, c, req); res.StatusCode != http.StatusOK {
+				t.Errorf("%s %q: %d", tc.target, tc.body, res.StatusCode)
+				continue
+			}
+			if tc.asked != (len(asker.questions) == 1) || tc.asked && asker.questions[0].Method != tc.method {
+				t.Errorf("%s %q: asked %+v", tc.target, tc.body, asker.questions)
+			}
+			seen := up.requests()
+			got := seen[len(seen)-1]
+			mu.Lock()
+			sentBody := bodies[len(bodies)-1]
+			mu.Unlock()
+			if got.Method != tc.method || got.URL.RawQuery != tc.query || sentBody != tc.sentBody {
+				t.Errorf("%s %q: upstream saw %s ?%s %q", tc.target, tc.body, got.Method, got.URL.RawQuery, sentBody)
+			}
+			if tc.method == "GET" && got.Header.Get("Content-Type") != "" {
+				t.Errorf("%s %q: a GET sent with Content-Type %q", tc.target, tc.body, got.Header.Get("Content-Type"))
+			}
+		}
+
+		n := len(up.requests())
+		req := newRequest(t, "POST", "https://"+apiHost+"/v1/things/a", strings.NewReader(strings.Repeat("x", maxForm)+"&_method=DELETE"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if res, _ := get(t, c, req); res.StatusCode != http.StatusBadRequest || len(up.requests()) != n {
+			t.Errorf("a form too long to read: %d, upstream saw %d", res.StatusCode, len(up.requests())-n)
+		}
+	})
 }
 
 // Overrides that disagree, or that name no method, are refused: frisket

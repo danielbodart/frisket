@@ -426,10 +426,12 @@ asks, unless the rule that admits is more specific. An operation named with
 `path` always outranks a `prefix`.
 
 A method override is the method: `X-HTTP-Method-Override`, `X-HTTP-Method`,
-`X-Method-Override`, `$httpMethod` and `_method` are taken, upper-cased,
-stripped, and everything after -- a session key's grant, every rule, the
-question, the log line and the request upstream -- is that method. Overrides that disagree, or name no
-method, are 400.
+`X-Method-Override`, and `$httpMethod` or `_method` in the query or a POST's
+form body (up to 1 MiB), are taken, upper-cased, stripped, and everything
+after -- a session key's grant, every rule, the question, the log line and
+the request upstream -- is that method. A form a POST names `GET` for goes
+upstream as the GET's query. Overrides that disagree, or name no method, are
+400.
 
 A gRPC call's log line carries its `grpc_status`, from its trailers: its HTTP
 status is 200 whatever happened.

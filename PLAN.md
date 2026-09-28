@@ -927,9 +927,13 @@ the session.
   the request with it, strips them, and decides on that: a GET smuggling a
   DELETE is a DELETE, to every rule and upstream alike. Every route, not only
   Google's. *Built*, with `X-HTTP-Method` (OData, SharePoint),
-  `X-Method-Override` (ASP.NET Web API's handlers) and `_method` (Laravel,
-  Symfony) beside them, each name read decoded and case-folded, split at `;`
-  as well as `&`. The method is upper-cased: Google's is case-sensitive, and
+  `X-Method-Override` (ASP.NET Web API's handlers) and `_method` (Rack,
+  Laravel, Symfony) beside them, each name read decoded and case-folded, split
+  at `;` as well as `&`, in the query and in a POST's form body, which those
+  frameworks read first; a form over 1 MiB is 400, since an upstream reads all
+  of it. A multipart body is not read. A form a POST names `GET` for is the
+  query Google's clients moved there from a long URL: it goes upstream as the
+  GET's query, and is decided with it. The method is upper-cased: Google's is case-sensitive, and
   `delete` there is no method, but Rack, Symfony and Laravel upper-case it,
   and upstream it is then the DELETE frisket decided. Two that disagree, or
   one that is not a method, are 400.
