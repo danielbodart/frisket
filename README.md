@@ -426,8 +426,8 @@ asks, unless the rule that admits is more specific. An operation named with
 
 A method override is the method: `X-HTTP-Method-Override`, `X-HTTP-Method`,
 `X-Method-Override`, `$httpMethod` and `_method` are taken, upper-cased,
-stripped, and everything after -- every rule, the question, the log line and
-the request upstream -- is that method. Overrides that disagree, or name no
+stripped, and everything after -- a session key's grant, every rule, the
+question, the log line and the request upstream -- is that method. Overrides that disagree, or name no
 method, are 400.
 
 A gRPC call's log line carries its `grpc_status`, from its trailers: its HTTP
