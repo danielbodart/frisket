@@ -261,7 +261,11 @@ in
             issuer = "agent@project.iam.gserviceaccount.test";
             grants = [ "oauth2.wild.test/token" ];
           };
-          paths = [{ methods = [ "GET" ]; prefix = "/v1"; }];
+          paths = [
+            { methods = [ "GET" ]; prefix = "/v1"; }
+            { methods = [ "GET" ]; path = "/v1/projects/*/secrets/*/versions/*:access"; refuse = true; }
+            { methods = [ "GET" ]; path = "/storage/v1/b/*/o/*"; encodedSlashes = true; }
+          ];
         };
       };
     };
@@ -1007,7 +1011,9 @@ in
               "credentialFile": "/srv/secrets/token", "placeholder": placeholder,
               "sessionKey": {"publicKey": machine.succeed("openssl pkey -in /srv/work/session.key -pubout"),
                              "issuer": sa, "grants": ["oauth2.wild.test/token"]},
-              "paths": [{"methods": ["GET"], "prefix": "/v1"}]}]}
+              "paths": [{"methods": ["GET"], "prefix": "/v1"},
+                        {"methods": ["GET"], "path": "/v1/projects/*/secrets/*/versions/*:access", "refuse": True},
+                        {"methods": ["GET"], "path": "/storage/v1/b/*/o/*", "encodedSlashes": True}]}]}
           machine.succeed(f"printf '%s' {shlex.quote(json.dumps(doc))} > /srv/policies/gapi.json && chmod 0644 /srv/policies/gapi.json")
           name, leader = hold("${gapi}", "ip link show frisket0")
           text = machine.succeed(f"openssl x509 -noout -text -in /proc/{leader}/root/etc/frisket/ca.crt")
@@ -1039,6 +1045,15 @@ in
           out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' "
                                             f"-H \"Authorization: Bearer {jwt('https://other.wild.test/')}\" https://storage.wild.test/v1/things"))
           assert out == "403", out
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' "
+                                            f"-X POST -H 'X-HTTP-Method-Override: GET' -H \"Authorization: Bearer {placeholder}\" "
+                                            "https://storage.wild.test/v1/projects/p/secrets/s/versions/1:access"))
+          assert out == "403", out
+          out = machine.succeed(as_workload(leader, f"curl -sS -m 10 --cacert /etc/frisket/ca.crt -H \"Authorization: Bearer {placeholder}\" "
+                                            "https://storage.wild.test/storage/v1/b/b/o/a%2Fb"))
+          assert out.strip() == "upstream-api-ok", out
+          assert f"GET storage.wild.test /storage/v1/b/b/o/a%2Fb auth=Bearer {token}" in upstream_saw("a%2Fb"), upstream_saw(".")
+          assert "1:access" not in upstream_saw("."), "a refused verb reached the upstream"
           status, out = machine.execute(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt https://wild.test/"))
           assert status != 0, out
 
