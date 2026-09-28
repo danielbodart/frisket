@@ -207,34 +207,6 @@ func TestARefusalShapeMustHoldItsMessage(t *testing.T) {
 	}
 }
 
-// A header or parameter some APIs read as the real method is refused: frisket
-// decides on the request line's, and an admitted GET must not be a DELETE
-// upstream.
-func TestMethodOverridesAreRefused(t *testing.T) {
-	j := &journal{}
-	up := newUpstream(t, nil)
-	f := newFixture(t, j, gatedRoute(up, t, j))
-	c := f.client(t, false)
-	for _, tc := range []struct{ target, header string }{
-		{"/v1/things/a", "X-HTTP-Method-Override"},
-		{"/v1/things/a", "X-HTTP-Method"},
-		{"/v1/things/a", "x-method-override"},
-		{"/v1/things/a?_method=DELETE", ""},
-	} {
-		req := newRequest(t, "GET", "https://"+apiHost+tc.target, nil)
-		req.Header.Set("Authorization", sandboxAuth)
-		if tc.header != "" {
-			req.Header.Set(tc.header, "DELETE")
-		}
-		if res, _ := get(t, c, req); res.StatusCode != http.StatusForbidden {
-			t.Errorf("%s %s: %d, want 403", tc.target, tc.header, res.StatusCode)
-		}
-	}
-	if n := len(up.requests()); n != 0 {
-		t.Fatalf("upstream saw %d requests", n)
-	}
-}
-
 // An asked request's body is in its question -- the start of it, its length
 // and its digest -- and what goes upstream is exactly that body.
 func TestAnAskedBodyIsShownAndSentAsShown(t *testing.T) {

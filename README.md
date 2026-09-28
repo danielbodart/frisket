@@ -362,8 +362,13 @@ Where several rules match, an admission never depends on how literally the
 upstream reads its paths: a rule that asks, and matches the request read
 leniently -- another case, a trailing slash, a `;parameter`, a trailing dot --
 asks, unless the rule that admits is more specific. An operation named with
-`path` always outranks a `prefix`. A method-override header
-(`X-HTTP-Method-Override` and its kin) or `_method` parameter is refused.
+`path` always outranks a `prefix`.
+
+A method override is the method: `X-HTTP-Method-Override`, `X-HTTP-Method`,
+`X-Method-Override`, `$httpMethod` and `_method` are taken, upper-cased,
+stripped, and everything after -- every rule, the question, the log line and
+the request upstream -- is that method. Overrides that disagree, or name no
+method, are 400.
 
 A refusal is plain text unless the route gives it the API's own error shape,
 which a client then reads and reports:

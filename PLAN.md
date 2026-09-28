@@ -910,7 +910,13 @@ the session.
   as `DELETE`, `GET` as `POST`). frisket takes the method they name, rewrites
   the request with it, strips them, and decides on that: a GET smuggling a
   DELETE is a DELETE, to every rule and upstream alike. Every route, not only
-  Google's.
+  Google's. *Built*, with `X-HTTP-Method` (OData, SharePoint),
+  `X-Method-Override` (ASP.NET Web API's handlers) and `_method` (Laravel,
+  Symfony) beside them, each name read decoded and case-folded, split at `;`
+  as well as `&`. The method is upper-cased: Google's is case-sensitive, and
+  `delete` there is no method, but Rack, Symfony and Laravel upper-case it,
+  and upstream it is then the DELETE frisket decided. Two that disagree, or
+  one that is not a method, are 400.
 - **Asked bodies by their first bytes.** Today an asked request is read whole,
   to 16 MiB, and refused over it. Instead frisket reads a fixed preview —
   small, since a person reads it — asks with that, the length if one was

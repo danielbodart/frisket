@@ -82,7 +82,6 @@ const (
 	ReasonAskFailed       = "asking failed"
 	ReasonStoppedWaiting  = "client stopped waiting"
 	ReasonBusy            = "a question from this session is already waiting"
-	ReasonMethodOverride  = "method override"
 	ReasonBodyTooLarge    = "body too large to ask about"
 )
 
@@ -99,11 +98,6 @@ const RuleAsked = "asked"
 // ErrBusy is an Asker's answer when the session already has a question
 // waiting: refused at once, and not the asker failing.
 var ErrBusy = errors.New(ReasonBusy)
-
-// methodOverrides are the headers some APIs read as the request's real
-// method. frisket decides on the request line's; one of these would let an
-// admitted GET be a DELETE upstream.
-var methodOverrides = []string{"X-Http-Method-Override", "X-Http-Method", "X-Method-Override"}
 
 // Asker puts a request the scope would not decide to someone who can. It
 // answers true to admit it; false, or an error, refuses it. It is called on
@@ -505,18 +499,13 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.refuse(lw, http.StatusMisdirectedRequest, ReasonMisdirected, nil)
 		return
 	}
-	for _, h := range methodOverrides {
-		if _, ok := r.Header[h]; ok {
-			rec.refuse(ReasonMethodOverride)
-			rt.refuse(lw, http.StatusForbidden, ReasonMethodOverride, nil)
-			return
-		}
-	}
-	if r.URL.Query().Has("_method") {
-		rec.refuse(ReasonMethodOverride)
-		rt.refuse(lw, http.StatusForbidden, ReasonMethodOverride, nil)
+	sent, reason := override(r)
+	if reason != "" {
+		rec.refuse(reason)
+		rt.refuse(lw, http.StatusBadRequest, reason, nil)
 		return
 	}
+	rec.sentMethod = sent
 	v := rt.scope.decide(r.Method, r.URL)
 	if v.graphql != nil {
 		v = v.graphql.decide(r)
@@ -723,9 +712,14 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 		"host", ic.route.host,
 		"proto", r.Proto,
 		"method", r.Method,
+	}
+	if rec.sentMethod != "" {
+		attrs = append(attrs, "method_sent", rec.sentMethod)
+	}
+	attrs = append(attrs,
 		"path", path,
 		"decision", rec.decision,
-	}
+	)
 	if rec.credential != "" {
 		attrs = append(attrs, "credential", rec.credential)
 	}
@@ -793,12 +787,14 @@ type record struct {
 	// of each, for a GraphQL request holding several.
 	operation string
 	// graphql is what a GraphQL request was read as.
-	graphql   string
-	err       error
-	level     slog.Level
-	status    atomic.Int64
-	reqBytes  atomic.Int64
-	respBytes atomic.Int64
+	graphql string
+	// sentMethod is the request line's method, where an override replaced it.
+	sentMethod string
+	err        error
+	level      slog.Level
+	status     atomic.Int64
+	reqBytes   atomic.Int64
+	respBytes  atomic.Int64
 }
 
 func (r *record) refuse(reason string) {
