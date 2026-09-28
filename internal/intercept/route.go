@@ -176,9 +176,9 @@ func (r *Route) credentialHeader() string {
 // whole of the credential header or after its scheme: `Bearer <placeholder>`,
 // gh's `token <placeholder>`, or git's Basic auth with it as the password. One value only -- two is not a request
 // frisket can put one credential on. With a session key, a bearer JWT it
-// signed for host is the placeholder too, and one it signed that is not
-// has the reason it is refused.
-func (rt *route) carries(h http.Header, host string, now time.Time) (bool, string) {
+// signed for a host this route serves is the placeholder too, and one it
+// signed that is not has the reason it is refused.
+func (rt *route) carries(h http.Header, now time.Time) (bool, string) {
 	if rt.Credential == nil {
 		return false, ""
 	}
@@ -204,7 +204,7 @@ func (rt *route) carries(h http.Header, host string, now time.Time) (bool, strin
 		return true, ""
 	}
 	if rt.key != nil && strings.EqualFold(scheme, "Bearer") {
-		ours, why := rt.key.bearer(tok, host, now)
+		ours, why := rt.key.bearer(tok, now)
 		return ours && why == "", why
 	}
 	return false, ""

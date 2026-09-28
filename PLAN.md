@@ -901,7 +901,9 @@ the session.
   signature with go-jose (decision 1), RS256 alone and always against the
   session key, whatever the header says; then the issuer, and the subject if
   there is one, an expiry at most an hour and five minutes after its `iat`,
-  and that the audience is the host asked for; and replaces it. One checked is
+  and that the audience is a host the route serves -- not only the one asked:
+  a Python client calling a regional host signs for the API's global one;
+  and replaces it. One checked is
   remembered, by its digest, until its expiry, and its audience checked on
   every request. One the key signed that fails a claim is refused, 403, with
   which; any other goes upstream as the client's own.

@@ -283,8 +283,8 @@ file -- is given a key made for the session, and its route the public half:
   there is 400, and nothing sent to a grant URL, however it is spelt, ever
   leaves.
 - A bearer JWT the key signed, RS256, as `issuer`, in date and at most an hour
-  long, whose audience is `https://<host>/` or which has a `scope` and no
-  audience, is the placeholder, and replaced. One the key signed that fails
+  long, whose audience is `https://<host>/` for a host the route serves or
+  which has a `scope` and no audience, is the placeholder, and replaced. One the key signed that fails
   any of that is 403. Any other bearer goes upstream as it was sent.
 
 The key is made per session, so a document with one is a launcher's

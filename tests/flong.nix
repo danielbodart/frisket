@@ -1035,7 +1035,8 @@ in
           assert upstream_saw("/token") == "", upstream_saw("/token")
 
           for n, auth in [("storage.wild.test", placeholder), ("eu.rep.wild.test", jwt("https://eu.rep.wild.test/")),
-                          ("storage.wild.test", jwt("", "https://www.googleapis.com/auth/cloud-platform"))]:
+                          ("storage.wild.test", jwt("", "https://www.googleapis.com/auth/cloud-platform")),
+                          ("eu.rep.wild.test", jwt("https://storage.wild.test/"))]:
               out = machine.succeed(as_workload(leader, f"curl -sS -m 10 --cacert /etc/frisket/ca.crt "
                                                 f"-H \"Authorization: Bearer {auth}\" https://{n}/v1/things"))
               assert out.strip() == "upstream-api-ok", (n, out)
@@ -1043,7 +1044,7 @@ in
           assert "eyJ" not in upstream_saw("."), "a JWT the session key signed reached the upstream"
 
           out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' "
-                                            f"-H \"Authorization: Bearer {jwt('https://other.wild.test/')}\" https://storage.wild.test/v1/things"))
+                                            f"-H \"Authorization: Bearer {jwt('https://elsewhere.test/')}\" https://storage.wild.test/v1/things"))
           assert out == "403", out
           out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' "
                                             f"-X POST -H 'X-HTTP-Method-Override: GET' -H \"Authorization: Bearer {placeholder}\" "

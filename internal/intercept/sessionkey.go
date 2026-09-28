@@ -54,7 +54,7 @@ var (
 	errSubject      = errors.New("session key JWT: subject is not the session's")
 	errExpired      = errors.New("session key JWT: expired")
 	errLifetime     = errors.New("session key JWT: issued in the future, or lives longer than an hour")
-	errAudience     = errors.New("session key JWT: audience is not this host")
+	errAudience     = errors.New("session key JWT: audience is not a host this route serves")
 	errNoAudience   = errors.New("session key JWT: neither an audience nor a scope")
 	errGrantAud     = errors.New("session key JWT: audience is not a token URL")
 	errGrantMethod  = errors.New("grant: not a POST")
@@ -90,6 +90,7 @@ type sessionKey struct {
 	SessionKey
 	grants map[string]bool
 	auds   map[string]bool
+	serves func(string) bool
 
 	mu   sync.Mutex
 	seen map[[sha256.Size]byte]verified
@@ -114,7 +115,7 @@ func compileSessionKey(k *SessionKey, route string, serves func(string) bool) (*
 	if k.Issuer == "" || strings.ContainsAny(k.Issuer, " \t\r\n") {
 		return nil, fmt.Errorf("route %s: session key: an issuer is required, one word", route)
 	}
-	c := &sessionKey{SessionKey: *k, grants: map[string]bool{}, auds: map[string]bool{}, seen: map[[sha256.Size]byte]verified{}}
+	c := &sessionKey{SessionKey: *k, grants: map[string]bool{}, auds: map[string]bool{}, serves: serves, seen: map[[sha256.Size]byte]verified{}}
 	for _, g := range k.Grants {
 		host, path, ok := strings.Cut(g, "/")
 		segs, err := splitPath("/" + path)
@@ -164,10 +165,12 @@ func (k *sessionKey) verify(tok string, now time.Time) (claims, error) {
 	return c, nil
 }
 
-// bearer is whether tok, sent to host, is a JWT the key signed, and if it
-// is, why it is not the placeholder: "" when it is. A token is verified once
-// and remembered until it expires; its audience is checked every time.
-func (k *sessionKey) bearer(tok, host string, now time.Time) (bool, string) {
+// bearer is whether tok is a JWT the key signed, and if it is, why it is not
+// the placeholder: "" when it is. Its audience may be any host the route
+// serves, not only the one asked: a client calling a regional host signs for
+// the API's global one. A token is verified once and remembered until it
+// expires; its audience is checked every time.
+func (k *sessionKey) bearer(tok string, now time.Time) (bool, string) {
 	sum := sha256.Sum256([]byte(tok))
 	k.mu.Lock()
 	v, ok := k.seen[sum]
@@ -188,10 +191,19 @@ func (k *sessionKey) bearer(tok, host string, now time.Time) (bool, string) {
 		return true, ""
 	case len(v.aud) == 0:
 		return true, errNoAudience.Error()
-	case len(v.aud) == 1 && v.aud[0] == "https://"+host+"/":
+	case len(v.aud) == 1 && k.servesAudience(v.aud[0]):
 		return true, ""
 	}
 	return true, errAudience.Error()
+}
+
+func (k *sessionKey) servesAudience(aud string) bool {
+	name, ok := strings.CutPrefix(aud, "https://")
+	if !ok {
+		return false
+	}
+	name, ok = strings.CutSuffix(name, "/")
+	return ok && k.serves(name)
 }
 
 // grant is whether a request to host at an escaped path is to one of the

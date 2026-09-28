@@ -123,6 +123,8 @@ func gapiRoute(up *namedUpstream, cred credential.Source) Route {
 	}
 }
 
+func servesGAPI(name string) bool { return strings.HasSuffix(name, ".gapi.test") }
+
 func newGAPIFixture(t *testing.T) (*fixture, *namedUpstream, *journal) {
 	t.Helper()
 	j := &journal{}
@@ -172,7 +174,11 @@ func TestABearerJWTTheSessionKeySignedIsThePlaceholder(t *testing.T) {
 		{"no iat", sign(t, jose.RS256, sessionPriv(), with(own, "iat", nil)), refused},
 		{"no exp", sign(t, jose.RS256, sessionPriv(), with(own, "exp", nil)), refused},
 		{"not yet valid", sign(t, jose.RS256, sessionPriv(), with(own, "nbf", now.Add(30*time.Minute).Unix())), refused},
-		{"another host's audience", sign(t, jose.RS256, sessionPriv(), with(own, "aud", "https://pubsub.gapi.test/")), refused},
+		{"another host the route serves as its audience", sign(t, jose.RS256, sessionPriv(), with(own, "aud", "https://pubsub.gapi.test/")), CredentialInjected},
+
+		{"a host the route does not serve as its audience", sign(t, jose.RS256, sessionPriv(), with(own, "aud", "https://elsewhere.test/")), refused},
+		{"the route's suffix as its audience", sign(t, jose.RS256, sessionPriv(), with(own, "aud", "https://gapi.test/")), refused},
+		{"an http audience", sign(t, jose.RS256, sessionPriv(), with(own, "aud", "http://"+apiName+"/")), refused},
 		{"this host's audience with a path", sign(t, jose.RS256, sessionPriv(), with(own, "aud", "https://"+apiName+"/v1")), refused},
 		{"two audiences", sign(t, jose.RS256, sessionPriv(), with(own, "aud", []string{"https://" + apiName + "/", "https://x.test/"})), refused},
 		{"the token URL's audience", sign(t, jose.RS256, sessionPriv(), with(own, "aud", tokenURL)), refused},
@@ -216,30 +222,43 @@ func TestABearerJWTTheSessionKeySignedIsThePlaceholder(t *testing.T) {
 	}
 }
 
+// A client calling a regional host signs its JWT for the API's global host,
+// which the route also serves: that is the placeholder there too.
+func TestAJWTForTheGlobalHostIsThePlaceholderAtARegionalOne(t *testing.T) {
+	f, up, _ := newGAPIFixture(t)
+	c := f.client(t, true)
+	tok := sign(t, jose.RS256, sessionPriv(), claimsAt(time.Now(), "https://aiplatform.gapi.test/"))
+	for _, host := range []string{"us-central1-aiplatform.gapi.test", "aiplatform.us.rep.gapi.test"} {
+		req := newRequest(t, "GET", "https://"+host+"/v1/projects/p/locations/l/models", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		res, _ := get(t, c, req)
+		seen := up.requests()
+		if res.StatusCode != 200 || seen[len(seen)-1].Header.Get("Authorization") != "Bearer "+realToken {
+			t.Errorf("%s: %d", host, res.StatusCode)
+		}
+	}
+}
+
 // A JWT the key signed is verified once and remembered until it expires --
-// clients reuse one for an hour -- and its audience is still checked on every
-// request, so remembering it for one host admits it for no other.
+// clients reuse one for an hour.
 func TestAVerifiedJWTIsRememberedUntilItExpires(t *testing.T) {
-	k, err := compileSessionKey(testSessionKey(), "gapi", func(string) bool { return true })
+	k, err := compileSessionKey(testSessionKey(), "gapi", servesGAPI)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
 	tok := sign(t, jose.RS256, sessionPriv(), claimsAt(now, "https://"+apiName+"/"))
-	if ours, why := k.bearer(tok, apiName, now); !ours || why != "" {
+	if ours, why := k.bearer(tok, now); !ours || why != "" {
 		t.Fatalf("bearer = %v %q", ours, why)
 	}
 	// Were it verified again, it would be refused: the key no longer
 	// matches. Remembered, it is still the placeholder.
 	k.Key = &otherPriv().PublicKey
-	if ours, why := k.bearer(tok, apiName, now.Add(time.Minute)); !ours || why != "" || k.cached() != 1 {
+	if ours, why := k.bearer(tok, now.Add(time.Minute)); !ours || why != "" || k.cached() != 1 {
 		t.Fatalf("remembered: bearer = %v %q, %d cached", ours, why, k.cached())
 	}
-	if ours, why := k.bearer(tok, "pubsub.gapi.test", now); !ours || why != errAudience.Error() {
-		t.Fatalf("remembered, for another host: bearer = %v %q", ours, why)
-	}
 	k.Key = &sessionPriv().PublicKey
-	if ours, why := k.bearer(tok, apiName, now.Add(time.Hour)); !ours || why != errExpired.Error() {
+	if ours, why := k.bearer(tok, now.Add(time.Hour)); !ours || why != errExpired.Error() {
 		t.Fatalf("past its exp: bearer = %v %q", ours, why)
 	}
 
@@ -475,9 +494,9 @@ func mustCA(t *testing.T, host string) *CA {
 
 // WHAT THE SESSION KEY ADMITS IS EXACTLY THE MODEL: RS256 by that key, the
 // session's issuer and no other subject, in date and at most an hour and a
-// bit long, and either this host's audience or a scope with none.
+// bit long, and either a served host's audience or a scope with none.
 func TestTheSessionKeyAdmitsExactlyTheSessionsJWTs(t *testing.T) {
-	k, err := compileSessionKey(testSessionKey(), "gapi", func(string) bool { return true })
+	k, err := compileSessionKey(testSessionKey(), "gapi", servesGAPI)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +505,7 @@ func TestTheSessionKeyAdmitsExactlyTheSessionsJWTs(t *testing.T) {
 		byUs := rapid.Bool().Draw(rt, "byUs")
 		iss := rapid.SampledFrom([]string{issuer, "evil@x.test", ""}).Draw(rt, "iss")
 		sub := rapid.SampledFrom([]string{"", issuer, "person@x.test"}).Draw(rt, "sub")
-		aud := rapid.SampledFrom([]string{"", "https://" + apiName + "/", "https://pubsub.gapi.test/", tokenURL}).Draw(rt, "aud")
+		aud := rapid.SampledFrom([]string{"", "https://" + apiName + "/", "https://pubsub.gapi.test/", "https://elsewhere.test/", tokenURL}).Draw(rt, "aud")
 		scope := rapid.SampledFrom([]string{"", "https://www.googleapis.com/auth/cloud-platform"}).Draw(rt, "scope")
 		iat := now.Add(time.Duration(rapid.IntRange(-3*3600, 3600).Draw(rt, "iat")) * time.Second)
 		life := time.Duration(rapid.IntRange(0, 3*3600).Draw(rt, "life")) * time.Second
@@ -505,13 +524,13 @@ func TestTheSessionKeyAdmitsExactlyTheSessionsJWTs(t *testing.T) {
 		if byUs {
 			key = sessionPriv()
 		}
-		ours, why := k.bearer(sign(t, jose.RS256, key, c), apiName, now)
+		ours, why := k.bearer(sign(t, jose.RS256, key, c), now)
 
 		exp := time.Unix(iat.Add(life).Unix(), 0)
 		wantOurs := byUs
 		admit := iss == issuer && (sub == "" || sub == issuer) && now.Before(exp) &&
 			!time.Unix(iat.Unix(), 0).After(now.Add(jwtSkew)) && exp.Sub(time.Unix(iat.Unix(), 0)) <= jwtMaxLife &&
-			(aud == "https://"+apiName+"/" || aud == "" && scope != "")
+			(aud == "https://"+apiName+"/" || aud == "https://pubsub.gapi.test/" || aud == "" && scope != "")
 		if ours != wantOurs || (wantOurs && (why == "") != admit) {
 			rt.Fatalf("bearer = %v %q; want ours %v, admitted %v", ours, why, wantOurs, admit)
 		}
@@ -529,12 +548,12 @@ func FuzzSessionKeyBearer(f *testing.F) {
 	f.Add(unsigned(map[string]any{"alg": "none"}, own))
 	f.Add("eyJ.eyJ.")
 	f.Add("a.b.c.d.e")
-	k, err := compileSessionKey(testSessionKey(), "gapi", func(string) bool { return true })
+	k, err := compileSessionKey(testSessionKey(), "gapi", servesGAPI)
 	if err != nil {
 		f.Fatal(err)
 	}
 	f.Fuzz(func(t *testing.T, tok string) {
-		ours, why := k.bearer(tok, apiName, now)
+		ours, why := k.bearer(tok, now)
 		if !ours || why != "" {
 			return
 		}

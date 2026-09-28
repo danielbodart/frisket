@@ -78,8 +78,8 @@ func TestAGoogleRouteDecidesOnTheOverriddenMethodEverywhere(t *testing.T) {
 				t.Errorf("POST %s naming GET: %d, want the verb rule's refusal", target, res.StatusCode)
 			}
 		}
-		if res := send("GET", secrets+"/versions/latest", "", jwt("storage.gapi.test"), ""); res.StatusCode != http.StatusForbidden {
-			t.Errorf("another host's JWT: %d", res.StatusCode)
+		if res := send("GET", secrets+"/versions/latest", "", jwt("elsewhere.test"), ""); res.StatusCode != http.StatusForbidden {
+			t.Errorf("a JWT for a host the route does not serve: %d", res.StatusCode)
 		}
 
 		big := strings.Repeat("s", BodyPreview+100)

@@ -574,7 +574,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.credential = CredentialAnswered
 		return
 	}
-	inject, why := rt.carries(r.Header, ic.sni, i.now())
+	inject, why := rt.carries(r.Header, i.now())
 	if why != "" {
 		rec.refuse(why)
 		rt.refuse(lw, http.StatusForbidden, why, nil)
