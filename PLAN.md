@@ -30,7 +30,7 @@ machine.
 
 ## Locked decisions
 
-**1. Go, standard library first, and three dependencies.** `CGO_ENABLED = 0`, so
+**1. Go, standard library first, and four dependencies.** `CGO_ENABLED = 0`, so
 the binary is static. The stdlib covers almost all of it: `httputil.ReverseProxy`
 for credential routes, `crypto/tls` and `crypto/x509` for interception, `net`
 and `io.Copy` for egress (splice on Linux — measured), and `crypto/rsa` for
@@ -64,6 +64,13 @@ right only once many people have run it. It is what runc and the reference
 CNI plugins use, and it brings `vishvananda/netns` and x/sys, nothing else. It
 parses only what the kernel answers, about a namespace the workload has not
 started in yet.
+
+The fourth is `github.com/go-jose/go-jose/v4`, to verify the JWTs a Google
+client signs with the session's fake service-account key (Google Cloud,
+below). Every such JWT is the workload's, so it is hostile input: a header
+choosing its own algorithm, claims to read, a signature to check. It is what
+Google's own Go libraries use, and it imports nothing outside the standard
+library.
 
 `vendorHash` is therefore a pinned hash and not `null`. That is a cost, not a
 loss: `vendorHash = null` is a nice property, never a security one.
@@ -324,6 +331,12 @@ it. That is accepted: in trusted every host is reachable anyway, and strict
 holds nothing private but the prompt — it is for reading public code — so
 what bounds a planted token there is the route's scope, not frisket's.
 
+A placeholder has one other form, for a client that signs its own token: a
+route given a session's key (Google's, below) treats a bearer JWT that key
+signed, with valid claims, as its placeholder. Still exact: a JWT from any
+other key, or with the wrong host or an expiry past its time, goes upstream as
+the client's own.
+
 ---
 
 ## Considered and rejected
@@ -405,6 +418,15 @@ Recorded so they are not re-proposed without new information.
 - **Zig and Bun.** Zig's std has, to our knowledge, no RSA signing and no
   use-after-free protection; Bun's HTTP servers cannot do CONNECT and it parses
   hostile input in younger native code.
+- **A GCE metadata server on the service address**, for Google's clients.
+  Built and measured end to end: every client worked, with a placeholder
+  token. Rejected for the fake service-account key (Google Cloud, below),
+  which works for the same clients and asks less: a protocol server in frisket
+  that only Google speaks; three variables, because Go reads only
+  `GCE_METADATA_HOST`, gcloud only `GCE_METADATA_ROOT` and Python detects on
+  `GCE_METADATA_IP`; gcloud caching "not on GCE" for ten minutes if its first
+  probe fails; Node sending requests with no credential at all if one probe
+  path is missing. A key file is one variable every Google client reads.
 
 ---
 
@@ -660,12 +682,8 @@ inject.
   path, always against the real request line, matched by segment (decision 6).
 - **Injection shapes beyond a bearer token.** Basic with a fixed user (git,
   built), a bare header (`x-api-key`, built), and a service rather than a
-  header: the Google client libraries and gcloud find credentials by probing a
-  metadata server, and between them probe `/`, `/computeMetadata/v1/instance`,
-  `service-accounts/default/?recursive=true`, `service-accounts/?recursive=true`,
-  `default/email`, `project/project-id`, `project/numeric-project-id`,
-  `universe/universe-domain`, and `token` with `?scopes=`, all with
-  `Metadata-Flavor: Google`.
+  header: a token grant frisket answers itself, and a JWT the client signs
+  with a key frisket gave it (*decided*, "Google Cloud" below).
 - **Credentials derived rather than read** — an installation token, an
   impersonated service account's — and the one-shot handout where injection
   cannot work.
@@ -686,7 +704,7 @@ inject.
 | gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`; *GraphQL decided, below* |
 | hf | `huggingface.co` | *decided, in chase's `apps/huggingface.nix` and `docs/huggingface.md`*: rules generated from the Hub's own OpenAPI description, reads admitted and writes and token-minting reads asked; a tier for other people's code refuses what would ask; `huggingface.co` and `*.hf.co` allowed; the token in sops |
 | Cloudflare | `api.cloudflare.com` | account and zone scoping, the credential's source |
-| GCP client libraries, gcloud | a metadata server on the service address | where its tokens come from, and what they may do |
+| GCP client libraries, gcloud | `oauth2.googleapis.com` and every Google API | *decided, below and in chase's `docs/gcloud.md`*: a fake service-account key in the session, its token grant answered with a placeholder, the real token on `*.googleapis.com`, rules generated from Google's Discovery documents and protos, a project's service account reached by workload identity federation, renewed by chase |
 | Postgres, Redis, MongoDB | — | nothing of frisket's in trusted; unreachable in strict |
 | npm, PyPI, crates, Go proxy | — | no credential; which names each allowlist needs |
 
@@ -694,8 +712,8 @@ inject.
 gh's design. It is marked PROVISIONAL, no policy can name it, and it is not an
 answer to gh's row until that row is designed.
 
-Several credentials have no source on this machine yet: there is no gcloud
-installation and no Cloudflare login.
+Several credentials have no source on this machine yet: there is no
+Cloudflare login.
 The agent rows depend on decision 10: frisket holds no login of its own and
 injects what the host file currently holds.
 
@@ -828,6 +846,80 @@ holds nothing private to read out through them.
 - **Who refreshes** is the host, a day before expiry: codex's refresh tokens
   are single-use, and refreshing that early keeps the host's refresher clear of
   any other codex on the machine, which only refreshes in the last 5 minutes.
+
+### Google Cloud (decided)
+
+What Google's tools are, and why this shape, is in chase's `docs/gcloud.md`:
+the session holds a service-account key file whose key is fake, made for the
+session, and never a Google credential; the real token is a project's service
+account's, and chase renews it. What frisket adds is below. Each is a
+capability, and none knows anything of Google but a host name in a policy.
+Measured 2026-09-28, offline against fake servers and then against real
+Google through a prototype: gcloud, Python, Go, Node and Terraform, over REST
+and gRPC, read as the service account, and the real token was found nowhere in
+the session.
+
+- **Wildcard route hosts.** A route's host may be `*.suffix`: every name below
+  it, at any depth, not the suffix itself. The exact route wins, then the
+  nearest wildcard above the name, so `*.mtls.googleapis.com` refusing
+  everything overrides `*.googleapis.com` for those hosts. The upstream is the
+  name the client asked for, dialled through the same structural check as
+  egress and verified against that name; a request for another name on the
+  same connection is 421. A leaf is issued per name (about 110 µs); a wildcard
+  leaf would cover one label, and Google's regional hosts have two. The
+  session's CA is constrained to the suffix, which Go and OpenSSL both read as
+  the subtree. That an exact host's constraint also permits its subdomains is
+  what a name constraint means; frisket's own issuing check stays the narrower
+  gate, and nothing further is built for it.
+- **A session key, and a grant answered with the placeholder.** A route can be
+  given the public half of a key made for the session. A JWT-bearer grant
+  (`urn:ietf:params:oauth:grant-type:jwt-bearer`) posted to the route's token
+  URLs, whose assertion that key signed with the right issuer, audience and
+  expiry, is answered by frisket and never sent on: `{"access_token":
+  <placeholder>, "expires_in": 3599, "token_type": "Bearer"}`, or, when it
+  asks for `target_audience`, an ID token shaped like a JWT and signed by
+  nobody. Anything else posted there is 400, and nothing leaves. Google's
+  clients post to `oauth2.googleapis.com/token`, except Node's storage
+  library, which posts to `www.googleapis.com/oauth2/v4/token` whatever the
+  key file says (measured), so both are the route's.
+- **A JWT the session key signed is the placeholder** (decision 13). Many
+  clients never make the grant: they sign their own JWT and send it as the
+  bearer (Python's generated clients by default, Go's and Node's over gRPC,
+  gcloud with a property set; measured). Its audience is the API's
+  `https://<host>/`, or it carries a `scope` claim instead; each lives an hour
+  and is reused for it, about one per client per API. frisket checks the
+  signature with go-jose (decision 1), the issuer, the expiry and that the
+  audience is the host asked for, and replaces it; one checked is cached,
+  about 22 µs a new one and under 1 µs after (prototype, hand-written
+  checks). Nothing else is a placeholder.
+- **`*:verb` segments.** A path template segment `*:verb` matches a segment
+  ending in that literal verb, and is more specific than `*`. Without it
+  `GET /v1/projects/*/secrets/*/versions/*` is both a read and a credential.
+- **Encoded slashes, by opt-in.** A rule may let `*` match a segment holding
+  `%2F`, for Cloud Storage's object names. Everywhere else it still may not.
+- **Method overrides applied.** `X-HTTP-Method-Override`, `$httpMethod` and
+  `%24httpMethod` are honoured by Google's front end (measured: `GET` routed
+  as `DELETE`, `GET` as `POST`). frisket takes the method they name, rewrites
+  the request with it, strips them, and decides on that: a GET smuggling a
+  DELETE is a DELETE, to every rule and upstream alike. Every route, not only
+  Google's.
+- **Asked bodies by their first bytes.** Today an asked request is read whole,
+  to 16 MiB, and refused over it. Instead frisket reads a fixed preview —
+  small, since a person reads it — asks with that, the length if one was
+  declared, and whether more followed, and on an allow sends the preview and
+  then streams the rest. There is no limit on an asked body. A streaming RPC
+  is asked about by its first message this way; nothing else about gRPC
+  changes (unary and bidirectional calls, trailers and 8 MiB messages pass
+  the interceptor unchanged, measured). What a person allows is then the
+  start of a body, not all of it. GraphQL's read, to 1 MiB, is a different
+  thing and stays: it classifies the whole document.
+- **Rough edges the prototype found:** a gRPC call is logged by its HTTP
+  status, 200, where the `grpc-status` trailer says what happened; a
+  credential that stays expired while requests arrive should be said in the
+  log once, since clients retry the 503 quietly for two minutes and a dead
+  renewer looks like a slow one; and a JWT the session key signed but with bad
+  claims could be refused here with a clear error, where today it goes
+  upstream and comes back 401.
 
 ---
 
@@ -1022,7 +1114,8 @@ inside, which the credential binds going away does not change.
 5. **Which host ports a trusted policy allows**, and whether that list is
    per project.
 6. **Where the credentials come from** for the routes that have no source yet:
-   there is no gcloud installation and no Cloudflare login on this machine.
-   (The Hugging Face token is in sops now, as `hf_token`.)
+   there is no Cloudflare login on this machine. (The Hugging Face token is in
+   sops now, as `hf_token`; Google's comes from a project, by federation, as
+   chase's `docs/gcloud.md` sets out.)
 7. **QUIC's policy.** Whether a relay's per-address allowlist is enough, or the
    Initial's SNI must be read (see "Build order").
