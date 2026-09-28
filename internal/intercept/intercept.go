@@ -16,11 +16,8 @@ package intercept
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -82,15 +79,7 @@ const (
 	ReasonAskFailed       = "asking failed"
 	ReasonStoppedWaiting  = "client stopped waiting"
 	ReasonBusy            = "a question from this session is already waiting"
-	ReasonBodyTooLarge    = "body too large to ask about"
 )
-
-// BodyPreview is how much of an asked request's body its question carries.
-const BodyPreview = 4096
-
-// maxAskedBody bounds the body of a request that is asked about: read whole,
-// into memory, before anyone is asked.
-const maxAskedBody = 16 << 20
 
 // RuleAsked is the rule of a request a person admitted.
 const RuleAsked = "asked"
@@ -123,13 +112,14 @@ type Question struct {
 	// Path is escaped, exactly as it was sent; Query too, without its "?".
 	Path  string `json:"path"`
 	Query string `json:"query,omitempty"`
-	// Body is the start of the request's body, BodyPreview bytes at most;
-	// BodyBytes is all of it, and BodySHA256 its digest. What goes upstream
-	// is exactly the body these describe: it was read in full before the
-	// question was asked.
+	// Body is the start of the request's body, BodyPreview bytes at most:
+	// all that was read before asking. BodyMore is whether the body went on
+	// past it, or had not ended when it stopped arriving, so that what is
+	// admitted is its start and not all of it. BodyLength is the length the
+	// request declared, if it declared one.
 	Body       string `json:"body,omitempty"`
-	BodyBytes  int64  `json:"bodyBytes"`
-	BodySHA256 string `json:"bodySHA256,omitempty"`
+	BodyMore   bool   `json:"bodyMore"`
+	BodyLength int64  `json:"bodyLength,omitempty"`
 	// Operation is what the request matched, or nil if it matched nothing --
 	// in which case nothing is borrowed to describe it.
 	Operation *Operation `json:"operation,omitempty"`
@@ -596,26 +586,16 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 		Operation:  v.Operation,
 		Operations: v.Operations,
 	}
-	// The body is what a write does, so it is read before the question is
-	// asked and what goes upstream is exactly what was read: a person
-	// allowing an update is allowing THIS update.
+	// The body is what a write does, so its start is read before the
+	// question is asked and goes upstream first, exactly as it was shown.
 	if r.Body != nil && r.Body != http.NoBody {
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxAskedBody+1))
+		head, more, rest, err := preview(r.Context(), r.Body)
 		if err != nil {
 			return ReasonStoppedWaiting
 		}
-		if len(body) > maxAskedBody {
-			return ReasonBodyTooLarge
-		}
-		if len(body) > 0 {
-			sum := sha256.Sum256(body)
-			q.Body = string(body[:min(len(body), BodyPreview)])
-			q.BodyBytes = int64(len(body))
-			q.BodySHA256 = hex.EncodeToString(sum[:])
-		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
-		r.TransferEncoding = nil
+		q.Body, q.BodyMore = string(head), more
+		q.BodyLength = max(r.ContentLength, 0)
+		r.Body = rest
 	}
 	ok, err := i.asker.Ask(r.Context(), q)
 	switch {

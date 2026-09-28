@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // answers is an Asker that says what it was told to, and keeps the questions.
@@ -207,33 +209,140 @@ func TestARefusalShapeMustHoldItsMessage(t *testing.T) {
 	}
 }
 
-// An asked request's body is in its question -- the start of it, its length
-// and its digest -- and what goes upstream is exactly that body.
-func TestAnAskedBodyIsShownAndSentAsShown(t *testing.T) {
-	j := &journal{}
-	var got []byte
-	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
+// An asked request's question carries the start of its body, whether more
+// followed and the length it declared, and what goes upstream is that start
+// and then the rest.
+func TestAnAskedBodyIsShownByItsStartAndSentWhole(t *testing.T) {
+	protos(t, func(t *testing.T, h2 bool) {
+		j := &journal{}
+		var got []byte
+		up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			got, _ = io.ReadAll(r.Body)
+		})
+		asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+		f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
+		c := f.client(t, h2)
+		small := `{"type":"A","name":"www","content":"203.0.113.9"}`
+		for _, tc := range []struct {
+			body string
+			want Question
+		}{
+			{small, Question{Body: small, BodyLength: int64(len(small))}},
+			{small + strings.Repeat(" ", BodyPreview), Question{Body: (small + strings.Repeat(" ", BodyPreview))[:BodyPreview],
+				BodyMore: true, BodyLength: int64(len(small) + BodyPreview)}},
+			{strings.Repeat("x", BodyPreview), Question{Body: strings.Repeat("x", BodyPreview), BodyLength: BodyPreview}},
+		} {
+			asker.questions = nil
+			req := newRequest(t, "POST", "https://"+apiHost+"/v2/records", strings.NewReader(tc.body))
+			if res, _ := get(t, c, req); res.StatusCode != http.StatusOK {
+				t.Fatalf("%d", res.StatusCode)
+			}
+			q := asker.questions[0]
+			if q.Body != tc.want.Body || q.BodyMore != tc.want.BodyMore || q.BodyLength != tc.want.BodyLength {
+				t.Errorf("question: %d bytes shown, more %v, length %d; want %d, %v, %d",
+					len(q.Body), q.BodyMore, q.BodyLength, len(tc.want.Body), tc.want.BodyMore, tc.want.BodyLength)
+			}
+			if string(got) != tc.body {
+				t.Errorf("upstream got %d bytes, want the %d sent", len(got), len(tc.body))
+			}
+		}
 	})
-	asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+}
+
+// An asked body has no limit: 64 MiB of unknown length is asked about by its
+// start and then streamed, whole.
+func TestAnAskedBodyHasNoLimit(t *testing.T) {
+	const size = 64 << 20
+	protos(t, func(t *testing.T, h2 bool) {
+		j := &journal{}
+		up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			h := sha256.New()
+			n, _ := io.Copy(h, r.Body)
+			fmt.Fprintf(w, "%d %s", n, hex.EncodeToString(h.Sum(nil)))
+		})
+		asker := &answers{answer: func(Question) (bool, error) { return true, nil }}
+		f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
+		want := sha256.New()
+		req := newRequest(t, "PUT", "https://"+apiHost+"/v2/blob", io.TeeReader(io.LimitReader(pattern{}, size), want))
+		req.ContentLength = -1
+		res, got := get(t, f.client(t, h2), req)
+		if res.StatusCode != http.StatusOK || got != fmt.Sprintf("%d %s", size, hex.EncodeToString(want.Sum(nil))) {
+			t.Fatalf("%d %s", res.StatusCode, got)
+		}
+		q := asker.questions[0]
+		if len(q.Body) != BodyPreview || !q.BodyMore || q.BodyLength != 0 {
+			t.Fatalf("question: %d bytes shown, more %v, length %d", len(q.Body), q.BodyMore, q.BodyLength)
+		}
+	})
+}
+
+// A body that stops arriving is asked about by what it has sent: the client
+// may be waiting for an answer before it sends more. What arrives after is
+// sent on behind it once the request is admitted, and nothing is sent before.
+func TestABodyThatPausesIsAskedAboutByWhatItSent(t *testing.T) {
+	protos(t, func(t *testing.T, h2 bool) {
+		j := &journal{}
+		var got []byte
+		up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			got, _ = io.ReadAll(r.Body)
+		})
+		pr, pw := io.Pipe()
+		asked := make(chan Question, 1)
+		asker := &answers{answer: func(q Question) (bool, error) {
+			if n := len(up.requests()); n != 0 {
+				t.Errorf("upstream saw %d requests before the answer", n)
+			}
+			asked <- q
+			return true, nil
+		}}
+		f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
+		done := make(chan *http.Response, 1)
+		go func() {
+			req := newRequest(t, "PUT", "https://"+apiHost+"/v2/log", pr)
+			req.ContentLength = -1
+			res, err := f.client(t, h2).Do(req)
+			if err != nil {
+				t.Error(err)
+			}
+			done <- res
+		}()
+		_, _ = pw.Write([]byte("first line\n"))
+		var q Question
+		select {
+		case q = <-asked:
+		case <-time.After(5 * time.Second):
+			t.Fatal("never asked: the preview waited for a body that had paused")
+		}
+		if q.Body != "first line\n" || !q.BodyMore {
+			t.Fatalf("question: %q, more %v", q.Body, q.BodyMore)
+		}
+		_, _ = pw.Write([]byte("second line\n"))
+		_ = pw.Close()
+		res := <-done
+		if res == nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		if string(got) != "first line\nsecond line\n" {
+			t.Fatalf("upstream got %q", got)
+		}
+	})
+}
+
+// A declined body sends nothing upstream, however much of it there is.
+func TestADeclinedBodyGoesNowhere(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	asker := &answers{answer: func(Question) (bool, error) { return false, nil }}
 	f := newFixtureAsking(t, j, slog.LevelInfo, asker, gatedRoute(up, t, j))
-	body := `{"type":"A","name":"www","content":"203.0.113.9"}` + strings.Repeat(" ", BodyPreview)
-	req := newRequest(t, "POST", "https://"+apiHost+"/v2/records", strings.NewReader(body))
-	req.Header.Set("Authorization", sandboxAuth)
-	if res, _ := get(t, f.client(t, true), req); res.StatusCode != http.StatusOK {
+	req := newRequest(t, "PUT", "https://"+apiHost+"/v2/blob", io.LimitReader(pattern{}, 8<<20))
+	req.ContentLength = -1
+	if res, _ := get(t, f.client(t, true), req); res.StatusCode != http.StatusForbidden {
 		t.Fatalf("%d", res.StatusCode)
 	}
-	if len(asker.questions) != 1 {
-		t.Fatalf("%d questions", len(asker.questions))
-	}
-	q := asker.questions[0]
-	sum := sha256.Sum256([]byte(body))
-	if !strings.HasPrefix(q.Body, `{"type":"A"`) || len(q.Body) != BodyPreview ||
-		q.BodyBytes != int64(len(body)) || q.BodySHA256 != hex.EncodeToString(sum[:]) {
-		t.Fatalf("question: %d bytes shown of %d, digest %s", len(q.Body), q.BodyBytes, q.BodySHA256)
-	}
-	if string(got) != body {
-		t.Fatalf("upstream got a different body from the one asked about")
+	if n := len(up.requests()); n != 0 {
+		t.Fatalf("upstream saw %d requests", n)
 	}
 }
 

@@ -227,8 +227,8 @@ the default, `ask` or `allow`. It decides every git-shaped request, so a
 refused push is refused at its ref advertisement even where `paths` admits
 `GET`. One asked about admits the advertisement, which says no more than a
 fetch's, and asks once, at the push, as the operation `git-receive-pack`: the
-body the asker is shown opens with the refs it would update. A push's body is
-its pack, so one asked about is held to the asker's 16 MiB. Without `credentialFile`, the same route is
+body the asker is shown opens with the refs it would update, and the pack
+streams after it. Without `credentialFile`, the same route is
 read-only GitHub with nothing of yours on it: what the sandbox sends goes on as
 it came, for what the scope admits.
 
@@ -335,7 +335,7 @@ question is one JSON document on stdin:
 {"session": "...", "workspace": "/home/alice/Projects/site", "policy": "...",
  "route": "cloudflare", "method": "PATCH", "host": "api.cloudflare.com",
  "path": "/client/v4/zones/023e/dns_records/372e", "query": "...",
- "body": "{\"content\":\"203.0.113.9\"}", "bodyBytes": 26, "bodySHA256": "...",
+ "body": "{\"content\":\"203.0.113.9\"}", "bodyMore": false, "bodyLength": 26,
  "operation": {"id": "...", "summary": "...", "description": "...",
                "class": "write", "category": "..."}}
 ```
@@ -343,9 +343,12 @@ question is one JSON document on stdin:
 A GraphQL request holding several fields has every one's in `operations`, and
 `operation` is the one that decided.
 
-A request with a body is read whole (16 MiB at most; more is refused) before
-it is asked about, and what goes upstream is exactly that body: `body` is its
-first 4 KiB, `bodyBytes` all of it, `bodySHA256` its digest.
+A request with a body is asked about by its start: `body` is its first 4 KiB,
+or what arrived before it paused for half a second -- a streaming RPC sends
+one message and waits -- `bodyMore` whether it went on past that, and
+`bodyLength` the length it declared, if it did. On an allow, `body` goes
+upstream first and the rest streams after it, however long it is: what a
+person admits is the start of a body.
 
 Exit 0 admits the request, 1 declines it, and anything else refuses it and is
 logged as the asker failing. `operation` is absent when nothing matched, and it

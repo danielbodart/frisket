@@ -788,8 +788,8 @@ holds nothing private to read out through them.
 - **Read before deciding, forwarded as read.** Every request at the endpoint
   has its body read, to 1 MiB -- which bounds what a sandbox can make the
   daemon hold per request, as no question does -- and the bytes read are the
-  bytes sent. Over it, the request is unmatched, and asked about, read on to
-  the asker's 16 MiB.
+  bytes sent. Over it, the request is unmatched, and asked about by its start,
+  as any body is.
 - **A hand reader, strict.** Measured against vektah/gqlparser, graphql-js and
   graphql-ruby (GitHub's reader) on real gh and wrangler traffic and on
   fuzzed documents: every reader agreed on the real traffic, and gqlparser,
@@ -917,16 +917,18 @@ the session.
   `delete` there is no method, but Rack, Symfony and Laravel upper-case it,
   and upstream it is then the DELETE frisket decided. Two that disagree, or
   one that is not a method, are 400.
-- **Asked bodies by their first bytes.** Today an asked request is read whole,
-  to 16 MiB, and refused over it. Instead frisket reads a fixed preview —
-  small, since a person reads it — asks with that, the length if one was
-  declared, and whether more followed, and on an allow sends the preview and
-  then streams the rest. There is no limit on an asked body. A streaming RPC
-  is asked about by its first message this way; nothing else about gRPC
-  changes (unary and bidirectional calls, trailers and 8 MiB messages pass
-  the interceptor unchanged, measured). What a person allows is then the
-  start of a body, not all of it. GraphQL's read, to 1 MiB, is a different
-  thing and stays: it classifies the whole document.
+- **Asked bodies by their first bytes.** *Built.* An asked request was read
+  whole, to 16 MiB, and refused over it. Now frisket reads a fixed preview,
+  4 KiB, since a person reads it, and asks with that, the length if one was
+  declared, and whether more followed; on an allow it sends the preview and
+  then streams the rest. There is no limit on an asked body. The preview also
+  ends where the body pauses for 500 ms: a streaming RPC sends its first
+  message and waits, and a client on this machine with its body ready never
+  pauses that long. Nothing else about gRPC changes (unary and bidirectional
+  calls, trailers and 8 MiB messages pass the interceptor unchanged,
+  measured). What a person allows is the start of a body, not all of it, so
+  the question's `bodyBytes` and `bodySHA256` are gone. GraphQL's read, to
+  1 MiB, is a different thing and stays: it classifies the whole document.
 - **Rough edges the prototype found:** a gRPC call is logged by its HTTP
   status, 200, where the `grpc-status` trailer says what happened; a
   credential that stays expired while requests arrive should be said in the

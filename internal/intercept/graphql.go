@@ -57,7 +57,7 @@ type GraphQLRule struct {
 // maxClassifiedBody bounds the body read to classify a GraphQL request:
 // every one is read before it is decided, and none is asked about, so this is
 // what a sandbox can make frisket hold per request. A larger body is
-// Unmatched; asked about, the rest of it is read then, up to maxAskedBody.
+// Unmatched; asked about, it is asked about by its start, as any body is.
 const maxClassifiedBody = 1 << 20
 
 // ReasonUnclassified is a GraphQL request refused because frisket could not
