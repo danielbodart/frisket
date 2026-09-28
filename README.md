@@ -156,7 +156,7 @@ Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
 |---|---|---|
 | `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
 | `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
-| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host`, `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `paths`, `git`, `unmatched` (`refuse` or `ask`), `refusal` (the API's own error shape) |
+| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host` (a name, or `*.name` for every name below it), `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `sessionKey` (see [Session keys](#session-keys)), `paths`, `git`, `unmatched` (`refuse` or `ask`), `refusal` (the API's own error shape) |
 | `services.frisket.asker` | `null` | the program a request a route asks about is put to; null refuses them. See [Asking](#asking) |
 | `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | the daemon's user's, 0600, and only from the host's user namespace; never bound into a sandbox |
@@ -234,6 +234,60 @@ body the asker is shown opens with the refs it would update, and the pack
 streams after it. Without `credentialFile`, the same route is
 read-only GitHub with nothing of yours on it: what the sandbox sends goes on as
 it came, for what the scope admits.
+
+## Wildcard routes
+
+```nix
+allow = [ "*.googleapis.com" ];
+routes.google = {
+  host = "*.googleapis.com";
+  upstream = "https://*.googleapis.com";      # the name each request was made to
+  credentialFile = "/run/secrets/gcp-token.json";
+  credentialJSON = { token = "access_token"; expiresMillis = "expiry"; };
+  placeholder = "proxy-injected";
+  unmatched = "ask";
+};
+routes.google-mtls = {
+  host = "*.mtls.googleapis.com";
+  upstream = "https://*.mtls.googleapis.com";
+  paths = [ { methods = [ "GET" "HEAD" "POST" "PUT" "PATCH" "DELETE" ]; prefix = "/"; refuse = true; } ];
+};
+```
+
+`*.googleapis.com` is every name below it, at any depth, and not
+`googleapis.com` itself. A name's exact route serves it, and failing that the
+nearest wildcard above it, so `iam.mtls.googleapis.com` is refused. Each
+request goes to the name the client asked for, on the upstream's port if it
+names one, verified as that name; a request for another name on the same
+connection is 421. The allowlist must cover the wildcard whole, and the
+session's CA is constrained to `googleapis.com`.
+
+## Session keys
+
+A client that signs its own tokens -- Google's, with a service-account key
+file -- is given a key made for the session, and its route the public half:
+
+```json
+"sessionKey": {
+  "publicKey": "-----BEGIN PUBLIC KEY-----\n...",
+  "issuer": "agent@project.iam.gserviceaccount.com",
+  "grants": ["oauth2.googleapis.com/token", "www.googleapis.com/oauth2/v4/token"]
+}
+```
+
+- A JWT-bearer grant posted to one of `grants`, whose assertion the key signed
+  as `issuer`, for one of those URLs, at most an hour long, is answered by
+  frisket: `{"access_token": <placeholder>, "expires_in": 3599, "token_type":
+  "Bearer"}`, or an ID token signed by nobody when it asks for
+  `target_audience`. The log says `credential: answered`. Anything else sent
+  there is 400, and nothing sent to a grant URL ever leaves.
+- A bearer JWT the key signed, RS256, as `issuer`, in date and at most an hour
+  long, whose audience is `https://<host>/` or which has a `scope` and no
+  audience, is the placeholder, and replaced. One the key signed that fails
+  any of that is 403. Any other bearer goes upstream as it was sent.
+
+The key is made per session, so a document with one is a launcher's
+(`policyFile`), not the module's.
 
 ## GraphQL
 

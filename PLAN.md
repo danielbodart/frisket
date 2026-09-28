@@ -143,7 +143,8 @@ see into, at the real host, never an address of frisket's.
 - Every session has a certificate authority of its own, made by the daemon
   when the session opens and trusted by that sandbox alone. It is
   name-constrained: a critical X.509 Name Constraints extension (RFC 5280
-  §4.2.1.10) permits the session's policy's route hosts and no IP address —
+  §4.2.1.10) permits the session's policy's route hosts — a wildcard route's
+  suffix — and no IP address —
   X.509 admits the names below a permitted name too, and cannot say less. So a
   stolen key impersonates those hosts, to one sandbox, while it runs; and a
   client rejects a leaf frisket mints for any other name by its own mistake.
@@ -334,8 +335,9 @@ what bounds a planted token there is the route's scope, not frisket's.
 A placeholder has one other form, for a client that signs its own token: a
 route given a session's key (Google's, below) treats a bearer JWT that key
 signed, with valid claims, as its placeholder. Still exact: a JWT from any
-other key, or with the wrong host or an expiry past its time, goes upstream as
-the client's own.
+other key, or by any algorithm but RS256, goes upstream as the client's own,
+and one the key signed with the wrong host or an expiry past its time is
+refused here.
 
 ---
 
@@ -611,7 +613,8 @@ depth and not the name itself; and `*` alone, every name. A `*` anywhere else �
 loads, because a `*` that loads silently into a restrictive list is the bug
 ottergate has. `*` is how a trusted policy leaves names unfiltered and still
 intercepts its credential hosts. The intercepted names are the routes' hosts,
-with no list of their own to repeat them, and exact: a route serves one host.
+with no list of their own to repeat them: a name, or `*.name` for every name
+below it, which the allowlist must cover whole.
 
 Upstream queries get 0x20 encoding, a fresh random transaction id and a
 connected socket per query, and a response is dropped unless its question
@@ -651,9 +654,10 @@ about forty lines.
   (decision 13), enforces the route's scope against
   the real request line, and forwards upstream over a fresh TLS connection,
   dialled through the same structural check as egress. Built, generically: a
-  route is a host, an upstream, a token file on the host re-read when it is
-  replaced (a bare token, or a field of its JSON with an expiry), a header to
-  put it in, and the methods and path prefixes it admits.
+  route is a host or every name below one, an upstream, a token file on the
+  host re-read when it is replaced (a bare token, or a field of its JSON with
+  an expiry), a header to put it in, the methods and path prefixes it admits,
+  and a session key whose grants and JWTs are its placeholder.
 - **Minting** — where injection cannot work, a short-lived, narrowly scoped
   token, handed over once per session. Its lifetime and scope are the
   protection. Not built.
@@ -683,7 +687,7 @@ inject.
 - **Injection shapes beyond a bearer token.** Basic with a fixed user (git,
   built), a bare header (`x-api-key`, built), and a service rather than a
   header: a token grant frisket answers itself, and a JWT the client signs
-  with a key frisket gave it (*decided*, "Google Cloud" below).
+  with a key made for the session (built, "Google Cloud" below).
 - **Credentials derived rather than read** — an installation token, an
   impersonated service account's — and the one-shot handout where injection
   cannot work.
@@ -859,11 +863,13 @@ Google through a prototype: gcloud, Python, Go, Node and Terraform, over REST
 and gRPC, read as the service account, and the real token was found nowhere in
 the session.
 
-- **Wildcard route hosts.** A route's host may be `*.suffix`: every name below
-  it, at any depth, not the suffix itself. The exact route wins, then the
-  nearest wildcard above the name, so `*.mtls.googleapis.com` refusing
-  everything overrides `*.googleapis.com` for those hosts. The upstream is the
-  name the client asked for, dialled through the same structural check as
+- **Wildcard route hosts.** *Built.* A route's host may be `*.suffix`: every
+  name below it, at any depth, not the suffix itself, and the allowlist must
+  cover it whole. The exact route wins, then the nearest wildcard above the
+  name, so `*.mtls.googleapis.com` refusing everything overrides
+  `*.googleapis.com` for those hosts. The upstream is the name the client
+  asked for -- the route's is written `https://*.suffix[:port]`, its own host,
+  so only a port can differ -- dialled through the same structural check as
   egress and verified against that name; a request for another name on the
   same connection is 421. A leaf is issued per name (about 110 µs); a wildcard
   leaf would cover one label, and Google's regional hosts have two. The
@@ -871,27 +877,33 @@ the session.
   the subtree. That an exact host's constraint also permits its subdomains is
   what a name constraint means; frisket's own issuing check stays the narrower
   gate, and nothing further is built for it.
-- **A session key, and a grant answered with the placeholder.** A route can be
-  given the public half of a key made for the session. A JWT-bearer grant
-  (`urn:ietf:params:oauth:grant-type:jwt-bearer`) posted to the route's token
-  URLs, whose assertion that key signed with the right issuer, audience and
-  expiry, is answered by frisket and never sent on: `{"access_token":
+- **A session key, and a grant answered with the placeholder.** *Built.* A
+  route's `sessionKey` is the public half of a key made for the session, the
+  service account it names as `issuer`, and its token URLs as `grants`. A
+  JWT-bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`) posted to
+  one, whose assertion that key signed with that issuer, any of the grant
+  URLs as its audience, and an expiry at most an hour on, is answered by
+  frisket and never sent on, logged `credential: answered`: `{"access_token":
   <placeholder>, "expires_in": 3599, "token_type": "Bearer"}`, or, when it
   asks for `target_audience`, an ID token shaped like a JWT and signed by
-  nobody. Anything else posted there is 400, and nothing leaves. Google's
+  nobody. Anything else sent there is 400, whatever the scope says, and
+  nothing leaves. Google's
   clients post to `oauth2.googleapis.com/token`, except Node's storage
   library, which posts to `www.googleapis.com/oauth2/v4/token` whatever the
   key file says (measured), so both are the route's.
-- **A JWT the session key signed is the placeholder** (decision 13). Many
-  clients never make the grant: they sign their own JWT and send it as the
-  bearer (Python's generated clients by default, Go's and Node's over gRPC,
-  gcloud with a property set; measured). Its audience is the API's
+- **A JWT the session key signed is the placeholder** (decision 13). *Built.*
+  Many clients never make the grant: they sign their own JWT and send it as
+  the bearer (Python's generated clients by default, Go's and Node's over
+  gRPC, gcloud with a property set; measured). Its audience is the API's
   `https://<host>/`, or it carries a `scope` claim instead; each lives an hour
   and is reused for it, about one per client per API. frisket checks the
-  signature with go-jose (decision 1), the issuer, the expiry and that the
-  audience is the host asked for, and replaces it; one checked is cached,
-  about 22 µs a new one and under 1 µs after (prototype, hand-written
-  checks). Nothing else is a placeholder.
+  signature with go-jose (decision 1), RS256 alone and always against the
+  session key, whatever the header says; then the issuer, and the subject if
+  there is one, an expiry at most an hour and five minutes after its `iat`,
+  and that the audience is the host asked for; and replaces it. One checked is
+  remembered, by its digest, until its expiry, and its audience checked on
+  every request. One the key signed that fails a claim is refused, 403, with
+  which; any other goes upstream as the client's own.
 - **`*:verb` segments.** *Built.* A path template segment `*:verb` matches a
   segment ending in that literal verb, with something before it, and is more
   specific than `*` and less than a literal. Without it
@@ -935,9 +947,7 @@ the session.
   credential that stays expired while requests arrive should be said in the
   log once, since clients retry the 503 quietly for two minutes and a dead
   renewer looks like a slow one (*built*: once when a request first finds it
-  stale, at error, and once when one finds it fresh); and a JWT the session
-  key signed but with bad claims could be refused here with a clear error,
-  where today it goes upstream and comes back 401.
+  stale, at error, and once when one finds it fresh).
 
 ---
 
