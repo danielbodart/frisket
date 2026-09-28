@@ -125,7 +125,7 @@ func (g *compiledGraphQL) near(segs []string) bool {
 		if i == len(t)-1 {
 			seg, _, _ = strings.Cut(seg, ".")
 		}
-		if want == wildcard && seg == "" || want != wildcard && seg != want {
+		if !matchesFolded(want, seg) {
 			return false
 		}
 	}

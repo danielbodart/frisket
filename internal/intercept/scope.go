@@ -56,18 +56,27 @@ const (
 // matches "/backend-api/codex/responses" and not "/backend-api/codex-evil". A
 // string prefix is the mistake git's insteadOf makes, where `owner/repo` also
 // matches `owner/repo-evil`. A segment that is "*" alone matches any one
-// segment that is not empty; a "*" anywhere else is refused, so a template
-// cannot say more than one segment's worth.
+// segment that is not empty, and "*:verb" one that is something followed by
+// ":verb", as Google's custom methods are; a "*" anywhere else is refused, so
+// a template cannot say more than one segment's worth. A colon in a template
+// matches only a colon the request spells as one: to Google "%3A" is not the
+// separator, so "x%3Aaccess" is neither "*:access" nor "x:access" -- though a
+// stricter rule still catches it, as it catches any other spelling.
 //
 // Where several rules match, the most specific decides, as OpenAPI resolves a
 // request to one operation: segment by segment from the left, a literal beats
-// a "*", and either beats being past the end of a prefix. Between rules that
-// are equally specific the stricter decides: refusing beats asking, and asking
-// beats admitting.
+// a "*:verb", that beats a "*", and each beats being past the end of a
+// prefix. Between rules that are equally specific the stricter decides:
+// refusing beats asking, and asking beats admitting; and between those equal
+// in both, the first listed.
 type PathRule struct {
 	Methods []string
 	Prefix  string
 	Path    string
+	// EncodedSlashes lets a "*" take a segment holding an encoded slash,
+	// "a%2Fb", for an upstream that reads it as one name: Cloud Storage's
+	// objects.
+	EncodedSlashes bool
 	// Ask puts a matching request to a person instead of admitting it.
 	Ask bool
 	// Refuse refuses a matching request: a hole in a broader rule, or a
@@ -226,11 +235,12 @@ type compiledPath struct {
 	methods []string
 	// segs is the template; exact says whether it is the whole path or a
 	// prefix of it.
-	segs      []string
-	folded    []string
-	exact     bool
-	outcome   Outcome
-	operation *Operation
+	segs           []string
+	folded         []string
+	exact          bool
+	encodedSlashes bool
+	outcome        Outcome
+	operation      *Operation
 }
 
 // strictness orders outcomes: admitting, then asking, then refusing.
@@ -330,6 +340,9 @@ func compilePath(p PathRule) (compiledPath, error) {
 	if err != nil {
 		return compiledPath{}, fmt.Errorf("path rule %q: %w", written, err)
 	}
+	if strings.Contains(strings.ToUpper(written), "%3A") {
+		return compiledPath{}, fmt.Errorf("path rule %q: a colon is written as one", written)
+	}
 	if n := len(segs); n > 0 && segs[n-1] == "" {
 		switch {
 		case !exact:
@@ -345,10 +358,18 @@ func compilePath(p PathRule) (compiledPath, error) {
 	if slices.Contains(segs[:max(len(segs)-1, 0)], "") || (!exact && slices.Contains(segs, "")) {
 		return compiledPath{}, fmt.Errorf("path rule %q has an empty segment", written)
 	}
+	wild := false
 	for _, seg := range segs {
-		if seg != wildcard && strings.Contains(seg, wildcard) {
-			return compiledPath{}, fmt.Errorf("path rule %q: a * is a whole segment or nothing", written)
+		v, isVerb := verb(seg)
+		switch {
+		case seg == wildcard, isVerb && validVerb(v):
+			wild = true
+		case strings.Contains(seg, wildcard):
+			return compiledPath{}, fmt.Errorf("path rule %q: a * is a whole segment, *:verb, or nothing", written)
 		}
+	}
+	if p.EncodedSlashes && !wild {
+		return compiledPath{}, fmt.Errorf("path rule %q lets a * take an encoded slash, and has no *", written)
 	}
 	if p.Ask && p.Refuse {
 		return compiledPath{}, fmt.Errorf("path rule %q both asks and refuses", written)
@@ -370,7 +391,22 @@ func compilePath(p PathRule) (compiledPath, error) {
 	case p.Refuse:
 		outcome = Refuse
 	}
-	return compiledPath{methods: upper(p.Methods), segs: segs, folded: folded, exact: exact, outcome: outcome, operation: p.Operation}, nil
+	return compiledPath{methods: upper(p.Methods), segs: segs, folded: folded, exact: exact, encodedSlashes: p.EncodedSlashes, outcome: outcome, operation: p.Operation}, nil
+}
+
+// verb is a template segment's verb: "access", for "*:access".
+func verb(t string) (string, bool) { return strings.CutPrefix(t, wildcard+":") }
+
+// validVerb holds a verb to letters, digits, - and _: nothing a lenient
+// reading would fold away, and no second colon to disagree about.
+func validVerb(v string) bool {
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return v != ""
 }
 
 func upper(ms []string) []string {
@@ -391,10 +427,12 @@ func upper(ms []string) []string {
 // person about a request that could mean two different paths is asking them
 // to approve whichever one the upstream picks.
 func (c *compiled) decide(method string, u *url.URL) Verdict {
-	segs, err := splitPath(u.EscapedPath())
+	escaped := u.EscapedPath()
+	segs, err := splitPath(escaped)
 	if err != nil {
 		return Verdict{Outcome: Refuse, Reason: ReasonBadPath}
 	}
+	raw := strings.Split(escaped[1:], "/")
 	// Git first, and its refusal stands: a route admitting GET everywhere
 	// beside a git scope without push still refuses receive-pack's ref
 	// advertisement, which is where a push is meant to stop.
@@ -410,15 +448,15 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 		whole, split := lenient(segs)
 		for i := range c.graphql {
 			g := &c.graphql[i]
-			if g.path.matches(segs) || g.near(whole) || g.near(split) {
+			if g.path.matches(segs, raw) || g.near(whole) || g.near(split) {
 				return Verdict{Outcome: Refuse, Reason: "graphql body unread", graphql: g}
 			}
 		}
 	}
-	if best := c.best(method, segs, true); best != nil {
+	if best := c.best(method, segs, raw, true); best != nil {
 		return c.verdict(method, segs, best)
 	}
-	if best := c.best(method, segs, false); best != nil {
+	if best := c.best(method, segs, raw, false); best != nil {
 		return c.verdict(method, segs, best)
 	}
 	if c.api != nil && slices.Contains(c.api.Methods, method) &&
@@ -439,11 +477,11 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 // prefixes only when none matched, so a broad prefix never outranks an
 // operation somebody named: a prefix with a literal where the operation has
 // a "*" is still not the operation.
-func (c *compiled) best(method string, segs []string, exact bool) *compiledPath {
+func (c *compiled) best(method string, segs, raw []string, exact bool) *compiledPath {
 	var best *compiledPath
 	for i := range c.paths {
 		p := &c.paths[i]
-		if p.exact != exact || !slices.Contains(p.methods, method) || !p.matches(segs) {
+		if p.exact != exact || !slices.Contains(p.methods, method) || !p.matches(segs, raw) {
 			continue
 		}
 		if best == nil {
@@ -536,15 +574,24 @@ func (p *compiledPath) matchesFolded(segs []string) bool {
 		return false
 	}
 	for i, t := range p.folded {
-		if t == wildcard {
-			if segs[i] == "" {
-				return false
-			}
-		} else if segs[i] != t {
+		if !matchesFolded(t, segs[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// matchesFolded is one folded template segment against one folded request
+// segment: a verb's colon however it was spelt, the verb in any case, and
+// with nothing before it, which some upstream may take for the verb alone.
+func matchesFolded(t, seg string) bool {
+	if t == wildcard {
+		return seg != ""
+	}
+	if v, ok := verb(t); ok {
+		return strings.HasSuffix(seg, ":"+v)
+	}
+	return seg == t
 }
 
 // fold is a segment as the most lenient upstream might read it: decoded as
@@ -572,24 +619,40 @@ func foldDecoded(seg string) string {
 }
 
 // matches is whether a request's segments are this template: all of them for
-// an exact rule, the first of them for a prefix.
-func (p *compiledPath) matches(segs []string) bool {
+// an exact rule, the first of them for a prefix. raw is each segment as it
+// was sent, which says whether a colon was spelt as one.
+func (p *compiledPath) matches(segs, raw []string) bool {
 	if len(segs) < len(p.segs) || p.exact && len(segs) != len(p.segs) {
 		return false
 	}
 	for i, t := range p.segs {
-		if t == wildcard {
-			// Any one segment, but one: not the trailing empty one a
-			// trailing slash leaves, and not one that an upstream decoding
-			// it once more would read as two.
-			if !oneSegment(segs[i]) {
+		v, isVerb := verb(t)
+		switch {
+		case t == wildcard:
+			if !p.one(segs[i]) {
 				return false
 			}
-		} else if segs[i] != t {
+		case isVerb:
+			name, ok := strings.CutSuffix(segs[i], ":"+v)
+			if !ok || !strings.HasSuffix(raw[i], ":"+v) || !p.one(name) {
+				return false
+			}
+		case segs[i] != t || strings.Count(raw[i], ":") != strings.Count(t, ":"):
 			return false
 		}
 	}
 	return true
+}
+
+// one is whether a "*" takes a segment: any one segment, but one -- not the
+// trailing empty one a trailing slash leaves, and not one that an upstream
+// decoding it once more would read as two, unless the rule's upstream reads
+// an encoded slash as part of a name, and then not one of slashes alone.
+func (p *compiledPath) one(seg string) bool {
+	if p.encodedSlashes {
+		return strings.ContainsFunc(decode(seg), func(r rune) bool { return r != '/' && r != '\\' })
+	}
+	return oneSegment(seg)
 }
 
 // oneSegment is whether a decoded segment is one segment to any reading of
@@ -626,15 +689,18 @@ func (p *compiledPath) specificity(q *compiledPath, n int) int {
 }
 
 // rank is how specifically a rule matches the segment at i: a literal, a
-// wildcard, or nothing at all, past the end of a prefix.
+// verb, a wildcard, or nothing at all, past the end of a prefix.
 func (p *compiledPath) rank(i int) int {
-	switch {
-	case i >= len(p.segs):
+	if i >= len(p.segs) {
 		return 0
-	case p.segs[i] == wildcard:
+	}
+	if p.segs[i] == wildcard {
 		return 1
 	}
-	return 2
+	if _, ok := verb(p.segs[i]); ok {
+		return 2
+	}
+	return 3
 }
 
 // decide for git is false when the request is not git-shaped at all, so the

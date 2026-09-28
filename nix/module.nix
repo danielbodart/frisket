@@ -131,18 +131,30 @@ let
         description = ''
           The path the rule decides, and everything under it, matched by
           segment: `/v1` matches `/v1/models` and not `/v1-evil`. A segment
-          that is `*` alone matches any one segment. Not with `path`.
+          that is `*` alone matches any one segment, and `*:verb` one ending
+          in `:verb`. Not with `path`.
         '';
       };
       path = mkOption {
         type = types.nullOr (types.strMatching "/.*");
         default = null;
-        example = "/zones/*/dns_records/*";
+        example = "/v1/projects/*/secrets/*/versions/*:access";
         description = ''
           Exactly this path and nothing under it, matched by segment, `*`
-          alone matching any one segment: an API operation. Where several
-          rules match a request, the most specific decides -- a literal beats
-          `*`, and either beats the end of a prefix. Not with `prefix`.
+          alone matching any one segment and `*:verb` one ending in `:verb`,
+          the colon unencoded and the verb in its case: an API operation.
+          Where several rules match a request, the most specific decides -- a
+          literal beats `*:verb`, that beats `*`, and each beats the end of a
+          prefix. Not with `prefix`.
+        '';
+      };
+      encodedSlashes = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Let the rule's `*` segments match one holding an encoded slash,
+          `a%2Fb`, for an upstream that reads it as one name: Cloud Storage's
+          objects. Otherwise such a segment matches no `*`.
         '';
       };
       ask = mkOption {
@@ -196,7 +208,7 @@ let
       path = mkOption {
         type = types.strMatching "/.*";
         example = "/graphql";
-        description = "The endpoint's path, exactly, `*` alone matching any one segment.";
+        description = "The endpoint's path, exactly, `*` alone matching any one segment and `*:verb` one ending in `:verb`.";
       };
       query = mkOption {
         type = types.nullOr graphqlField;

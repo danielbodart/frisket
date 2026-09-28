@@ -892,11 +892,19 @@ the session.
   audience is the host asked for, and replaces it; one checked is cached,
   about 22 µs a new one and under 1 µs after (prototype, hand-written
   checks). Nothing else is a placeholder.
-- **`*:verb` segments.** A path template segment `*:verb` matches a segment
-  ending in that literal verb, and is more specific than `*`. Without it
+- **`*:verb` segments.** *Built.* A path template segment `*:verb` matches a
+  segment ending in that literal verb, with something before it, and is more
+  specific than `*` and less than a literal. Without it
   `GET /v1/projects/*/secrets/*/versions/*` is both a read and a credential.
-- **Encoded slashes, by opt-in.** A rule may let `*` match a segment holding
-  `%2F`, for Cloud Storage's object names. Everywhere else it still may not.
+  A colon in a template, a verb's or a literal's, matches only a colon sent
+  as one: Google does not take `%3A` as the separator (`s%3AaddVersion` 404,
+  measured), so a request spelt so is not the verb's operation, and the
+  lenient reading, which decodes it, lets a stricter verb rule decide it.
+- **Encoded slashes, by opt-in.** *Built.* A rule with `encodedSlashes` lets
+  its `*` match a segment holding `%2F`, for Cloud Storage's object names,
+  but not one of slashes alone. Everywhere else it still may not, and a
+  stricter rule that the request split at its encoded slashes matches still
+  decides.
 - **Method overrides applied.** `X-HTTP-Method-Override`, `$httpMethod` and
   `%24httpMethod` are honoured by Google's front end (measured: `GET` routed
   as `DELETE`, `GET` as `POST`). frisket takes the method they name, rewrites

@@ -168,15 +168,17 @@ type CredentialJSON struct {
 }
 
 // PathRule is one scope rule: the methods, at exactly Path or at and under
-// Prefix, either of them with "*" segments; admitted, asked about, or
-// refused.
+// Prefix, either of them with "*" and "*:verb" segments; admitted, asked
+// about, or refused.
 type PathRule struct {
-	Methods   []string   `json:"methods"`
-	Prefix    string     `json:"prefix,omitempty"`
-	Path      string     `json:"path,omitempty"`
-	Ask       bool       `json:"ask,omitempty"`
-	Refuse    bool       `json:"refuse,omitempty"`
-	Operation *Operation `json:"operation,omitempty"`
+	Methods []string `json:"methods"`
+	Prefix  string   `json:"prefix,omitempty"`
+	Path    string   `json:"path,omitempty"`
+	// EncodedSlashes lets a "*" take a segment holding "%2F".
+	EncodedSlashes bool       `json:"encodedSlashes,omitempty"`
+	Ask            bool       `json:"ask,omitempty"`
+	Refuse         bool       `json:"refuse,omitempty"`
+	Operation      *Operation `json:"operation,omitempty"`
 }
 
 // Operation is what a rule is, in its API's own words: what a person is shown
@@ -574,7 +576,7 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 		return intercept.Route{}, nil, fmt.Errorf("unmatched %q: refuse or ask", r.Unmatched)
 	}
 	for _, p := range r.Paths {
-		rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, Ask: p.Ask, Refuse: p.Refuse}
+		rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, EncodedSlashes: p.EncodedSlashes, Ask: p.Ask, Refuse: p.Refuse}
 		o, err := operation(p.Operation)
 		if err != nil {
 			return intercept.Route{}, nil, err

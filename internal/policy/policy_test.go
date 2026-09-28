@@ -109,6 +109,8 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"unmatched that is neither refuse nor ask": func(p *Policy) { p.Routes[0].Unmatched = "admit" },
 		"a rule with a path and a prefix":          func(p *Policy) { p.Routes[0].Paths[0].Path = "/v1/x" },
 		"a * inside a template segment":            func(p *Policy) { p.Routes[0].Paths[0].Prefix = "/v1/x*" },
+		"a verb with no name":                      func(p *Policy) { p.Routes[0].Paths[0].Prefix = "/v1/*:" },
+		"encoded slashes with no *":                func(p *Policy) { p.Routes[0].Paths[0].EncodedSlashes = true },
 		"a refusal with no message in it": func(p *Policy) {
 			p.Routes[0].Refusal = &Refusal{ContentType: "application/json", Body: `{"error":"no"}`}
 		},
@@ -271,6 +273,22 @@ func TestARouteReadsItsCredentialFromJSON(t *testing.T) {
 	}
 }
 
+func TestARuleCarriesEncodedSlashesToItsScope(t *testing.T) {
+	var doc Document
+	if err := decode([]byte(`{"name":"p","allow":["storage.test"],"routes":[{
+		"name":"gcs","host":"storage.test","upstream":"https://storage.test","unmatched":"ask",
+		"paths":[{"methods":["GET"],"path":"/storage/v1/b/*/o/*","encodedSlashes":true},{"methods":["GET"],"path":"/storage/v1/b/*"}]}]}`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := route(doc.Routes[0], Deps{Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := r.Scope.Paths; !p[0].EncodedSlashes || p[1].EncodedSlashes {
+		t.Errorf("encodedSlashes = %v, %v, want true, false", p[0].EncodedSlashes, p[1].EncodedSlashes)
+	}
+}
+
 // Each session gets its own DNS, answering the intercepted name with ITS
 // service address and NXDOMAIN for what is not allowed, without asking
 // upstream, and its own egress, which refuses what its DNS did not resolve.
@@ -412,7 +430,9 @@ func TestARouteOfOperationsLoadsAndBuilds(t *testing.T) {
 				{"methods": ["GET", "HEAD"], "path": "/client/v4/zones/*/dns_records/*",
 				 "operation": {"id": "get-record", "summary": "DNS Record Details"}},
 				{"methods": ["DELETE"], "path": "/client/v4/zones/*/dns_records/*", "ask": true,
-				 "operation": {"id": "delete-record", "summary": "Delete DNS Record", "description": "Permanently removes it."}}
+				 "operation": {"id": "delete-record", "summary": "Delete DNS Record", "description": "Permanently removes it."}},
+				{"methods": ["GET"], "path": "/v1/projects/*/secrets/*/versions/*:access", "refuse": true},
+				{"methods": ["GET"], "path": "/storage/v1/b/*/o/*", "encodedSlashes": true}
 			 ]},
 			{"name": "other", "host": "other.test", "upstream": "https://other.test",
 			 "credentialFile": "`+token+`", "placeholder": "proxy-injected", "unmatched": "ask"}
