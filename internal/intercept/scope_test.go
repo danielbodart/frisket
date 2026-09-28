@@ -581,6 +581,34 @@ func TestARefusalCannotBeSpeltAround(t *testing.T) {
 	}
 }
 
+// Nor by a request nothing matches, where Unmatched asks: a refused
+// operation spelt so that no rule names it is still refused, not asked about.
+func TestARefusalSpeltAroundIsNotAskedAbout(t *testing.T) {
+	c := mustCompile(t, Scope{Paths: []PathRule{
+		{Methods: []string{"POST"}, Path: "/batch", Refuse: true},
+		{Methods: []string{"GET"}, Path: "/v1/secrets/*/versions/*:access", Refuse: true},
+		{Methods: []string{"GET"}, Path: "/v1/secrets/*/versions/*"},
+	}, Unmatched: UnmatchedAsk})
+	for _, tc := range []struct {
+		method, target string
+		want           Outcome
+	}{
+		{"POST", "/batch", Refuse},
+		{"POST", "/batch/", Refuse},
+		{"POST", "/Batch", Refuse},
+		{"POST", "/batch;x", Refuse},
+		{"POST", "/batch.", Refuse},
+		{"GET", "/v1/secrets/s/versions/latest:access/", Refuse},
+		{"POST", "/batch/storage/v1", Ask},
+		{"GET", "/v1/secrets/s", Ask},
+	} {
+		u, _ := parseTarget(tc.target)
+		if v := c.decide(tc.method, u); v.Outcome != tc.want {
+			t.Errorf("%s %s: %v %q, want %v", tc.method, tc.target, v.Outcome, v.Reason, tc.want)
+		}
+	}
+}
+
 // Without Unmatched, a scope of templates refuses what they do not match, as
 // a scope of prefixes always has.
 func TestUnmatchedRefusesByDefault(t *testing.T) {

@@ -467,6 +467,9 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 		return Verdict{Outcome: Admit, Reason: "github-api"}
 	}
 	if c.unmatched == UnmatchedAsk {
+		if stricter := c.stricterLeniently(method, segs, Ask); len(stricter) > 0 {
+			return stricter[0].verdict()
+		}
 		return Verdict{Outcome: Ask, Reason: RuleUnmatched}
 	}
 	return Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}
