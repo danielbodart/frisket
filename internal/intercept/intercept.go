@@ -33,6 +33,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/danielbodart/frisket/internal/dns"
 	"github.com/danielbodart/frisket/internal/steer"
 )
 
@@ -65,6 +66,7 @@ const (
 	CredentialInjected = "injected" // the placeholder, replaced with the real credential
 	CredentialPassed   = "passed"   // the client's own, sent on untouched
 	CredentialNone     = "none"     // there was none
+	CredentialAnswered = "answered" // a grant frisket answered, never sent upstream
 )
 
 // Refusal reasons that are not the scope's.
@@ -84,6 +86,9 @@ const (
 
 // RuleAsked is the rule of a request a person admitted.
 const RuleAsked = "asked"
+
+// RuleGrant is the rule of a request to a session key's token URL.
+const RuleGrant = "session key grant"
 
 // ErrBusy is an Asker's answer when the session already has a question
 // waiting: refused at once, and not the asker failing.
@@ -157,6 +162,8 @@ type Config struct {
 // address's HTTPS port.
 type Interceptor struct {
 	routes map[string]*route
+	// wild is the wildcard routes, by the suffix below which they serve.
+	wild   map[string]*route
 	log    *slog.Logger
 	now    func() time.Time
 	policy string
@@ -173,6 +180,8 @@ type Interceptor struct {
 type route struct {
 	Route
 	host     string
+	wild     bool
+	key      *sessionKey
 	upstream *url.URL
 	scope    *compiled
 	refusal  *refusalShape
@@ -200,6 +209,7 @@ func New(cfg Config) (*Interceptor, error) {
 
 	i := &Interceptor{
 		routes:  map[string]*route{},
+		wild:    map[string]*route{},
 		log:     cfg.Log,
 		now:     cfg.Now,
 		policy:  cfg.Policy,
@@ -216,7 +226,12 @@ func New(cfg Config) (*Interceptor, error) {
 			return nil, fmt.Errorf("intercept: %w", err)
 		}
 		host := normaliseHost(r.Host)
-		if _, dup := i.routes[host]; dup {
+		suffix, wild := strings.CutPrefix(host, "*.")
+		byName := i.routes
+		if wild {
+			byName = i.wild
+		}
+		if _, dup := byName[suffix]; dup {
 			return nil, fmt.Errorf("intercept: two routes for %s", host)
 		}
 		sc, err := compileScope(r.Scope)
@@ -227,8 +242,8 @@ func New(cfg Config) (*Interceptor, error) {
 		if err != nil {
 			return nil, fmt.Errorf("intercept: route %s: %w", r.Name, err)
 		}
-		rt := &route{Route: r, host: host, upstream: up, scope: sc, refusal: rf}
-		rt.tr = upstreamTransport(r, up, dial)
+		rt := &route{Route: r, host: host, wild: wild, upstream: up, scope: sc, refusal: rf}
+		rt.tr = upstreamTransport(rt, dial)
 		rt.proxy = &httputil.ReverseProxy{
 			Rewrite:        rt.rewrite,
 			Transport:      rt.tr,
@@ -236,7 +251,17 @@ func New(cfg Config) (*Interceptor, error) {
 			ErrorLog:       errLog,
 			ErrorHandler:   upstreamFailed,
 		}
-		i.routes[host] = rt
+		byName[suffix] = rt
+	}
+	for _, rt := range i.all() {
+		if rt.SessionKey == nil {
+			continue
+		}
+		k, err := compileSessionKey(rt.SessionKey, rt.Name, func(h string) bool { return i.lookup(h) == rt })
+		if err != nil {
+			return nil, fmt.Errorf("intercept: %w", err)
+		}
+		rt.key = k
 	}
 
 	i.tlsConfig = &tls.Config{
@@ -274,7 +299,13 @@ func New(cfg Config) (*Interceptor, error) {
 }
 
 // upstreamTransport is a route's connection to its real upstream.
-func upstreamTransport(r Route, up *url.URL, dial func(context.Context, string, string) (net.Conn, error)) *http.Transport {
+func upstreamTransport(rt *route, dial func(context.Context, string, string) (net.Conn, error)) *http.Transport {
+	// A wildcard route's upstream is each request's own name, which the
+	// Transport verifies when ServerName is empty.
+	serverName := rt.upstream.Hostname()
+	if rt.wild {
+		serverName = ""
+	}
 	// A custom dialer or TLS config silently turns off HTTP/2 in
 	// net/http, so the protocols are set here rather than inherited. Both:
 	// the Transport already forces HTTP/1.1 for a websocket upgrade.
@@ -288,8 +319,8 @@ func upstreamTransport(r Route, up *url.URL, dial func(context.Context, string, 
 		Proxy:       nil,
 		DialContext: dial,
 		TLSClientConfig: &tls.Config{
-			RootCAs:    r.UpstreamCAs,
-			ServerName: up.Hostname(),
+			RootCAs:    rt.UpstreamCAs,
+			ServerName: serverName,
 			MinVersion: tls.VersionTLS12,
 		},
 		TLSHandshakeTimeout: 15 * time.Second,
@@ -316,20 +347,50 @@ func (i *Interceptor) Close() error {
 		close(i.closing)
 		err = i.srv.Close()
 		<-i.served
-		for _, r := range i.routes {
+		for _, r := range i.all() {
 			r.tr.CloseIdleConnections()
 		}
 	})
 	return err
 }
 
-// Hosts is the routes' hosts: what a session's CA is constrained to.
-func (i *Interceptor) Hosts() []string {
-	out := make([]string, 0, len(i.routes))
-	for h := range i.routes {
-		out = append(out, h)
+func (i *Interceptor) all() []*route {
+	out := make([]*route, 0, len(i.routes)+len(i.wild))
+	for _, r := range i.routes {
+		out = append(out, r)
+	}
+	for _, r := range i.wild {
+		out = append(out, r)
 	}
 	return out
+}
+
+// Hosts is the routes' hosts: what a session's CA is constrained to.
+func (i *Interceptor) Hosts() []string {
+	out := make([]string, 0, len(i.routes)+len(i.wild))
+	for _, r := range i.all() {
+		out = append(out, r.host)
+	}
+	return out
+}
+
+// lookup is the route serving name: its own, or the nearest wildcard above
+// it.
+func (i *Interceptor) lookup(name string) *route {
+	if !dns.ValidQueryName(name) {
+		return nil
+	}
+	if r, ok := i.routes[name]; ok {
+		return r
+	}
+	for j := 0; j < len(name); j++ {
+		if name[j] == '.' {
+			if r, ok := i.wild[name[j+1:]]; ok {
+				return r
+			}
+		}
+	}
+	return nil
 }
 
 // For is the handler for one session's connections: the routes are the
@@ -365,7 +426,8 @@ func (i *Interceptor) serveConn(ctx context.Context, c *steer.Conn, ca *CA, work
 	}
 	// The route is fixed by the handshake, for the life of the connection:
 	// getCertificate refused any name without one, so this cannot miss.
-	ic.route = i.routes[normaliseHost(tc.ConnectionState().ServerName)]
+	ic.sni = normaliseHost(tc.ConnectionState().ServerName)
+	ic.route = i.lookup(ic.sni)
 	if ic.route == nil {
 		return
 	}
@@ -382,7 +444,7 @@ func (i *Interceptor) serveConn(ctx context.Context, c *steer.Conn, ca *CA, work
 	// handshake and asked nothing would otherwise leave no line at all.
 	if ic.requests.Load() == 0 {
 		i.log.Info("tls", "session", ic.session, "conn", ic.id, "dst", ic.dst.String(),
-			"sni", ic.route.host, "decision", DecisionAllowed, "requests", 0)
+			"sni", ic.sni, "decision", DecisionAllowed, "requests", 0)
 	}
 }
 
@@ -396,7 +458,7 @@ func (i *Interceptor) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certifica
 	if name == "" {
 		return nil, &refusal{reason: ReasonNoSNI}
 	}
-	if _, ok := i.routes[name]; !ok {
+	if i.lookup(name) == nil {
 		return nil, &refusal{name: name, reason: ReasonUnknownName}
 	}
 	// The connection the handshake is on is the session's, and so is the CA
@@ -486,7 +548,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if normaliseHost(r.Host) != rt.host {
+	if normaliseHost(r.Host) != ic.sni {
 		// One connection, one name: the handshake chose the route and its
 		// credential. A request for another name on it -- HTTP/2 connection
 		// reuse, or a deliberate mismatch -- is sent back to be asked again.
@@ -501,6 +563,23 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec.sentMethod = sent
+	if rt.key != nil && rt.key.grants[ic.sni+r.URL.Path] {
+		// Answered here whatever the scope says: nothing sent to a token
+		// URL ever leaves.
+		rec.rule = RuleGrant
+		if err := rt.key.answer(lw, r, rt.Placeholder, i.now()); err != nil {
+			rec.refuse(err.Error())
+			return
+		}
+		rec.credential = CredentialAnswered
+		return
+	}
+	inject, why := rt.carries(r.Header, ic.sni, i.now())
+	if why != "" {
+		rec.refuse(why)
+		rt.refuse(lw, http.StatusForbidden, why, nil)
+		return
+	}
 	v := rt.scope.decide(r.Method, r.URL)
 	if v.graphql != nil {
 		v = v.graphql.decide(r)
@@ -532,7 +611,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.rule = v.Reason
 	}
 
-	if !rt.carries(r.Header) {
+	if !inject {
 		// Not the placeholder, so not frisket's to touch: the client's own
 		// credential, or none, goes upstream as it was sent. Nor does it need
 		// frisket's -- a stale or missing one is no reason to refuse it.
@@ -593,7 +672,7 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 		Policy:     i.policy,
 		Route:      ic.route.Name,
 		Method:     r.Method,
-		Host:       ic.route.host,
+		Host:       ic.sni,
 		Path:       r.URL.EscapedPath(),
 		Query:      r.URL.RawQuery,
 		Operation:  v.Operation,
@@ -631,7 +710,21 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 
 // rewrite is the only place a credential is put on a request.
 func (rt *route) rewrite(pr *httputil.ProxyRequest) {
-	pr.SetURL(rt.upstream)
+	up := rt.upstream
+	if rt.wild {
+		ic, _ := pr.In.Context().Value(connKey{}).(*interceptedConn)
+		if ic == nil || ic.route != rt {
+			pr.Out.URL = nil
+			return
+		}
+		u := *up
+		u.Host = ic.sni
+		if port := up.Port(); port != "" {
+			u.Host = net.JoinHostPort(ic.sni, port)
+		}
+		up = &u
+	}
+	pr.SetURL(up)
 	secret, inject := pr.In.Context().Value(secretKey{}).(string)
 	if !inject {
 		// No placeholder on the request: nothing of frisket's goes on it.
@@ -719,7 +812,7 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 		"conn", ic.id,
 		"dst", ic.dst.String(),
 		"route", ic.route.Name,
-		"host", ic.route.host,
+		"host", ic.sni,
 		"proto", r.Proto,
 		"method", r.Method,
 	}
@@ -901,6 +994,7 @@ type interceptedConn struct {
 	id        uint64
 	dst       netip.AddrPort
 	ca        *CA
+	sni       string
 	route     *route
 	requests  atomic.Int64
 	done      chan struct{}

@@ -63,7 +63,9 @@ type Policy struct {
 	// hosts, since a name with no route is a dead end at the handshake and a
 	// route for a name not intercepted is never reached. Each host must also
 	// be allowed: interception is how an allowed host gets its credential, not
-	// a way round the allowlist. Exact names only: a route serves one host.
+	// a way round the allowlist. A host is a name, or "*.suffix" for every
+	// name below it; a name's exact route serves it, and failing that the
+	// nearest wildcard above it.
 	Routes []Route `json:"routes,omitempty"`
 }
 
@@ -73,9 +75,11 @@ type Policy struct {
 // git's smart-HTTP protocol per repository, and by GraphQL operation.
 type Route struct {
 	Name string `json:"name"`
-	// Host is the name the sandbox connects to.
+	// Host is the name the sandbox connects to, or "*.suffix".
 	Host string `json:"host"`
-	// Upstream is where its requests go: https://host[:port][/base].
+	// Upstream is where its requests go: https://host[:port][/base]. For a
+	// wildcard route, https://*.suffix[:port]: the name each request was
+	// made to.
 	Upstream string `json:"upstream"`
 	// UpstreamCA is a PEM bundle to verify the upstream with, instead of the
 	// host's roots.
@@ -109,6 +113,18 @@ type Route struct {
 	// Refusal is the API's own error shape, for frisket's refusals. Nil is
 	// plain text.
 	Refusal *Refusal `json:"refusal,omitempty"`
+	// SessionKey is a key made for the session, which its clients sign
+	// with: grants it signed are answered with the placeholder, and a bearer
+	// JWT it signed is the placeholder.
+	SessionKey *SessionKey `json:"sessionKey,omitempty"`
+}
+
+// SessionKey is the public half of the session's key, the issuer every JWT
+// it signs names, and the token URLs, "host/path", answered here.
+type SessionKey struct {
+	PublicKey string   `json:"publicKey"`
+	Issuer    string   `json:"issuer"`
+	Grants    []string `json:"grants,omitempty"`
 }
 
 // Refusal is a refusal's content type, and a body holding "{{message}}"
@@ -221,7 +237,7 @@ func decode(b []byte, v any) error {
 }
 
 // interceptHosts is a policy's intercepted names -- its routes' hosts -- each
-// an exact name.
+// a name or "*.suffix".
 func interceptHosts(p Policy) ([]string, error) {
 	hosts := make([]string, 0, len(p.Routes))
 	for _, r := range p.Routes {
@@ -229,15 +245,27 @@ func interceptHosts(p Policy) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("route %s: %w", r.Name, err)
 		}
-		// One name per route, so a wildcard could never be served: every name
-		// it matched would resolve to the service address and fail at the
-		// handshake.
-		if pat.Any || pat.Wildcard {
-			return nil, fmt.Errorf("route %s: %s is a wildcard, and a route is for one host", r.Name, pat)
+		if pat.Any {
+			return nil, fmt.Errorf("route %s: * is every name, and a route is for a name or the names below one", r.Name)
 		}
-		hosts = append(hosts, pat.Name)
+		hosts = append(hosts, pat.String())
 	}
 	return hosts, nil
+}
+
+// allowCovers is whether every name host stands for is allowed: a name by
+// matching, and "*.suffix" by "*", or by a wildcard at or above suffix.
+func allowCovers(allow *dns.Matcher, host string) bool {
+	suffix, wild := strings.CutPrefix(host, "*.")
+	if !wild {
+		return allow.Match(host)
+	}
+	for _, p := range allow.Patterns() {
+		if p.Any || p.Wildcard && (p.Name == suffix || strings.HasSuffix(suffix, "."+p.Name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Deps is what every policy shares: the one classifier and dialer every
@@ -471,7 +499,7 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 		return nil, closers, fmt.Errorf("intercept: %w", err)
 	}
 	for _, h := range hosts {
-		if !allow.Match(h) {
+		if !allowCovers(allow, h) {
 			return nil, closers, fmt.Errorf("route for %s: not on the allowlist; interception is how an allowed host gets its credential, not a way round the allowlist", h)
 		}
 	}
@@ -609,12 +637,19 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 	if r.CredentialFile == "" {
 		// Scope only: what the client sends goes on as it came, if the scope
 		// admits it. Anything that would say otherwise is refused.
-		if r.Placeholder != "" || r.CredentialJSON != nil || r.Header != "" || r.BasicUser != "" {
-			return intercept.Route{}, nil, errors.New("no credential file, so no placeholder, credentialJSON, header or basicUser")
+		if r.Placeholder != "" || r.CredentialJSON != nil || r.Header != "" || r.BasicUser != "" || r.SessionKey != nil {
+			return intercept.Route{}, nil, errors.New("no credential file, so no placeholder, credentialJSON, header, basicUser or sessionKey")
 		}
 		return out, func() error { return nil }, nil
 	}
 	out.Placeholder = r.Placeholder
+	if k := r.SessionKey; k != nil {
+		key, err := intercept.ParsePublicKey(k.PublicKey)
+		if err != nil {
+			return intercept.Route{}, nil, err
+		}
+		out.SessionKey = &intercept.SessionKey{Key: key, Issuer: k.Issuer, Grants: k.Grants}
+	}
 	switch {
 	case r.Header != "" && r.BasicUser != "":
 		return intercept.Route{}, nil, errors.New("header and basicUser: a token goes in one place")

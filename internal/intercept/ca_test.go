@@ -257,6 +257,45 @@ func TestAClientTrustsTheCAOnlyForTheInterceptedHosts(t *testing.T) {
 	}
 }
 
+// A wildcard route's CA is constrained to its suffix, which a client reads as
+// every name below it, at any depth; and still to nothing else.
+func TestAWildcardConstrainsTheCAToItsSuffix(t *testing.T) {
+	ca, err := NewCA([]string{"*.Wild.Test.", "api.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ca.Hosts(); !slices.Equal(got, []string{"api.example.test", "wild.test"}) || !ca.Certificate().PermittedDNSDomainsCritical {
+		t.Fatalf("constraints %v", got)
+	}
+	for _, name := range []string{"storage.wild.test", "eu.rep.wild.test", "a.b.c.wild.test"} {
+		leaf, err := ca.Leaf(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := handshake(t, ca, leaf, name); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		if !ca.Permits(name) {
+			t.Errorf("Permits(%s) = false", name)
+		}
+	}
+	for _, name := range []string{"evil-wild.test", "wild.test.evil", "evil.test"} {
+		leaf, err := ca.Leaf(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := handshake(t, ca, leaf, name); !notAuthorizedForName(err) {
+			t.Errorf("%s: %v, want the CA not authorised for the name", name, err)
+		}
+		if ca.Permits(name) {
+			t.Errorf("Permits(%s) = true", name)
+		}
+	}
+	if !ca.Permits("*.wild.test") || !ca.Permits("*.mtls.wild.test") || ca.Permits("*.test") || ca.Permits("*.example.test") {
+		t.Error("Permits disagrees with the constraints about a wildcard")
+	}
+}
+
 // With nothing intercepted, the CA permits no name at all.
 func TestACAForNoHostsPermitsNothing(t *testing.T) {
 	ca, err := NewCA(nil)
@@ -290,7 +329,7 @@ func signed(t *testing.T, ca *CA, tmpl *x509.Certificate) *x509.Certificate {
 }
 
 func TestTheCARefusesAHostThatIsNotAName(t *testing.T) {
-	for _, bad := range []string{"", "*.example.test", "*", "a.test:443", "[::1]", "a b.test"} {
+	for _, bad := range []string{"", "*", "**.example.test", "a.*.test", "*.", "a.test:443", "[::1]", "a b.test"} {
 		if _, err := NewCA([]string{bad}); err == nil {
 			t.Errorf("a CA was made for %q", bad)
 		}

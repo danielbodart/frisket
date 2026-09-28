@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/danielbodart/frisket/internal/dns"
 )
 
 const (
@@ -35,10 +37,9 @@ const (
 	// certificate that is "not yet valid" to a sandbox is a refusal nobody can
 	// explain from frisket's side.
 	backdate = time.Hour
-	// DefaultLeafCacheSize bounds the minted certificates held. Names are
-	// already bounded by the routes, since an unknown name is refused before
-	// anything is minted; the bound is here so that stays true if that ever
-	// changes.
+	// DefaultLeafCacheSize bounds the minted certificates held. An exact
+	// route's names are bounded by the routes; a wildcard route's are
+	// whatever the sandbox asks for below its suffix, and this is their bound.
 	DefaultLeafCacheSize = 256
 )
 
@@ -199,11 +200,11 @@ func Bundle(roots, certPEM []byte) ([]byte, error) {
 
 // constrainedNames is hosts normalised, without duplicates, in order: the
 // set's one spelling, so the same set always gives the same certificate
-// fields.
+// fields. A wildcard's is its suffix, which permits the names below it.
 func constrainedNames(hosts []string) ([]string, error) {
 	names := make([]string, 0, len(hosts))
 	for _, h := range hosts {
-		n := strings.TrimSuffix(strings.ToLower(h), ".")
+		n := strings.TrimPrefix(dns.Normalize(h), "*.")
 		if n == "" || strings.ContainsAny(n, "*:[]/ ") {
 			return nil, fmt.Errorf("intercept: %q is not a host name to constrain the CA to", h)
 		}
@@ -249,10 +250,19 @@ func (ca *CA) Certificate() *x509.Certificate { return ca.cert }
 // Hosts is the set of names the CA is constrained to, in order.
 func (ca *CA) Hosts() []string { return slices.Clone(ca.cert.PermittedDNSDomains) }
 
-// Permits reports whether host is one of the names the CA was made for. A
-// leaf for any other host is one every client rejects.
+// Permits reports whether the CA's constraints admit host, as X.509 reads
+// them: a permitted name and every name below it. "*.suffix" is admitted if
+// every name below suffix is. A leaf for any other host is one every client
+// rejects.
 func (ca *CA) Permits(host string) bool {
-	return slices.Contains(ca.cert.PermittedDNSDomains, normaliseHost(host))
+	h := normaliseHost(host)
+	h = strings.TrimPrefix(h, "*.")
+	for _, c := range ca.cert.PermittedDNSDomains {
+		if h == c || strings.HasSuffix(h, "."+c) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetCacheSize changes the bound on minted leaves held.

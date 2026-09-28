@@ -3,7 +3,11 @@ package policy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -84,10 +88,31 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		// Interception is how an allowed host gets its credential, not a way
 		// round the allowlist.
 		"a route for a name not on the allowlist": func(p *Policy) { p.Allow = []string{"allowed.test"} },
-		"a route for a wildcard":                  func(p *Policy) { p.Routes[0].Host = "*.cdn.test" },
+		"a wildcard route upstream of one name":   func(p *Policy) { p.Routes[0].Host = "*.cdn.test" },
 		"a route for *":                           func(p *Policy) { p.Allow = []string{"*"}; p.Routes[0].Host = "*" },
-		"a route with no scope":                   func(p *Policy) { p.Routes[0].Paths = nil },
-		"a placeholder with no credential":        func(p *Policy) { p.Routes[0].CredentialFile = "" },
+		"a wildcard route wider than allowed": func(p *Policy) {
+			p.Allow = []string{"*.cdn.test"}
+			p.Routes[0].Host, p.Routes[0].Upstream = "*.test", "https://*.test"
+		},
+		"a wildcard route only one of whose names is allowed": func(p *Policy) {
+			p.Allow = []string{"a.gapi.test"}
+			p.Routes[0].Host, p.Routes[0].Upstream = "*.gapi.test", "https://*.gapi.test"
+		},
+		"a session key with no credential": func(p *Policy) {
+			p.Routes[0].CredentialFile, p.Routes[0].Placeholder = "", ""
+			p.Routes[0].SessionKey = &SessionKey{PublicKey: sessionKeyPEM(t), Issuer: "sa@x.test"}
+		},
+		"a session key that is not PEM": func(p *Policy) {
+			p.Routes[0].SessionKey = &SessionKey{PublicKey: "nope", Issuer: "sa@x.test"}
+		},
+		"a session key with no issuer": func(p *Policy) {
+			p.Routes[0].SessionKey = &SessionKey{PublicKey: sessionKeyPEM(t)}
+		},
+		"a session key granting at another host": func(p *Policy) {
+			p.Routes[0].SessionKey = &SessionKey{PublicKey: sessionKeyPEM(t), Issuer: "sa@x.test", Grants: []string{"allowed.test/token"}}
+		},
+		"a route with no scope":            func(p *Policy) { p.Routes[0].Paths = nil },
+		"a placeholder with no credential": func(p *Policy) { p.Routes[0].CredentialFile = "" },
 		"basicUser with no credential": func(p *Policy) {
 			p.Routes[0].CredentialFile, p.Routes[0].Placeholder, p.Routes[0].BasicUser = "", "", "x-access-token"
 		},
@@ -215,13 +240,96 @@ func TestGitPushAndOperationClassAreOneOfTheirWords(t *testing.T) {
 	}
 }
 
-// A route for a wildcard is refused: every name it matched would resolve to
-// the service address and fail at the handshake.
-func TestARouteIsForOneHost(t *testing.T) {
-	for _, bad := range []string{"*", "*.test", "a.*.test"} {
+// A route is for a name, or every name below one; never for every name, and
+// never for a pattern the allowlist would refuse.
+func TestARouteIsForANameOrTheNamesBelowOne(t *testing.T) {
+	for _, bad := range []string{"*", "a.*.test", "*a.test", "**.test"} {
 		if _, err := interceptHosts(Policy{Routes: []Route{{Name: "r", Host: bad}}}); err == nil {
 			t.Errorf("a route for %q was accepted", bad)
 		}
+	}
+	hosts, err := interceptHosts(Policy{Routes: []Route{{Name: "a", Host: "*.GAPI.test."}, {Name: "b", Host: "api.test"}}})
+	if err != nil || !slices.Equal(hosts, []string{"*.gapi.test", "api.test"}) {
+		t.Fatalf("interceptHosts = %v, %v", hosts, err)
+	}
+}
+
+func sessionKeyPEM(t *testing.T) string {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+}
+
+// GOOGLE'S SHAPE: a wildcard route with a session key, beside a nearer
+// wildcard that refuses everything, allowed by a wildcard above both. Every
+// name below the suffix is intercepted, at any depth; the suffix itself is
+// not, and is resolved like any other allowed name. The session's CA is
+// constrained to the suffix.
+func TestAWildcardRouteWithASessionKeyBuilds(t *testing.T) {
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte(`{"access_token":"ya29.x","expiry":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := Policy{
+		Allow: []string{"*.gapi.test", "gapi.test"},
+		Routes: []Route{
+			{
+				Name: "gapi", Host: "*.gapi.test", Upstream: "https://*.gapi.test",
+				CredentialFile: token, CredentialJSON: &CredentialJSON{Token: "access_token", ExpiresMillis: "expiry"},
+				Placeholder: "proxy-injected",
+				SessionKey: &SessionKey{
+					PublicKey: sessionKeyPEM(t), Issuer: "sa@project.iam.gserviceaccount.test",
+					Grants: []string{"oauth2.gapi.test/token", "www.gapi.test/oauth2/v4/token"},
+				},
+				Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}},
+			},
+			{
+				Name: "mtls", Host: "*.mtls.gapi.test", Upstream: "https://*.mtls.gapi.test",
+				Paths: []PathRule{{Methods: []string{"GET", "POST"}, Prefix: "/", Refuse: true}},
+			},
+		},
+	}
+	up := &counting{}
+	pol := open(t, up, "g", p)
+	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2")}
+	h, err := pol.Handlers(control.Session{Name: "s", Policy: "/g.json", Service: svc}, nil, slog.New(slog.NewJSONHandler(&journal{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"storage.gapi.test.", "eu.rep.gapi.test.", "iam.mtls.gapi.test."} {
+		if m := ask(t, h, name); len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{192, 0, 2, 2} {
+			t.Errorf("%s answered %+v, want the service address", name, m.Answers)
+		}
+	}
+	ask(t, h, "gapi.test.")
+	up.mu.Lock()
+	asked := slices.Clone(up.asked)
+	up.mu.Unlock()
+	if !slices.Equal(asked, []string{"gapi.test."}) {
+		t.Errorf("upstream was asked %v, want the suffix alone", asked)
+	}
+	ca, err := intercept.ParseCA(h.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ca.Hosts(), []string{"gapi.test", "mtls.gapi.test"}) {
+		t.Errorf("the session's CA is constrained to %v", ca.Hosts())
+	}
+
+	p.Allow = []string{"*"}
+	if err := check(t, "g", p); err != nil {
+		t.Errorf("under *: %v", err)
+	}
+	p.Allow = []string{"*.test"}
+	if err := check(t, "g", p); err != nil {
+		t.Errorf("under a wildcard further up: %v", err)
 	}
 }
 
