@@ -704,7 +704,7 @@ inject.
 | gh | `api.github.com` | which credential, which endpoints beyond `/repos/...`; *GraphQL decided, below* |
 | hf | `huggingface.co` | *decided, in chase's `apps/huggingface.nix` and `docs/huggingface.md`*: rules generated from the Hub's own OpenAPI description, reads admitted and writes and token-minting reads asked; a tier for other people's code refuses what would ask; `huggingface.co` and `*.hf.co` allowed; the token in sops |
 | Cloudflare | `api.cloudflare.com` | account and zone scoping, the credential's source |
-| GCP client libraries, gcloud | `oauth2.googleapis.com` and every Google API | *decided, below and in chase's `docs/gcloud.md`*: a fake service-account key in the session, its token grant answered with a placeholder, the real token on `*.googleapis.com`, rules generated from Google's Discovery documents and protos, a project's service account reached by workload identity federation, renewed by chase |
+| GCP client libraries, gcloud | `oauth2.googleapis.com` and every Google API | *decided, below and in chase's `docs/gcloud.md`*: a fake service-account key in the session, its token grant answered with a placeholder, the real token on `*.googleapis.com`, rules generated from Google's Discovery documents and protos, a project's service account, its key in the project's sops (keyless federation later), renewed by chase |
 | Postgres, Redis, MongoDB | — | nothing of frisket's in trusted; unreachable in strict |
 | npm, PyPI, crates, Go proxy | — | no credential; which names each allowlist needs |
 
@@ -1115,7 +1115,7 @@ inside, which the credential binds going away does not change.
    per project.
 6. **Where the credentials come from** for the routes that have no source yet:
    there is no Cloudflare login on this machine. (The Hugging Face token is in
-   sops now, as `hf_token`; Google's comes from a project, by federation, as
-   chase's `docs/gcloud.md` sets out.)
+   sops now, as `hf_token`; Google's comes from a project's service-account
+   key, as chase's `docs/gcloud.md` sets out.)
 7. **QUIC's policy.** Whether a relay's per-address allowlist is enough, or the
    Initial's SNI must be read (see "Build order").
