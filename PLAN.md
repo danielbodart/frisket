@@ -339,6 +339,43 @@ other key, or by any algorithm but RS256, goes upstream as the client's own,
 and one the key signed with the wrong host or an expiry past its time is
 refused here.
 
+A route whose upstream is a Docker Engine (`docker`) is the one other carve-out.
+On it frisket changes a request, and only as follows:
+
+- It forwards the query and a JSON body as it re-encoded them from what it
+  checked, never the client's bytes.
+- It replaces a container's or network's name or ID prefix in the path with
+  the full ID it verified.
+- It adds `frisket.project=<project>` to the labels of what it lets be
+  created, and merges it into the label filter of what it lets be listed.
+- It binds a published address that is empty, absent, `0.0.0.0` or
+  `127.0.0.1` to the project's own loopback address, and refuses any other.
+- For a request with a body, it sets `Content-Type: application/json` and
+  removes `Content-Encoding`, so the daemon reads the body frisket wrote.
+
+In the response, it caps `Api-Version` at the route's highest version. Each
+change can only narrow what the daemon is asked, and each is logged in
+`docker`. The route carries no credential at all: it has no placeholder,
+header or credential file, because its hop is plain HTTP.
+
+A session reaches its project's containers by that address, not by a
+listener of its own. Its ruleset steers `127.0.0.1:P`, `[::1]:P` and the
+project's address `:P`, for each port P the project names, to frisket's
+existing steering listener on 15001, as it steers DNS. frisket relays each
+connection only to the project's address on a port the project names, and
+only while one of the project's own running containers publishes it there;
+anything else is reset. The session never chooses the address it is relayed
+to, and another project's address is not steered at all. Its names are
+`<label>.internal` and `<label>.<owner>.internal`, from the repo and owner of
+the project: frisket's DNS answers exactly the session's own names, with the
+address, before the allowlist, and leaves the rest of `.internal` alone, so
+`metadata.google.internal` and `docker.frisket.internal` resolve as they do
+now. A name equal to or under a reserved suffix (`frisket.internal`,
+`google.internal`) is never generated, and a document whose names equal or
+fall under one of its own route hosts is refused when it loads. The names say
+`internal` and not `docker` because the address will later also carry the
+session's own dev servers.
+
 ---
 
 ## Considered and rejected
