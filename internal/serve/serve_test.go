@@ -166,6 +166,9 @@ type recorder struct {
 	// ports, if set, is the session's Docker ports in place of its "ports"
 	// param: a document changed while the daemon was down.
 	ports func(s control.Session) string
+	// relay, if set, is the relay a session with a Docker project is given,
+	// built from what its policy says of the project now.
+	relay func(dk *Docker, log *slog.Logger) RelayHandler
 }
 
 // docker is a session's Docker project, as a policy with a Docker route
@@ -210,7 +213,7 @@ func (r *recorder) given() [][]byte {
 }
 
 func (r *recorder) policy() Policy {
-	return PolicyFunc(func(s control.Session, authority []byte, _ *slog.Logger) (Handlers, error) {
+	return PolicyFunc(func(s control.Session, authority []byte, log *slog.Logger) (Handlers, error) {
 		r.mu.Lock()
 		r.authorities = append(r.authorities, authority)
 		r.mu.Unlock()
@@ -221,8 +224,13 @@ func (r *recorder) policy() Policy {
 		if err != nil {
 			return Handlers{}, err
 		}
+		var rl RelayHandler
+		if dk != nil && r.relay != nil {
+			rl = r.relay(dk, log)
+		}
 		return Handlers{
 			Docker:    dk,
+			Relay:     rl,
 			Authority: authority,
 			CACert:    []byte("cert-of-" + string(authority)),
 			Egress: steer.HandlerFunc(func(ctx context.Context, c *steer.Conn) {

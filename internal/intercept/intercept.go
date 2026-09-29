@@ -435,6 +435,18 @@ func (i *Interceptor) Hosts() []string {
 	return out
 }
 
+// DockerTransport is the Docker route's own transport to the daemon's
+// socket, or nil without one: what the relay asks the daemon through, so
+// that it reaches the socket the route does and by no other dialer.
+func (i *Interceptor) DockerTransport() http.RoundTripper {
+	for _, r := range i.all() {
+		if r.docker != nil {
+			return r.docker.tr
+		}
+	}
+	return nil
+}
+
 // lookup is the route serving name: its own, or the nearest wildcard above
 // it.
 func (i *Interceptor) lookup(name string) *route {

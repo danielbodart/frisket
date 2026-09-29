@@ -31,6 +31,7 @@ import (
 	"github.com/danielbodart/frisket/internal/docker"
 	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/relay"
 	"github.com/danielbodart/frisket/internal/serve"
 	"golang.org/x/sys/unix"
 )
@@ -658,9 +659,14 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 
 	// What the daemon keeps apart and steer steers: the same for every
 	// session under this document.
+	dr := p.dockerRoute()
 	var dock *serve.Docker
-	if d := p.dockerRoute(); d != nil {
-		dock = &serve.Docker{Project: d.Project, Address: docker.Address(d.Project), Relay: p.RelayDestinations()}
+	var ports []uint16
+	if dr != nil {
+		dock = &serve.Docker{Project: dr.Project, Address: docker.Address(dr.Project), Relay: p.RelayDestinations()}
+		for _, port := range dr.Ports {
+			ports = append(ports, uint16(port)) // held between 1024 and 65535 by dockerRoute
+		}
 	}
 
 	return serve.PolicyFunc(func(s control.Session, authority []byte, log *slog.Logger) (serve.Handlers, error) {
@@ -691,7 +697,7 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 		if err != nil {
 			return serve.Handlers{}, err
 		}
-		return serve.Handlers{
+		h := serve.Handlers{
 			Egress: &egress.Handler{
 				Policy:     &egress.Policy{Classifier: d.Classifier, Resolved: resolved},
 				Dialer:     d.Dialer,
@@ -703,7 +709,21 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 			Authority: authority,
 			CACert:    ca.CertPEM(),
 			Docker:    dock,
-		}, nil
+		}
+		// Built from the document as it reads now, so a session restored
+		// under one that has dropped a port is refused it here, though its
+		// ruleset still steers it.
+		if dr != nil {
+			h.Relay = &relay.Handler{
+				Transport:  ic.DockerTransport(),
+				APIVersion: dr.APIVersions.Max,
+				Project:    dr.Project,
+				Address:    dock.Address,
+				Ports:      ports,
+				Log:        log,
+			}
+		}
+		return h, nil
 	}), closers, nil
 }
 

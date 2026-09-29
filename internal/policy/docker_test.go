@@ -1,16 +1,27 @@
 package policy
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/danielbodart/frisket/internal/control"
+	"github.com/danielbodart/frisket/internal/egress"
+	"github.com/danielbodart/frisket/internal/relay"
+	"github.com/danielbodart/frisket/internal/serve"
+	"github.com/danielbodart/frisket/internal/steer"
 )
 
 // dockerPolicy is a session's document with data-lab's Docker route, as
@@ -215,5 +226,128 @@ func TestASessionsHandlersCarryItsDockerProject(t *testing.T) {
 	}
 	if h.Docker != nil {
 		t.Errorf("a session with no Docker route has %+v", *h.Docker)
+	}
+}
+
+// steerOne sends one connection through a real steer.Session to the
+// session's Dispatch, as if the ruleset had steered it to orig, and returns
+// the lines logged under msg once there is one.
+func steerOne(t *testing.T, h serve.Handlers, svc []netip.Addr, orig netip.AddrPort, j *journal, msg string) map[string]any {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no loopback: %v", err)
+	}
+	s := steer.New("s", j)
+	s.Dst = func(*net.TCPConn) netip.AddrPort { return orig }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = s.Serve(ctx, ln, serve.Dispatch{Service: svc, Handlers: h})
+	}()
+	defer func() { cancel(); <-done }()
+	c, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	_, _ = io.ReadAll(c)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if lines := linesOf(t, j, msg); len(lines) == 1 {
+			return lines[0]
+		} else if len(lines) > 1 || time.Now().After(deadline) {
+			t.Fatalf("%d %s lines for one connection", len(lines), msg)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func linesOf(t *testing.T, j *journal, msg string) []map[string]any {
+	t.Helper()
+	j.mu.Lock()
+	raw := j.buf.String()
+	j.mu.Unlock()
+	var out []map[string]any
+	for _, l := range strings.Split(raw, "\n") {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("log line is not JSON: %q", l)
+		}
+		if m["msg"] == msg {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// A session with a Docker route is given a relay for its project's address
+// and ports, which asks the route's own socket before it dials: here the
+// daemon reports no container, and the connection is refused with no dial.
+// A session without one has no relay, and loopback that reached it anyway
+// goes to egress, which refuses it.
+func TestADockerSessionRelaysThroughItsRoutesSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("", "frisket-policy-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "docker.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("no unix socket here: %v", err)
+	}
+	var asked atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1.56/containers/json" {
+			asked.Add(1)
+		}
+		_, _ = io.WriteString(w, "[]")
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2")}
+	var j journal
+	log := slog.New(slog.NewJSONHandler(&j, nil))
+	p := dockerPolicy(t)
+	p.Routes[0].Upstream = "unix://" + sock
+	h, err := open(t, &counting{}, "p", p).Handlers(control.Session{Name: "s", Policy: "/p.json", Service: svc}, nil, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rl, ok := h.Relay.(*relay.Handler)
+	if !ok {
+		t.Fatalf("a Docker session's relay is %T", h.Relay)
+	}
+	if rl.Project != "triptease/data-lab" || rl.Address != netip.MustParseAddr("127.1.191.78") ||
+		!slices.Equal(rl.Ports, []uint16{64320, 64321, 64322}) || rl.APIVersion != "1.56" || rl.Idle != 0 {
+		t.Errorf("relay = %+v", *rl)
+	}
+	line := steerOne(t, h, svc, netip.MustParseAddrPort("127.0.0.1:64320"), &j, "relay")
+	if line["decision"] != relay.DecisionRefused || line["reason"] != relay.ReasonNotPublished {
+		t.Errorf("relay line %v", line)
+	}
+	if asked.Load() != 1 {
+		t.Errorf("the route's socket was asked %d times, want once", asked.Load())
+	}
+
+	var j2 journal
+	h, err = open(t, &counting{}, "p", valid(t)).Handlers(control.Session{Name: "s", Policy: "/p.json", Service: svc}, nil, slog.New(slog.NewJSONHandler(&j2, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Relay != nil {
+		t.Fatalf("a session with no Docker route has relay %v", h.Relay)
+	}
+	line = steerOne(t, h, svc, netip.MustParseAddrPort("127.0.0.1:64320"), &j2, "egress")
+	if line["decision"] != egress.DecisionRefused || !strings.Contains(line["reason"].(string), "loopback") {
+		t.Errorf("loopback with no relay: %v", line)
 	}
 }

@@ -25,6 +25,10 @@ type Handlers struct {
 	Intercept steer.Handler
 	// DNS gets every steered datagram, and every TCP connection to port 53.
 	DNS DNSHandler
+	// Relay gets every other steered connection to a loopback address or
+	// the session's Docker address: its Docker project's ports, relayed to
+	// the project's address on the host. Nil without a Docker route.
+	Relay RelayHandler
 	// Authority is the session's CA as the policy serialises it: kept in the
 	// session's record, and given back to Handlers when the session is
 	// restored, so a restored session keeps the CA its sandbox trusts. It is
@@ -48,6 +52,14 @@ type Docker struct {
 	// Relay are 127.0.0.1:P, Address:P and [::1]:P for each of the project's
 	// ports P, in that order.
 	Relay []netip.AddrPort
+}
+
+// RelayHandler relays a session's Docker ports, and says which
+// destinations are its.
+type RelayHandler interface {
+	steer.Handler
+	// Steers is whether a connection to orig is the relay's to judge.
+	Steers(orig netip.AddrPort) bool
 }
 
 // DNSHandler answers DNS over both transports.
@@ -101,14 +113,20 @@ func (f PolicyFunc) Handlers(s control.Session, authority []byte, log *slog.Logg
 // protocol sniffing, rejected in PLAN.md as dishonest, and a workload chooses
 // its first bytes.
 //
-//   - port 53, any address            -> DNS
-//   - the session's service address   -> Intercept
-//   - anything else                   -> Egress
-//   - every datagram                  -> DNS
+//   - port 53, any address                          -> DNS
+//   - 127.0.0.1, ::1 or the Docker address, any port -> Relay, if there is one
+//   - the session's service address                 -> Intercept
+//   - anything else                                 -> Egress
+//   - every datagram                                -> DNS
 //
 // DNS first, as it is first in the ruleset: TCP DNS to the service address is
 // still DNS, and so is TCP DNS to 127.0.0.1, which reaches the TCP listener
-// with its own destination rather than a port nobody holds.
+// with its own destination rather than a port nobody holds. The relay's sets
+// are the only other loopback destinations a ruleset steers, so what reaches
+// the relay's addresses is the relay's, and it judges the port: one the
+// document dropped since a restore is still steered, and refused there.
+// Without a Docker route the sets are empty, and loopback that arrived
+// anyway would go to Egress, whose classifier refuses it.
 type Dispatch struct {
 	Service []netip.Addr
 	Handlers
@@ -119,6 +137,8 @@ func (d Dispatch) ServeConn(ctx context.Context, c *steer.Conn) {
 	switch {
 	case c.Orig.Port() == DNSPort:
 		d.DNS.ServeConn(ctx, c)
+	case d.Relay != nil && d.Relay.Steers(c.Orig):
+		d.Relay.ServeConn(ctx, c)
 	case d.IsService(c.Orig.Addr()):
 		d.Intercept.ServeConn(ctx, c)
 	default:
