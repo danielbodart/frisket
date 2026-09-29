@@ -218,6 +218,16 @@ type Verdict struct {
 	// jsonBody is a Docker request whose body frisket re-encoded, which goes
 	// upstream as application/json whatever the client's headers said.
 	jsonBody bool
+	// status is a refusal's status where it is not 403: 502 for a daemon
+	// that could not say whose an object is.
+	status int
+	// answer is what a refusal is answered with in place of the route's own
+	// shape: the daemon's 404 for an object a path names that does not
+	// exist.
+	answer *answer
+	// release lets go of the names an admitted Docker request holds, once
+	// the daemon has answered it.
+	release func()
 
 	// deferred is what decides from the request's body, before it is read:
 	// a GraphQL endpoint, say. Such a verdict refuses until deferred.decide

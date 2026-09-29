@@ -96,10 +96,6 @@ const (
 	ReasonUpgrade     = "upgrade not allowed"
 	ReasonImage       = "image not listed"
 	ReasonParam       = "not a name"
-	// ReasonUnasked is a request that needs the daemon asked who owns what it
-	// names, which nothing here yet asks: refused, never let through
-	// unchecked.
-	ReasonUnasked = "ownership not checked"
 	// reasonUndecided is an admitting rule whose checks never ran.
 	reasonUndecided = "docker request unchecked"
 )
@@ -322,40 +318,33 @@ type dockerRoute struct {
 	// it.
 	socket string
 	target *url.URL
-	// objects is who is asked about what a request names before it goes.
-	objects objects
+	// tr is the route's own transport to the socket, which serves both the
+	// requests it forwards and its own questions about whose an object is;
+	// lookups is its client for those questions, which follows no redirect.
+	tr      *http.Transport
+	lookups *http.Client
 }
 
 func newDockerRoute(d DockerRoute, socket string) *dockerRoute {
 	lo, _ := apiMinor(d.APIVersions.Min)
 	hi, _ := apiMinor(d.APIVersions.Max)
-	return &dockerRoute{
+	rt := &dockerRoute{
 		DockerRoute: d,
 		min:         lo,
 		max:         hi,
 		socket:      socket,
 		target:      &url.URL{Scheme: "http", Host: "docker"},
-		objects:     unasked{},
 	}
+	rt.tr = rt.transport()
+	rt.lookups = &http.Client{
+		Transport: rt.tr,
+		// A redirect is an answer frisket does not take: it is returned as
+		// it is, and refused as neither a 200 nor a 404.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Timeout:       lookupTimeout,
+	}
+	return rt
 }
-
-// objects answers for the objects a request names: the one its path does,
-// and the volumes and networks its body does. Each says what to forward in
-// the path's place, what the log says of it, and why it is refused if it is.
-type objects interface {
-	path(r *http.Request, kind, seg string) (forward, account, reason string)
-	body(r *http.Request, lookups []docker.Lookup) (account, reason string)
-}
-
-// unasked refuses every request that names an object: nothing yet asks the
-// daemon whose it is, and a request is never let through on the assumption.
-type unasked struct{}
-
-func (unasked) path(*http.Request, string, string) (string, string, string) {
-	return "", "", ReasonUnasked
-}
-
-func (unasked) body(*http.Request, []docker.Lookup) (string, string) { return "", ReasonUnasked }
 
 // transport is the route's own connection to the daemon: its socket,
 // whatever address a request names, and HTTP/1.1, the only protocol the
@@ -440,6 +429,11 @@ func (d *dockerRoute) version(escaped string) (stripped, api string, offset int,
 // a client negotiates down to it from _ping, so a daemon newer than the
 // route's rules is spoken to as though it were no newer.
 func (d *dockerRoute) modify(res *http.Response) error {
+	// The daemon has answered, so what the request did with the names it
+	// held is done.
+	if rec, _ := res.Request.Context().Value(recordKey{}).(*record); rec != nil && rec.release != nil {
+		rec.release()
+	}
 	if v := res.Header.Get("Api-Version"); v != "" {
 		if minor, err := apiMinor(v); err != nil || minor > d.max {
 			res.Header.Set("Api-Version", d.APIVersions.Max)
@@ -530,29 +524,62 @@ func (d *dockerRule) decide(r *http.Request) Verdict {
 		bodied = true
 	}
 
+	// The names it acts on are held from before they are asked about until
+	// the daemon has answered what the request did with them, so that what
+	// was checked is what is used.
+	c := rt.claim(r.Context())
+	var keys []nameKey
+	if d.Owned == "volume" {
+		keys = append(keys, nameKey{socket: rt.socket, kind: "volume", name: raw[at]})
+	}
+	for _, l := range lookups {
+		keys = append(keys, nameKey{socket: rt.socket, kind: l.Kind, name: l.Name})
+	}
+	if err := c.lock(keys); err != nil {
+		c.release()
+		return d.refuse(ReasonStoppedWaiting, strings.Join(account, "; "))
+	}
 	if at >= 0 && d.Owned != "image" {
-		forward, acct, reason := rt.objects.path(r, d.Owned, raw[at])
-		if acct != "" {
-			account = append(account, acct)
+		forward, acct, err := c.path(d.Owned, raw[at])
+		if err != nil {
+			c.release()
+			return d.objectRefused(err, account)
 		}
-		if reason != "" {
-			return d.refuse(reason, strings.Join(account, "; "))
-		}
+		account = append(account, acct)
 		raw[at] = forward
 		p := "/" + strings.Join(raw, "/")
 		r.URL.Path, r.URL.RawPath = p, p
 	}
 	if len(lookups) > 0 {
-		acct, reason := rt.objects.body(r, lookups)
-		if acct != "" {
-			account = append(account, acct)
-		}
-		if reason != "" {
-			return d.refuse(reason, strings.Join(account, "; "))
+		acct, err := c.body(lookups)
+		account = append(account, acct...)
+		if err != nil {
+			c.release()
+			return d.objectRefused(err, account)
 		}
 	}
 	r.URL.RawQuery, r.URL.ForceQuery = query, false
-	return Verdict{Outcome: Admit, Reason: "path", Operation: d.operation, Docker: strings.Join(account, "; "), jsonBody: bodied}
+	v := Verdict{Outcome: Admit, Reason: "path", Operation: d.operation, Docker: strings.Join(account, "; "), jsonBody: bodied}
+	if len(c.held) > 0 {
+		v.release = c.release
+	}
+	return v
+}
+
+// objectRefused is a refusal of what a request names: 403 for an object
+// that is not this project's, the daemon's own 404 for one a path names that
+// does not exist, and 502 where the daemon could not say.
+func (d *dockerRule) objectRefused(err error, account []string) Verdict {
+	var o *objectRefusal
+	if !errors.As(err, &o) {
+		return d.refuse(ReasonLookup, strings.Join(account, "; "))
+	}
+	if o.account != "" {
+		account = append(account, o.account)
+	}
+	v := d.refuse(o.reason, strings.Join(account, "; "))
+	v.status, v.answer = o.status, o.answer
+	return v
 }
 
 // upgrade is why a request's protocol switch is refused: only the rule's

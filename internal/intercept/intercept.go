@@ -262,7 +262,7 @@ func New(cfg Config) (*Interceptor, error) {
 			// Its own transport, to its own socket: cfg.DialContext, the
 			// egress dialer, is never asked to reach it.
 			rt.docker = newDockerRoute(*r.Docker, up.Path)
-			rt.tr = rt.docker.transport()
+			rt.tr = rt.docker.tr
 			for i := range sc.paths {
 				if d := sc.paths[i].docker; d != nil {
 					d.route = rt.docker
@@ -665,6 +665,12 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if v.deferred != nil {
 		v = v.deferred.decide(r)
 	}
+	if v.release != nil {
+		// Let go when the daemon's headers arrive, or when the request ends
+		// however it ends, whichever is first.
+		rec.release = sync.OnceFunc(v.release)
+		defer rec.release()
+	}
 	rec.graphql = v.GraphQL
 	if v.Docker != "" {
 		rec.docker = v.Docker
@@ -683,7 +689,15 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch v.Outcome {
 	case Refuse:
 		rec.refuse(v.Reason)
-		rt.refuse(lw, http.StatusForbidden, v.Reason, v.Operation)
+		if v.answer != nil {
+			v.answer.write(lw)
+			return
+		}
+		status := http.StatusForbidden
+		if v.status != 0 {
+			status = v.status
+		}
+		rt.refuse(lw, status, v.Reason, v.Operation)
 		return
 	case Ask:
 		if reason := i.ask(r, ic, v); reason != "" {
@@ -1002,6 +1016,8 @@ type record struct {
 	api        string
 	docker     string
 	dockerJSON bool
+	// release lets go of the names a Docker request holds.
+	release func()
 	// sentMethod is the request line's method, where an override replaced it.
 	sentMethod string
 	// header is the response's, trailers and all once it has finished.

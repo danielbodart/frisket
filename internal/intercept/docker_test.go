@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/danielbodart/frisket/internal/credential"
@@ -29,60 +28,6 @@ const (
 	execID        = "38f66d86a5c74f0d7e5401fe2675d4b1a7556ea7aa1c4f6cb8cf40b7aafc1ab2"
 	containerID   = "fdd16f31d6ce54c159845ce34fa35e5a4a7f37cd3852bdb712190bd34cf3bf7e"
 )
-
-// daemon is a fake Engine on a unix socket: it records what reaches it and
-// answers as the daemon would, _ping with a version newer than the route's.
-type daemon struct {
-	socket string
-	mu     sync.Mutex
-	seen   []seenRequest
-}
-
-type seenRequest struct {
-	method, path, query, host string
-	header                    http.Header
-	body                      string
-}
-
-func newDaemon(t *testing.T) *daemon {
-	t.Helper()
-	// A unix socket's path is at most 107 bytes, which a test's TempDir can
-	// pass.
-	dir, err := os.MkdirTemp("", "frisket-docker-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	d := &daemon{socket: filepath.Join(dir, "docker.sock")}
-	ln, err := net.Listen("unix", d.socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		d.mu.Lock()
-		d.seen = append(d.seen, seenRequest{method: r.Method, path: r.URL.EscapedPath(), query: r.URL.RawQuery,
-			host: r.Host, header: r.Header.Clone(), body: string(body)})
-		d.mu.Unlock()
-		if strings.HasSuffix(r.URL.Path, "/_ping") {
-			w.Header().Set("Api-Version", "1.57")
-			_, _ = io.WriteString(w, "OK")
-			return
-		}
-		w.Header().Set("Api-Version", "1.40")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, "{}")
-	})}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
-	return d
-}
-
-func (d *daemon) requests() []seenRequest {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return append([]seenRequest(nil), d.seen...)
-}
 
 // engineRules are chase's rules for Engine API 1.56, as it generates them
 // from moby's spec: every operation, the admitted ones with their docker
@@ -183,40 +128,6 @@ func newUnixUpstream(t testing.TB, socket string) Route {
 	}
 }
 
-// owning stands in for the daemon's answer about who owns what a request
-// names: everything is this project's, and what it was asked is kept.
-type owning struct {
-	mu      sync.Mutex
-	asked   []string
-	forward func(seg string) string
-}
-
-func (o *owning) path(_ *http.Request, kind, seg string) (string, string, string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.asked = append(o.asked, kind+" "+seg)
-	f := seg
-	if o.forward != nil {
-		f = o.forward(seg)
-	}
-	return f, kind + " owned", ""
-}
-
-func (o *owning) body(_ *http.Request, lookups []docker.Lookup) (string, string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	for _, l := range lookups {
-		o.asked = append(o.asked, l.Kind+" "+l.Name)
-	}
-	return "names owned", ""
-}
-
-func (o *owning) seen() []string {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return append([]string(nil), o.asked...)
-}
-
 // dockerFixture is frisket serving data-lab's Docker route, with an egress
 // dialer that fails the test if anything asks it for a connection: the
 // socket is dialled by the route's own transport, and by nothing else.
@@ -238,8 +149,6 @@ func dockerFixture(t *testing.T, routes ...Route) (*fixture, *daemon, *journal) 
 	})
 	return f, d, j
 }
-
-func (f *fixture) owners(o objects) { f.ic.routes[dockerHost].docker.objects = o }
 
 func dockerRequest(t *testing.T, method, target string, body io.Reader) *http.Request {
 	t.Helper()
@@ -419,7 +328,7 @@ func mustMarshal(t *testing.T, v any) []byte {
 // no Content-Type at all, passes.
 func TestAnOperationThatTakesNoBodyIsSentNone(t *testing.T) {
 	f, d, _ := dockerFixture(t)
-	f.owners(&owning{})
+	d.container(containerID, "data-lab-db-1", dockerProject)
 
 	form := dockerRequest(t, "POST", "/v1.55/images/create?fromImage=postgres&tag=18", strings.NewReader("fromSrc=-"))
 	form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -452,7 +361,8 @@ func TestAnOperationThatTakesNoBodyIsSentNone(t *testing.T) {
 // names none, and never h2c or a websocket, even where tcp is allowed.
 func TestAnUpgradeIsOnlyTheRulesOwn(t *testing.T) {
 	f, d, _ := dockerFixture(t)
-	f.owners(&owning{})
+	d.container(containerID, "data-lab-db-1", dockerProject)
+	d.exec(execID, containerID)
 
 	inspect := dockerRequest(t, "GET", "/v1.55/containers/"+containerID+"/json", nil)
 	inspect.Header.Set("Connection", "Upgrade")
@@ -613,13 +523,12 @@ func TestTheDaemonsVersionIsCappedAtTheRoutes(t *testing.T) {
 // without the client's Content-Encoding.
 func TestAReencodedBodyIsSentAsJSON(t *testing.T) {
 	f, d, j := dockerFixture(t)
-	f.owners(&owning{})
 	req := dockerRequest(t, "POST", "/v1.55/volumes/create", strings.NewReader(`{"Name": "", "Labels": {"a": "b"}}`))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Content-Encoding", "identity")
 	req.Header.Set("Connection", "Content-Type")
 	res, body := f.do(t, req)
-	if res.StatusCode != http.StatusOK {
+	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("status %d: %s", res.StatusCode, body)
 	}
 	seen := d.requests()
@@ -644,7 +553,6 @@ func TestAReencodedBodyIsSentAsJSON(t *testing.T) {
 // A body is judged only as JSON, framed as JSON, and within maxBody.
 func TestABodyIsJSONFramedAsJSON(t *testing.T) {
 	f, d, _ := dockerFixture(t)
-	f.owners(&owning{})
 	for name, c := range map[string]struct {
 		body, contentType, encoding, reason string
 	}{
@@ -677,7 +585,6 @@ func TestABodyIsJSONFramedAsJSON(t *testing.T) {
 // body, the table's own path; what the request held goes to the log alone.
 func TestARefusalHoldsNothingTheRequestSent(t *testing.T) {
 	f, _, j := dockerFixture(t)
-	f.owners(&owning{})
 	const mark = "zqxmarkzqx"
 	for _, req := range []*http.Request{
 		dockerRequest(t, "GET", "/v1.55/containers/json?"+mark+"=1", nil),
@@ -724,26 +631,28 @@ func TestARefusalHoldsNothingTheRequestSent(t *testing.T) {
 
 // The object a path names is taken as the client sent it, not as the scope
 // read it: a name differing only in case, or by a trailing dot, is its own
-// name, asked about and forwarded as itself; and what the daemon says to act
-// on is what goes upstream in its place.
+// name, asked about as itself; and what goes upstream in its place is the
+// full ID the daemon gave for it.
 func TestAnObjectIsNamedByItsOwnSegment(t *testing.T) {
 	f, d, _ := dockerFixture(t)
-	o := &owning{}
-	f.owners(o)
-	for _, name := range []string{"MyDB.", "mydb", "JSON", "Create.", "Prune"} {
+	names := []string{"MyDB.", "mydb", "JSON", "Create.", "Prune"}
+	for i, name := range names {
+		d.container(strings.Repeat(fmt.Sprintf("%x", i+1), 64), name, dockerProject)
+	}
+	d.container(containerID, "data-lab-db-1", dockerProject)
+	for i, name := range names {
 		res, body := f.do(t, dockerRequest(t, "GET", "/v1.55/containers/"+name+"/json", nil))
 		if res.StatusCode != http.StatusOK {
 			t.Fatalf("%s: status %d: %s", name, res.StatusCode, body)
 		}
 		seen := d.requests()
-		if got := seen[len(seen)-1].path; got != "/v1.55/containers/"+name+"/json" {
-			t.Errorf("%s went as %s", name, got)
+		if got, want := seen[len(seen)-1].path, "/v1.55/containers/"+strings.Repeat(fmt.Sprintf("%x", i+1), 64)+"/json"; got != want {
+			t.Errorf("%s went as %s, want %s", name, got, want)
 		}
-		if asked := o.seen(); asked[len(asked)-1] != "container "+name {
-			t.Errorf("%s was asked about as %q", name, asked[len(asked)-1])
+		if asked := d.lookups(); asked[len(asked)-1].path != "/v1.56/containers/"+name+"/json" {
+			t.Errorf("%s was asked about as %q", name, asked[len(asked)-1].path)
 		}
 	}
-	o.forward = func(string) string { return containerID }
 	res, body := f.do(t, dockerRequest(t, "POST", "/v1.56/containers/data-lab-db-1/stop?t=10", nil))
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status %d: %s", res.StatusCode, body)
@@ -758,21 +667,6 @@ func TestAnObjectIsNamedByItsOwnSegment(t *testing.T) {
 	}
 	res, body = f.do(t, dockerRequest(t, "GET", "/v1.55/exec/"+strings.ToUpper(execID)+"/json", nil))
 	refusedFor(t, res, body, ReasonParam)
-}
-
-// Until the daemon is asked who owns it, nothing a request names by its
-// path or its body is acted on.
-func TestAnObjectNobodyAskedAboutIsRefused(t *testing.T) {
-	f, d, _ := dockerFixture(t)
-	res, body := f.do(t, dockerRequest(t, "GET", "/v1.55/containers/"+containerID+"/json", nil))
-	refusedFor(t, res, body, ReasonUnasked)
-	req := dockerRequest(t, "POST", "/v1.55/volumes/create", strings.NewReader(`{"Name":"core-data-local-db2"}`))
-	req.Header.Set("Content-Type", "application/json")
-	res, body = f.do(t, req)
-	refusedFor(t, res, body, ReasonUnasked)
-	if n := len(d.requests()); n != 0 {
-		t.Fatalf("%d refused requests reached the daemon", n)
-	}
 }
 
 // A daemon that cannot be reached is a 502, and neither it nor the log line
