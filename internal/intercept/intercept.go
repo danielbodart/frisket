@@ -174,6 +174,10 @@ type Interceptor struct {
 	asker  Asker
 
 	tlsConfig *tls.Config
+	// http1TLS is the handshake for a Docker route: HTTP/1.1 alone, which is
+	// all the daemon's socket speaks, and the only protocol an Upgrade: tcp
+	// exists in.
+	http1TLS  *tls.Config
 	srv       *http.Server
 	ln        *connListener
 	served    chan struct{}
@@ -191,6 +195,8 @@ type route struct {
 	refusal  *refusalShape
 	proxy    *httputil.ReverseProxy
 	tr       *http.Transport
+	// docker is a Docker Engine's route, served over its socket.
+	docker *dockerRoute
 	// staleSince is when requests began finding the credential expired, in
 	// Unix nanoseconds, or 0 while it is fresh.
 	staleSince atomic.Int64
@@ -224,6 +230,7 @@ func New(cfg Config) (*Interceptor, error) {
 	}
 	errLog := slog.NewLogLogger(cfg.Log.Handler(), slog.LevelWarn)
 
+	dockerRoutes := 0
 	for _, r := range cfg.Routes {
 		up, err := r.validate()
 		if err != nil {
@@ -247,7 +254,24 @@ func New(cfg Config) (*Interceptor, error) {
 			return nil, fmt.Errorf("intercept: route %s: %w", r.Name, err)
 		}
 		rt := &route{Route: r, host: host, wild: wild, upstream: up, scope: sc, refusal: rf}
-		rt.tr = upstreamTransport(rt, dial)
+		modify := inspect
+		if r.Docker != nil {
+			if dockerRoutes++; dockerRoutes > 1 {
+				return nil, errors.New("intercept: two Docker routes, and a policy has at most one")
+			}
+			// Its own transport, to its own socket: cfg.DialContext, the
+			// egress dialer, is never asked to reach it.
+			rt.docker = newDockerRoute(*r.Docker, up.Path)
+			rt.tr = rt.docker.transport()
+			for i := range sc.paths {
+				if d := sc.paths[i].docker; d != nil {
+					d.route = rt.docker
+				}
+			}
+			modify = rt.docker.modify
+		} else {
+			rt.tr = upstreamTransport(rt, dial)
+		}
 		var tr http.RoundTripper = rt.tr
 		if wild {
 			tr = &boundedNames{Transport: rt.tr, names: map[string]struct{}{}}
@@ -255,7 +279,7 @@ func New(cfg Config) (*Interceptor, error) {
 		rt.proxy = &httputil.ReverseProxy{
 			Rewrite:        rt.rewrite,
 			Transport:      tr,
-			ModifyResponse: inspect,
+			ModifyResponse: modify,
 			ErrorLog:       errLog,
 			ErrorHandler:   upstreamFailed,
 		}
@@ -279,6 +303,14 @@ func New(cfg Config) (*Interceptor, error) {
 		// and multiplex on it, HTTP/1.1 because an Upgrade (a websocket) only
 		// exists there.
 		NextProtos: []string{"h2", "http/1.1"},
+	}
+	i.http1TLS = i.tlsConfig.Clone()
+	i.http1TLS.NextProtos = []string{"http/1.1"}
+	i.tlsConfig.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+		if rt := i.lookup(normaliseHost(hello.ServerName)); rt != nil && rt.docker != nil {
+			return i.http1TLS, nil
+		}
+		return nil, nil
 	}
 
 	var protocols http.Protocols
@@ -585,6 +617,13 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.refuse(lw, http.StatusMisdirectedRequest, ReasonMisdirected, nil)
 		return
 	}
+	if rt.docker != nil && r.ProtoMajor != 1 {
+		// The handshake offered nothing else; this is for whatever got here
+		// regardless.
+		rec.refuse(ReasonHTTP11Only)
+		rt.refuse(lw, http.StatusHTTPVersionNotSupported, ReasonHTTP11Only, nil)
+		return
+	}
 	sent, reason := override(r)
 	if reason != "" {
 		rec.refuse(reason)
@@ -609,11 +648,28 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.refuse(lw, http.StatusForbidden, why, nil)
 		return
 	}
-	v := rt.scope.decide(r.Method, r.URL)
+	decided := r.URL
+	if d := rt.docker; d != nil {
+		// Decided without its version, and sent with it.
+		stripped, api, _, reason, account := d.version(r.URL.EscapedPath())
+		rec.api, rec.docker = "-", account
+		if reason != "" {
+			rec.refuse(reason)
+			rt.refuse(lw, http.StatusForbidden, reason, nil)
+			return
+		}
+		rec.api = api
+		decided = &url.URL{Path: stripped, RawQuery: r.URL.RawQuery}
+	}
+	v := rt.scope.decide(r.Method, decided)
 	if v.deferred != nil {
 		v = v.deferred.decide(r)
 	}
 	rec.graphql = v.GraphQL
+	if v.Docker != "" {
+		rec.docker = v.Docker
+	}
+	rec.dockerJSON = v.jsonBody
 	switch {
 	case len(v.Operations) > 0:
 		ids := make([]string, len(v.Operations))
@@ -739,6 +795,18 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 
 // rewrite is the only place a credential is put on a request.
 func (rt *route) rewrite(pr *httputil.ProxyRequest) {
+	if rt.docker != nil {
+		pr.SetURL(rt.docker.target)
+		// On what goes out, not on the request: ReverseProxy has already
+		// dropped whatever headers the client's Connection named, and a
+		// Connection: Content-Type would otherwise send the re-encoded body
+		// with none.
+		if rec, _ := pr.In.Context().Value(recordKey{}).(*record); rec != nil && rec.dockerJSON {
+			pr.Out.Header.Set("Content-Type", "application/json")
+			pr.Out.Header.Del("Content-Encoding")
+		}
+		return
+	}
 	up := rt.upstream
 	if rt.wild {
 		ic, _ := pr.In.Context().Value(connKey{}).(*interceptedConn)
@@ -867,6 +935,12 @@ func (i *Interceptor) logRequest(ic *interceptedConn, r *http.Request, rec *reco
 	if rec.graphql != "" {
 		attrs = append(attrs, "graphql", rec.graphql)
 	}
+	if rec.api != "" {
+		attrs = append(attrs, "api", rec.api)
+	}
+	if rec.docker != "" {
+		attrs = append(attrs, "docker", rec.docker)
+	}
 	attrs = append(attrs, "status", status)
 	if code, ok := grpcStatus(r, rec.header); ok {
 		attrs = append(attrs, "grpc_status", code)
@@ -923,6 +997,11 @@ type record struct {
 	operation string
 	// graphql is what a GraphQL request was read as.
 	graphql string
+	// api is a Docker request's version, "-" for none; docker is what
+	// frisket did to it; dockerJSON is that its body was re-encoded.
+	api        string
+	docker     string
+	dockerJSON bool
 	// sentMethod is the request line's method, where an override replaced it.
 	sentMethod string
 	// header is the response's, trailers and all once it has finished.

@@ -28,6 +28,7 @@ import (
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/credential"
 	"github.com/danielbodart/frisket/internal/dns"
+	"github.com/danielbodart/frisket/internal/docker"
 	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/internal/serve"
@@ -79,7 +80,7 @@ type Route struct {
 	Host string `json:"host"`
 	// Upstream is where its requests go: https://host[:port][/base]. For a
 	// wildcard route, https://*.suffix[:port]: the name each request was
-	// made to.
+	// made to. For a Docker route, unix:///path: the daemon's socket.
 	Upstream string `json:"upstream"`
 	// UpstreamCA is a PEM bundle to verify the upstream with, instead of the
 	// host's roots.
@@ -117,6 +118,89 @@ type Route struct {
 	// with: grants it signed are answered with the placeholder, and a bearer
 	// JWT it signed is the placeholder.
 	SessionKey *SessionKey `json:"sessionKey,omitempty"`
+	// Docker makes the route a Docker Engine's, whose upstream is
+	// unix:///path/to/docker.sock. Only a session's own document has one:
+	// the module's upstream is https alone.
+	Docker *DockerRoute `json:"docker,omitempty"`
+}
+
+// DockerRoute is a Docker Engine route's project, as the host derived it,
+// and what follows from it: the versions, images and ports its requests may
+// name, the address and names its ports are reached by, and the tables its
+// bodies are judged by.
+type DockerRoute struct {
+	Project     string      `json:"project"`
+	APIVersions APIVersions `json:"apiVersions"`
+	Images      []string    `json:"images"`
+	// Address and Names must be frisket's own derivation from Project.
+	Address string   `json:"address"`
+	Ports   []int    `json:"ports"`
+	Names   []string `json:"names"`
+	MaxBody int64    `json:"maxBody"`
+	// Bodies are the body tables, by operation, in the flat format of
+	// internal/docker.
+	Bodies map[string]json.RawMessage `json:"bodies,omitempty"`
+}
+
+// APIVersions are "1.NN", min to max, and the paths asked with no version.
+type APIVersions struct {
+	Min         string   `json:"min"`
+	Max         string   `json:"max"`
+	Unversioned []string `json:"unversioned,omitempty"`
+}
+
+// DockerRule is what an admitting rule on a Docker route checks.
+type DockerRule struct {
+	Owned   string                `json:"owned"`
+	Param   int                   `json:"param,omitempty"`
+	Query   map[string]QueryCheck `json:"query,omitempty"`
+	Body    string                `json:"body,omitempty"`
+	Upgrade string                `json:"upgrade,omitempty"`
+}
+
+// QueryCheck is a check's name, "bool", or one of {"filters": [...]} and
+// {"enum": [...]}.
+type QueryCheck struct {
+	Check   string
+	Filters []string
+	Enum    []string
+}
+
+func (q *QueryCheck) UnmarshalJSON(b []byte) error {
+	var name string
+	if err := json.Unmarshal(b, &name); err == nil {
+		if name == "filters" || name == "enum" {
+			return fmt.Errorf("query check %q takes a list: {%q: [...]}", name, name)
+		}
+		*q = QueryCheck{Check: name}
+		return nil
+	}
+	var obj struct {
+		Filters []string `json:"filters"`
+		Enum    []string `json:"enum"`
+	}
+	if err := decode(b, &obj); err != nil {
+		return fmt.Errorf("query check: a name, or {\"filters\": [...]} or {\"enum\": [...]}: %w", err)
+	}
+	switch {
+	case obj.Filters != nil && obj.Enum == nil:
+		*q = QueryCheck{Check: "filters", Filters: obj.Filters}
+	case obj.Enum != nil && obj.Filters == nil:
+		*q = QueryCheck{Check: "enum", Enum: obj.Enum}
+	default:
+		return errors.New(`query check: {"filters": [...]} or {"enum": [...]}, one of them`)
+	}
+	return nil
+}
+
+func (q QueryCheck) MarshalJSON() ([]byte, error) {
+	switch q.Check {
+	case "filters":
+		return json.Marshal(map[string][]string{"filters": q.Filters})
+	case "enum":
+		return json.Marshal(map[string][]string{"enum": q.Enum})
+	}
+	return json.Marshal(q.Check)
 }
 
 // SessionKey is the public half of the session's key, the issuer every JWT
@@ -195,6 +279,8 @@ type PathRule struct {
 	Ask            bool       `json:"ask,omitempty"`
 	Refuse         bool       `json:"refuse,omitempty"`
 	Operation      *Operation `json:"operation,omitempty"`
+	// Docker is what an admitting rule on a Docker route checks.
+	Docker *DockerRule `json:"docker,omitempty"`
 }
 
 // Operation is what a rule is, in its API's own words: what a person is shown
@@ -503,6 +589,9 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 			return nil, closers, fmt.Errorf("route for %s: not on the allowlist; interception is how an allowed host gets its credential, not a way round the allowlist", h)
 		}
 	}
+	if err := dockerNames(p, hosts); err != nil {
+		return nil, closers, err
+	}
 
 	routes := make([]intercept.Route, 0, len(p.Routes))
 	for _, r := range p.Routes {
@@ -572,6 +661,37 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 	}), closers, nil
 }
 
+// dockerNames holds a document to one Docker route, and that route's names
+// clear of every route's host. A name the session answers with its project's
+// address must never be one the session's CA vouches for, or one below a
+// wildcard route: the one is plain TCP to a relay, the other TLS to frisket,
+// and a name cannot be both.
+func dockerNames(p Policy, hosts []string) error {
+	var dr *Route
+	for i := range p.Routes {
+		if p.Routes[i].Docker == nil {
+			continue
+		}
+		if dr != nil {
+			return fmt.Errorf("routes %s and %s are both Docker routes, and a document has at most one", dr.Name, p.Routes[i].Name)
+		}
+		dr = &p.Routes[i]
+	}
+	if dr == nil {
+		return nil
+	}
+	for _, n := range dr.Docker.Names {
+		name := dns.Normalize(n)
+		for _, h := range hosts {
+			suffix, wild := strings.CutPrefix(h, "*.")
+			if name == h || wild && strings.HasSuffix(name, "."+suffix) {
+				return fmt.Errorf("route %s: name %s is route %s's, or under it, and the project's address cannot be answered for it", dr.Name, n, h)
+			}
+		}
+	}
+	return nil
+}
+
 // sessionCA is a new session's CA, constrained to hosts, or a restored
 // session's own, read back from its record -- with what to keep in the record.
 func sessionCA(hosts []string, authority []byte) (*intercept.CA, []byte, error) {
@@ -610,7 +730,19 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 			return intercept.Route{}, nil, err
 		}
 		rule.Operation = o
+		if d := p.Docker; d != nil {
+			rule.Docker = &intercept.DockerRule{Owned: d.Owned, Param: d.Param, Body: d.Body, Upgrade: d.Upgrade}
+			if d.Query != nil {
+				rule.Docker.Query = map[string]intercept.QueryCheck{}
+				for k, c := range d.Query {
+					rule.Docker.Query[k] = intercept.QueryCheck{Check: c.Check, Filters: c.Filters, Enum: c.Enum}
+				}
+			}
+		}
 		out.Scope.Paths = append(out.Scope.Paths, rule)
+	}
+	if r.Docker != nil || strings.HasPrefix(r.Upstream, "unix:") {
+		return dockerRoute(r, out)
 	}
 	for _, g := range r.GraphQL {
 		scope, err := graphqlScope(g)
@@ -688,6 +820,57 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 	}
 	out.Credential = f
 	return out, f.Close, nil
+}
+
+// dockerRoute finishes a Docker Engine's route: its hop to the daemon is
+// plain HTTP over a socket, so nothing of a credential may be set, and its
+// tables are compiled against frisket's floor here, so a document weaker
+// than the floor never loads. The rest is held to the contract by
+// intercept, which builds it.
+func dockerRoute(r Route, out intercept.Route) (intercept.Route, func() error, error) {
+	if r.CredentialFile != "" || r.Placeholder != "" || r.Header != "" || r.BasicUser != "" ||
+		r.SessionKey != nil || r.CredentialJSON != nil || r.UpstreamCA != "" {
+		return intercept.Route{}, nil, errors.New("a Docker route's hop is plain HTTP over the daemon's socket: no credentialFile, placeholder, header, basicUser, sessionKey, credentialJSON or upstreamCA")
+	}
+	d := r.Docker
+	if d == nil {
+		return intercept.Route{}, nil, errors.New("a unix upstream is only a Docker route's, with a docker block")
+	}
+	// route() returns here before it reads git or graphql, so a scope of
+	// either would otherwise be dropped without a word.
+	if r.Git != nil || len(r.GraphQL) > 0 {
+		return intercept.Route{}, nil, errors.New("a Docker route has path rules only: no git or graphql")
+	}
+	addr, err := netip.ParseAddr(d.Address)
+	if err != nil || !addr.Is4() {
+		return intercept.Route{}, nil, fmt.Errorf("docker address %q is not a dotted-quad IPv4 address", d.Address)
+	}
+	ports := make([]uint16, len(d.Ports))
+	for i, p := range d.Ports {
+		if p < 1024 || p > 65535 {
+			return intercept.Route{}, nil, fmt.Errorf("docker port %d is not between 1024 and 65535", p)
+		}
+		ports[i] = uint16(p)
+	}
+	bodies := map[string]*docker.Table{}
+	for name, raw := range d.Bodies {
+		t, err := docker.Compile(name, raw)
+		if err != nil {
+			return intercept.Route{}, nil, err
+		}
+		bodies[name] = t
+	}
+	out.Docker = &intercept.DockerRoute{
+		Project:     d.Project,
+		APIVersions: intercept.APIVersions{Min: d.APIVersions.Min, Max: d.APIVersions.Max, Unversioned: d.APIVersions.Unversioned},
+		Images:      d.Images,
+		Address:     addr,
+		Ports:       ports,
+		Names:       d.Names,
+		MaxBody:     d.MaxBody,
+		Bodies:      bodies,
+	}
+	return out, func() error { return nil }, nil
 }
 
 // operation is a rule's operation, its class one of the three.

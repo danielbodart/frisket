@@ -30,7 +30,8 @@ type Route struct {
 	// Upstream is where requests go: https://host[:port][/base]. Never plain
 	// HTTP -- the credential crosses this hop. A wildcard route's is its own
 	// host, https://*.suffix[:port]: each request goes to the name it was
-	// made to, on that port.
+	// made to, on that port. A Docker route's alone is unix:///path, the
+	// daemon's socket, and it carries no credential.
 	Upstream string
 	// UpstreamCAs verifies the upstream. Nil means the host's roots.
 	UpstreamCAs *x509.CertPool
@@ -55,6 +56,10 @@ type Route struct {
 	// SessionKey, if set, answers its grants with the placeholder, and takes
 	// a bearer JWT it signed as the placeholder. Bearer routes only.
 	SessionKey *SessionKey
+	// Docker makes this a Docker Engine's route, whose Upstream is
+	// unix:///path/to/docker.sock: the one kind of route that is not HTTPS,
+	// and so carries no credential.
+	Docker *DockerRoute
 }
 
 // Injector puts a credential on an outgoing request.
@@ -133,6 +138,14 @@ func (r *Route) validate() (*url.URL, error) {
 	u, err := url.Parse(r.Upstream)
 	if err != nil {
 		return nil, fmt.Errorf("route %s: upstream: %w", r.Name, err)
+	}
+	if u.Scheme == "unix" || r.Docker != nil {
+		return u, r.validateDocker(u, pat.Wildcard)
+	}
+	for _, p := range r.Scope.Paths {
+		if p.Docker != nil {
+			return nil, fmt.Errorf("route %s: path rule %q has a docker block, and the route is not Docker's", r.Name, p.Path+p.Prefix)
+		}
 	}
 	if u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("route %s: upstream %q must be https://host[:port][/path]", r.Name, r.Upstream)

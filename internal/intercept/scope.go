@@ -85,6 +85,9 @@ type PathRule struct {
 	// Operation is what the rule is, in its API's own words, for the person
 	// being asked. Nil: the rule has none, and the question says so.
 	Operation *Operation
+	// Docker is what an admitting rule on a Docker route checks of the
+	// request it matched, and only there.
+	Docker *DockerRule
 }
 
 // Operation is one of an API's operations as its own description names it.
@@ -209,6 +212,12 @@ type Verdict struct {
 	// GraphQL is what a GraphQL request was read as, for the log: its type
 	// and root fields, or why it could not be classified.
 	GraphQL string
+	// Docker is what frisket did to a request on a Docker route, for the
+	// log, and never a value from a field it did not judge.
+	Docker string
+	// jsonBody is a Docker request whose body frisket re-encoded, which goes
+	// upstream as application/json whatever the client's headers said.
+	jsonBody bool
 
 	// deferred is what decides from the request's body, before it is read:
 	// a GraphQL endpoint, say. Such a verdict refuses until deferred.decide
@@ -242,6 +251,8 @@ type compiledPath struct {
 	encodedSlashes bool
 	outcome        Outcome
 	operation      *Operation
+	// docker is an admitting rule's deferred checks, on a Docker route.
+	docker *dockerRule
 }
 
 // strictness orders outcomes: admitting, then asking, then refusing.
@@ -262,6 +273,9 @@ func (p *compiledPath) verdict() Verdict {
 		return Verdict{Outcome: Refuse, Reason: ReasonRefused, Operation: p.operation}
 	case Ask:
 		return Verdict{Outcome: Ask, Reason: "path", Operation: p.operation}
+	}
+	if p.docker != nil {
+		return p.docker.verdict()
 	}
 	return Verdict{Outcome: Admit, Reason: "path", Operation: p.operation}
 }
@@ -392,7 +406,11 @@ func compilePath(p PathRule) (compiledPath, error) {
 	case p.Refuse:
 		outcome = Refuse
 	}
-	return compiledPath{methods: upper(p.Methods), segs: segs, folded: folded, exact: exact, encodedSlashes: p.EncodedSlashes, outcome: outcome, operation: p.Operation}, nil
+	cp := compiledPath{methods: upper(p.Methods), segs: segs, folded: folded, exact: exact, encodedSlashes: p.EncodedSlashes, outcome: outcome, operation: p.Operation}
+	if d := p.Docker; d != nil && outcome == Admit {
+		cp.docker = &dockerRule{DockerRule: *d, operation: p.Operation}
+	}
+	return cp, nil
 }
 
 // verb is a template segment's verb: "access", for "*:access".
