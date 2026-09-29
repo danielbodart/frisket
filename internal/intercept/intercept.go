@@ -610,8 +610,8 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := rt.scope.decide(r.Method, r.URL)
-	if v.graphql != nil {
-		v = v.graphql.decide(r)
+	if v.deferred != nil {
+		v = v.deferred.decide(r)
 	}
 	rec.graphql = v.GraphQL
 	switch {

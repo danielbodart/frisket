@@ -153,7 +153,7 @@ func TestAGraphQLPathCanHaveAVerb(t *testing.T) {
 		"/v1/x":           false,
 	} {
 		u, _ := parseTarget(target)
-		if got := c.decide("POST", u).graphql != nil; got != want {
+		if got := c.decide("POST", u).deferred != nil; got != want {
 			t.Errorf("POST %s: graphql %v, want %v", target, got, want)
 		}
 	}

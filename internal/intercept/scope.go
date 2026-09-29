@@ -210,9 +210,10 @@ type Verdict struct {
 	// and root fields, or why it could not be classified.
 	GraphQL string
 
-	// graphql is the endpoint whose body decides, before it is read. Such a
-	// verdict refuses until compiledGraphQL.decide replaces it.
-	graphql *compiledGraphQL
+	// deferred is what decides from the request's body, before it is read:
+	// a GraphQL endpoint, say. Such a verdict refuses until deferred.decide
+	// replaces it.
+	deferred interface{ decide(*http.Request) Verdict }
 }
 
 // RuleUnmatched is the reason for a request asked about because nothing
@@ -449,7 +450,7 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 		for i := range c.graphql {
 			g := &c.graphql[i]
 			if g.path.matches(segs, raw) || g.near(whole) || g.near(split) {
-				return Verdict{Outcome: Refuse, Reason: "graphql body unread", graphql: g}
+				return Verdict{Outcome: Refuse, Reason: "graphql body unread", deferred: g}
 			}
 		}
 	}
