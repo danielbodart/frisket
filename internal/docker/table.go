@@ -85,7 +85,7 @@ type Table struct {
 // ExecStart, VolumeCreate or NetworkCreate.
 func (t *Table) Name() string { return t.name }
 
-// Compile reads a table in the flat format of the contract's section 1.4 --
+// Compile reads a table in its flat format --
 // one object mapping a path, `Field(.Field)*` with `*` for any key of a map,
 // to a spec -- and checks it against frisket's floor for the operation it is
 // named for. A name frisket has no floor for does not compile, so a table
@@ -322,7 +322,7 @@ func kindList(ks []kind) string {
 	return strings.Join(names, ", ")
 }
 
-// floors are frisket's floors, by operation: the contract's section 1.5.
+// floors are frisket's floors, by operation: what no table may loosen.
 var floors = map[string][]floorRule{
 	"ContainerCreate": containerFloor(),
 	"ExecCreate":      {zeroAt("Privileged")},

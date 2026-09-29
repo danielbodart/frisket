@@ -390,7 +390,7 @@ func relayPorts(name string, specs []nsnet.Spec, dk *Docker) error {
 }
 
 // addressHeld refuses a Docker project whose address a live or restored
-// session of another project holds (the contract's I10): a relay reaches
+// session of another project holds: a relay reaches
 // what is published on its own project's address, and two projects on one
 // address would reach each other's. Sessions of one project share it, as
 // they share its objects. d.mu is held.

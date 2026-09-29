@@ -900,7 +900,7 @@ func route(r Route, d Deps) (intercept.Route, func() error, error) {
 // dockerRoute finishes a Docker Engine's route: its hop to the daemon is
 // plain HTTP over a socket, so nothing of a credential may be set, and its
 // tables are compiled against frisket's floor here, so a document weaker
-// than the floor never loads. The rest is held to the contract by
+// than the floor never loads. The rest is checked by
 // intercept, which builds it.
 func dockerRoute(r Route, out intercept.Route) (intercept.Route, func() error, error) {
 	if r.CredentialFile != "" || r.Placeholder != "" || r.Header != "" || r.BasicUser != "" ||

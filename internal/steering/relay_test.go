@@ -2,6 +2,7 @@ package steering
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -143,7 +144,7 @@ func transparentListener(network string, addr netip.AddrPort) (*net.TCPListener,
 		})
 		return errors.Join(err, serr)
 	}}
-	ln, err := lc.Listen(nil, network, addr.String())
+	ln, err := lc.Listen(context.Background(), network, addr.String())
 	if err != nil {
 		return nil, err
 	}

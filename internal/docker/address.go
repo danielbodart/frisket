@@ -13,7 +13,7 @@ import (
 // SHA-256 of the slug, lower-cased. A b1 of 0 would be in 127.0.0.0/16, where
 // 127.0.0.1 and 127.0.0.53 are, and 255.255.255 is the broadcast; either
 // hashes the hash's own 64 hex digits again. chase and nix-config derive it
-// the same way (the contract's section 3.7), and the three must agree byte
+// the same way, and the three must agree byte
 // for byte.
 func Address(project string) netip.Addr {
 	h := hexSum(lowerASCII(project))

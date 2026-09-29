@@ -474,7 +474,7 @@ func (d *dockerRule) refused(err error) Verdict {
 	return d.refuse(docker.ReasonUnreadable, "")
 }
 
-// decide runs the rule's checks, in the contract's order, and makes the
+// decide runs the rule's checks, in order, and makes the
 // request what goes upstream: its query and body re-encoded from what was
 // checked, and its object's segment as the daemon said to name it.
 func (d *dockerRule) decide(r *http.Request) Verdict {

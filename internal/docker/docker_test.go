@@ -46,7 +46,7 @@ func load(t *testing.T, path string, v any) {
 	}
 }
 
-// tables compiles chase's tables, as the contract's section 1.4 gives them.
+// tables compiles chase's tables, in the flat format Compile reads.
 func tables(t testing.TB) map[string]*Table {
 	t.Helper()
 	b, err := os.ReadFile("testdata/fields.json")
@@ -285,7 +285,7 @@ func binding(ip any, port string) map[string]any {
 	return b
 }
 
-// Everything the contract names as refused, each a change to a body Compose
+// Everything a body must not reach the host by, each a change to a body Compose
 // really sent, so that each case differs from an admitted body in one thing.
 func TestWhatReachesTheHostIsRefused(t *testing.T) {
 	tabs := tables(t)
@@ -720,7 +720,7 @@ func weaken(t *testing.T, name string, path string, spec any) error {
 	return err
 }
 
-// floorPaths are the contract's section 1.5, written out here rather than
+// floorPaths are the floor's paths, written out here rather than
 // taken from the code's floors, so that a path the code drops is missed.
 var floorPaths = func() map[string][]string {
 	container := []string{"Image", "HostConfig.NetworkMode", "Labels", "HostConfig.Binds", "HostConfig.Mounts",

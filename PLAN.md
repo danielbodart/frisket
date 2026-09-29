@@ -750,6 +750,7 @@ inject.
 | Cloudflare | `api.cloudflare.com` | account and zone scoping, the credential's source |
 | GCP client libraries, gcloud | `oauth2.googleapis.com` and every Google API | *decided, below and in chase's `docs/gcloud.md`*: a fake service-account key in the session, its token grant answered with a placeholder, the real token on `*.googleapis.com`, rules generated from Google's Discovery documents and protos, a project's service account, its key in the project's sops (keyless federation later), renewed by chase |
 | Postgres, Redis, MongoDB | — | nothing of frisket's in trusted; unreachable in strict |
+| docker, docker compose | the rootless daemon's socket | *decided, below and in chase's `docs/docker.md`* |
 | npm, PyPI, crates, Go proxy | — | no credential; which names each allowlist needs |
 
 `internal/intercept` holds a GitHub REST scope by repository, written ahead of
@@ -1000,6 +1001,33 @@ the session.
   renewer looks like a slow one (*built*: once when a request first finds it
   stale, at error, and once when one finds it fresh).
 
+### Docker (decided)
+
+Why a session gets the host's rootless Docker daemon at all, and how chase
+names its project, is in chase's `docs/docker.md`. What frisket adds is below;
+the changes it makes to a request are decision 13's one other carve-out.
+
+- **A Docker route.** *Built.* Its upstream is `unix:///path/to/docker.sock`,
+  dialled directly over HTTP/1.1, the one route that is not HTTPS and so
+  carries no credential. Its host is `docker.frisket.internal`, served with
+  the session's CA like any other. A document has at most one.
+- **Ownership by label.** *Built.* The project is chase's, from the
+  checkout's git remote, never the project's own word. An object is the
+  session's only if the daemon reports `frisket.project=<project>` on it;
+  what the session creates is labelled so, what it lists is filtered so, and
+  a path acts on the full ID the daemon gave, with the name held while it is
+  checked and used.
+- **Bodies against a table and a floor.** *Built.* A create's JSON body is
+  read strictly against the route's table for its operation and frisket's
+  own floor, which no table can loosen; a field neither allows refuses, and
+  what goes upstream is frisket's re-encoding of what it checked.
+- **A per-project loopback address.** *Built.* Published ports are bound to
+  `127.b1.b2.b3`, from the project's SHA-256; a session reaches them at
+  `127.0.0.1:P`, `[::1]:P` and that address through frisket's relay, only
+  while a running container of the project publishes them there, and by the
+  names `<label>.internal` and `<label>.<owner>.internal`. Two projects
+  holding one address are refused at open.
+
 ---
 
 ## Build order
@@ -1032,6 +1060,10 @@ the host's rotating login, and its expiry -- a field beside the token, or the
 
 **git.** Built: over HTTPS with gh's token in trusted, anonymous and read-only
 in strict, measured in both tiers.
+
+**Docker.** Built: a session's own project's containers, volumes and
+networks through the rootless daemon, and its published ports by the
+project's address ("Docker", below Google Cloud).
 
 **Integration.** The adapter against nix-config's tiers, and the mounts that
 target state removes.

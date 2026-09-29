@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 )
 
-// The reasons a refusal gives, as section 2.4 of the contract names them.
+// The reasons a body or query refusal gives.
 const (
 	ReasonUnreadable = "body unreadable"
 	ReasonBody       = "body not allowed"

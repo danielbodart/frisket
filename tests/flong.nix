@@ -1249,7 +1249,7 @@ in
           assert "passt" not in machine.succeed("ss -Htlnp 'sport = :53'"), machine.succeed("ss -Htlnp")
           # frisket's TCP listener is a real socket above that floor, and
           # this pasta's `auto` cannot exclude a port, so the host gets it
-          # on every address: the accepted residual of the contract's 2.8,
+          # on every address: an accepted residual,
           # which pasta's exclusions are to remove. What pins it harmless is
           # that anything through it arrives, by the host's loopback,
           # dialling the listener itself, and is refused as unsteered:
