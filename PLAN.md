@@ -371,10 +371,12 @@ the project: frisket's DNS answers exactly the session's own names, with the
 address, before the allowlist, and leaves the rest of `.internal` alone, so
 `metadata.google.internal` and `docker.frisket.internal` resolve as they do
 now. A name equal to or under a reserved suffix (`frisket.internal`,
-`google.internal`) is never generated, and a document whose names equal or
-fall under one of its own route hosts is refused when it loads. The names say
-`internal` and not `docker` because the address will later also carry the
-session's own dev servers.
+`google.internal`) is never generated. The suffixes live in
+`internal/docker/reserved.json`, which the Go code embeds and the flake exports
+as `lib.docker.reserved`, for chase and nix-config to read rather than copy. A
+document whose names equal or fall under one of its own route hosts is refused
+when it loads. The names say `internal` and not `docker` because the address
+will later also carry the session's own dev servers.
 
 ---
 

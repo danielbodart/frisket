@@ -2,10 +2,15 @@ package docker
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"net/netip"
 	"regexp"
 	"strings"
+
+	"github.com/danielbodart/frisket/internal/dns"
 )
 
 // Address is the project's own loopback address, which everything it
@@ -31,12 +36,49 @@ func hexSum(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// reserved are the names no project's name may equal or fall under: frisket's
-// own route hosts, docker.frisket.internal among them, and the cloud's
-// metadata.google.internal. GCE's own per-VM names have four labels or more
-// and no project's name can be one. The list is part of the derivation, and
-// chase and nix-config hold it byte for byte.
-var reserved = [...]string{"frisket.internal", "google.internal"}
+// reservedJSON is the list of names no project's name may equal or fall
+// under: frisket's own route hosts, docker.frisket.internal among them, and
+// the cloud's metadata.google.internal. GCE's own per-VM names have four labels
+// or more and no project's name can be one, so they need no entry. The list is
+// part of the derivation and frisket owns it: the flake exports this same file
+// as lib.docker.reserved, and chase and nix-config read it from there rather
+// than keep a copy that could drift.
+//
+//go:embed reserved.json
+var reservedJSON []byte
+
+// reserved is reservedJSON, parsed once. A file that does not parse, or holds
+// a name that could never be generated, stops the program rather than
+// reserving less than it says: a list that silently came out empty would
+// reserve nothing, and frisket would hand a project its own route host.
+var reserved = mustParseReserved(reservedJSON)
+
+func mustParseReserved(b []byte) []string {
+	names, err := parseReserved(b)
+	if err != nil {
+		panic("internal/docker/reserved.json: " + err.Error())
+	}
+	return names
+}
+
+// parseReserved holds each entry to the shape of a name Names could give or
+// fall under: a valid, lower-case DNS name ending in .internal. The bare
+// "internal" is not one, and would reserve every name there is.
+func parseReserved(b []byte) ([]string, error) {
+	var names []string
+	if err := json.Unmarshal(b, &names); err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no names")
+	}
+	for _, n := range names {
+		if !dns.ValidQueryName(n) || lowerASCII(n) != n || !strings.HasSuffix(n, ".internal") {
+			return nil, fmt.Errorf("%q is not a lower-case DNS name under .internal", n)
+		}
+	}
+	return names, nil
+}
 
 var ownerRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}$`)
 

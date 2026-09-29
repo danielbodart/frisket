@@ -71,6 +71,12 @@
       # launcher. See nix/steering.nix.
       lib.steering = import ./nix/steering.nix { inherit (nixpkgs) lib; };
 
+      # The names no project's .internal name may equal or fall under: the very
+      # file the Go code embeds, and so the list Names() uses. Pure data, for
+      # chase and nix-config to read rather than copy. frisket exports only the
+      # list; the address and the names are chase's lib.docker to derive.
+      lib.docker.reserved = builtins.fromJSON (builtins.readFile ./internal/docker/reserved.json);
+
       # The daemon, and the adapter that maps its sessions onto flong's hooks.
       # Keyed, so the module system can tell it is one module however many
       # times it is imported: the flong adapter imports it too, and without a
@@ -225,6 +231,22 @@
 
           # frisket in flong's real shape, end to end, in two VMs.
           flong = pkgs.testers.runNixOSTest (import ./tests/flong.nix { inherit self flong; });
+
+          # lib.docker.reserved is exactly the list the Go test pins, so the
+          # file cannot change under a consumer without a test failing here and
+          # one failing there.
+          docker-reserved =
+            let
+              got = builtins.toJSON self.lib.docker.reserved;
+              want = builtins.toJSON [ "frisket.internal" "google.internal" ];
+            in
+            pkgs.runCommand "docker-reserved" { inherit got want; } ''
+              if [ "$got" != "$want" ]; then
+                echo "lib.docker.reserved is $got, want $want" >&2
+                exit 1
+              fi
+              touch $out
+            '';
 
           # The version script decides what every release is called, so it is
           # gated by the same check that gates the release.

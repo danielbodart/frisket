@@ -1000,6 +1000,44 @@ func TestTheDerivationGivesTheContractsVectors(t *testing.T) {
 	}
 }
 
+func TestTheEmbeddedReservedListIsExactlyFrisketsAndGooglesInternalApexes(t *testing.T) {
+	// The flake's docker-reserved check pins lib.docker.reserved to the same
+	// literal, so neither side of the one file can change without a test failing.
+	if want := []string{"frisket.internal", "google.internal"}; !slices.Equal(reserved, want) {
+		t.Fatalf("reserved.json gives %q, want %q", reserved, want)
+	}
+	for _, n := range []string{"frisket.internal", "google.internal", "docker.frisket.internal", "metadata.google.internal"} {
+		if !Reserved(n) {
+			t.Errorf("%s is not reserved", n)
+		}
+	}
+	for _, n := range []string{"data-lab.internal", "frisket.danielbodart.internal"} {
+		if Reserved(n) {
+			t.Errorf("%s is reserved", n)
+		}
+	}
+}
+
+func TestAReservedListThatWouldReserveLessThanItSaysDoesNotParse(t *testing.T) {
+	for _, b := range []string{
+		``, `{}`, `"frisket.internal"`, `[]`, `null`, `[""]`, `["Frisket.internal"]`,
+		`["frisket..internal"]`, `["frisket.internal."]`, `["frisket internal"]`,
+		`["internal"]`, `["frisket.local"]`, `["frisket.internal", 1]`,
+	} {
+		if names, err := parseReserved([]byte(b)); err == nil {
+			t.Errorf("%s parsed as %q", b, names)
+		}
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("a list that does not parse did not panic")
+			}
+		}()
+		mustParseReserved([]byte(`[]`))
+	}()
+}
+
 func Example() {
 	fmt.Println(Address("triptease/data-lab"), Names("triptease/data-lab"))
 	// Output: 127.1.191.78 [data-lab.internal data-lab.triptease.internal]
