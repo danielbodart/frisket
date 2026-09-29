@@ -1,7 +1,6 @@
 package intercept
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -512,13 +511,15 @@ func (d *dockerRule) decide(r *http.Request) Verdict {
 	}
 
 	bodied := false
+	var checked docker.Checked
 	var lookups []docker.Lookup
 	if d.Body == "" {
 		if reason := noBody(r); reason != "" {
 			return d.refuse(reason, "")
 		}
 	} else {
-		checked, err := d.body(r)
+		var err error
+		checked, err = d.body(r)
 		if err != nil {
 			return d.refused(err)
 		}
@@ -554,12 +555,18 @@ func (d *dockerRule) decide(r *http.Request) Verdict {
 		r.URL.Path, r.URL.RawPath = p, p
 	}
 	if len(lookups) > 0 {
-		acct, err := c.body(lookups)
+		acct, networks, err := c.body(lookups)
 		account = append(account, acct...)
 		if err != nil {
 			c.release()
 			return d.objectRefused(err, account)
 		}
+		out, err := checked.Attached(networks)
+		if err != nil {
+			c.release()
+			return d.refused(err)
+		}
+		setBody(r, out)
 	}
 	r.URL.RawQuery, r.URL.ForceQuery = query, false
 	v := Verdict{Outcome: Admit, Reason: "path", Operation: d.operation, Docker: strings.Join(account, "; "), jsonBody: bodied,
@@ -775,8 +782,7 @@ func (d *dockerRule) body(r *http.Request) (docker.Checked, error) {
 	if err != nil {
 		return docker.Checked{}, err
 	}
-	r.Body = io.NopCloser(bytes.NewReader(checked.Body))
-	r.ContentLength = int64(len(checked.Body))
+	setBody(r, checked.Body)
 	r.TransferEncoding = nil
 	r.Header.Del("Content-Encoding")
 	return checked, nil

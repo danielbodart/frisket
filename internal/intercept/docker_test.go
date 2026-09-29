@@ -134,10 +134,18 @@ func newUnixUpstream(t testing.TB, socket string) Route {
 func dockerFixture(t *testing.T, routes ...Route) (*fixture, *daemon, *journal) {
 	t.Helper()
 	d := newDaemon(t)
-	j := &journal{}
 	if len(routes) == 0 {
 		routes = []Route{newUnixUpstream(t, d.socket)}
 	}
+	f, j := dockerFixtureOn(t, routes...)
+	return f, d, j
+}
+
+// dockerFixtureOn is a frisket of its own serving routes: a second session,
+// to a daemon a fixture already has.
+func dockerFixtureOn(t *testing.T, routes ...Route) (*fixture, *journal) {
+	t.Helper()
+	j := &journal{}
 	f := newFixtureWith(t, j, Config{
 		Routes: routes,
 		Log:    slog.New(slog.NewJSONHandler(j, nil)),
@@ -147,7 +155,7 @@ func dockerFixture(t *testing.T, routes ...Route) (*fixture, *daemon, *journal) 
 			return nil, errors.New("not this dialer")
 		},
 	})
-	return f, d, j
+	return f, j
 }
 
 func dockerRequest(t *testing.T, method, target string, body io.Reader) *http.Request {

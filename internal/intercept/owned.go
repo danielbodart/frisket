@@ -302,40 +302,55 @@ func (c *claim) container(ref, account string) (string, error) {
 	return f.ID, nil
 }
 
-// body answers for each name a body holds, by what the body does with it.
-func (c *claim) body(lookups []docker.Lookup) ([]string, error) {
-	var account []string
+// body answers for each name a body holds, by what the body does with it,
+// and gives the full ID of each network it attaches to, by its name, for
+// the body to name it by upstream.
+func (c *claim) body(lookups []docker.Lookup) (account []string, networks map[string]string, err error) {
+	networks = map[string]string{}
 	for _, l := range lookups {
-		acct, err := c.named(l)
+		acct, id, err := c.named(l)
 		if err != nil {
-			return account, err
+			return account, nil, err
 		}
 		account = append(account, acct)
+		if id != "" {
+			networks[l.Name] = id
+		}
 	}
-	return account, nil
+	return account, networks, nil
 }
 
-func (c *claim) named(l docker.Lookup) (string, error) {
+// named answers for one name a body holds, and gives, for a network it
+// attaches to, that network's full ID.
+func (c *claim) named(l docker.Lookup) (account, id string, err error) {
 	switch {
 	case l.Kind == "network" && l.Use == docker.Create:
 		// Held, and nothing to ask: the daemon refuses a network's name
 		// twice, and what it makes is stamped.
-		return "network=" + l.Name + " held", nil
+		return "network=" + l.Name + " held", "", nil
 	case l.Kind == "network" && l.Use == docker.Attach:
 		name := "network " + l.Name
 		f, a, err := c.ask("/networks/"+url.PathEscape(l.Name), name)
 		switch {
 		case err != nil:
-			return "", err
+			return "", "", err
 		case a != nil:
-			return "", absent(name, nil)
+			return "", "", absent(name, nil)
+		case !execSegRE.MatchString(f.ID):
+			return "", "", lookupFailed(name, "no ID")
 		case !c.owns(f.Labels):
-			return "", notOwned(name)
+			return "", "", notOwned(name)
 		}
-		return name + " owned", nil
+		return name + " owned as " + short(f.ID), f.ID, nil
 	case l.Kind != "volume":
-		return "", &objectRefusal{reason: reasonUndecided, status: http.StatusForbidden, account: l.Kind + " " + l.Name + " unknown"}
+		return "", "", &objectRefusal{reason: reasonUndecided, status: http.StatusForbidden, account: l.Kind + " " + l.Name + " unknown"}
 	}
+	account, err = c.volume(l)
+	return account, "", err
+}
+
+// volume answers for a volume a body names.
+func (c *claim) volume(l docker.Lookup) (string, error) {
 	name := map[docker.Use]string{docker.Bind: "bind ", docker.Mount: "mount ", docker.Create: "volume="}[l.Use] + l.Name
 	f, a, err := c.ask("/volumes/"+url.PathEscape(l.Name), name)
 	switch {

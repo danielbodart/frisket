@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -649,5 +650,66 @@ func TestTheCaptureIsAdmittedInOrder(t *testing.T) {
 	defer d.mu.Unlock()
 	if len(d.containers) != 0 || len(d.volumes) != 0 || len(d.networks) != 0 {
 		t.Errorf("down -v left %d containers, %d volumes, %d networks", len(d.containers), len(d.volumes), len(d.networks))
+	}
+}
+
+// A container joins the network frisket checked, never whatever holds its
+// name when it starts. The daemon keeps what a create names and resolves it
+// again at every start, after the name's lock is let go: so this project
+// makes a network and a container on it, not started, deletes the network,
+// which has no endpoint yet, and another project makes its own under the
+// same name. The create went upstream naming the network by its ID, so the
+// start finds no such network, and the other project's is joined by
+// nothing.
+func TestAContainerJoinsTheNetworkThatWasCheckedNotAnotherOfItsName(t *testing.T) {
+	fa, d, _ := dockerFixture(t)
+	rb := newUnixUpstream(t, d.socket)
+	rb.Docker.Project = otherProject
+	rb.Docker.Address = docker.Address(otherProject)
+	rb.Docker.Names = docker.Names(otherProject)
+	fb, _ := dockerFixtureOn(t, rb)
+
+	const theirs = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+	d.nextIDs(networkID)
+	res, body := fa.do(t, jsonRequest(t, "POST", "/v1.55/networks/create", `{"Name":"shared_default"}`))
+	status(t, "this project's network", res, body, http.StatusCreated, "")
+	endpoint := `"NetworkingConfig":{"EndpointsConfig":{"shared_default":{"Aliases":["db"]}}}`
+	res, body = fa.do(t, jsonRequest(t, "POST", "/v1.55/containers/create?name=shared-db-1", createContainer("shared_default", "", endpoint)))
+	status(t, "a container on it", res, body, http.StatusCreated, "")
+	var created struct{ Id string }
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatal(err)
+	}
+	reqs := d.requests()
+	var sent struct {
+		HostConfig       struct{ NetworkMode string }
+		NetworkingConfig struct {
+			EndpointsConfig map[string]struct{ Aliases []string }
+		}
+	}
+	if err := json.Unmarshal([]byte(reqs[len(reqs)-1].body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.HostConfig.NetworkMode != networkID {
+		t.Errorf("NetworkMode went upstream as %q", sent.HostConfig.NetworkMode)
+	}
+	if ep, ok := sent.NetworkingConfig.EndpointsConfig[networkID]; len(sent.NetworkingConfig.EndpointsConfig) != 1 || !ok || len(ep.Aliases) != 1 {
+		t.Errorf("EndpointsConfig went upstream as %+v", sent.NetworkingConfig.EndpointsConfig)
+	}
+
+	res, body = fa.do(t, jsonRequest(t, "DELETE", "/v1.55/networks/shared_default", ""))
+	status(t, "the network deleted", res, body, http.StatusNoContent, "")
+	d.nextIDs(theirs)
+	res, body = fb.do(t, jsonRequest(t, "POST", "/v1.55/networks/create", `{"Name":"shared_default"}`))
+	status(t, "another project's network of the same name", res, body, http.StatusCreated, "")
+
+	res, body = fa.do(t, jsonRequest(t, "POST", "/v1.55/containers/shared-db-1/start", ""))
+	status(t, "the start", res, body, http.StatusNotFound, networkID+" not found")
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, c := range d.containers {
+		if slices.Contains(c.joined, theirs) {
+			t.Errorf("container %s joined the other project's network", short(c.id))
+		}
 	}
 }

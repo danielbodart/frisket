@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -50,11 +51,15 @@ type seenRequest struct {
 }
 
 // fakeObject is a container, volume or network. A container's volumes are
-// what it mounts.
+// what it mounts; its networks are what its create named them by, which,
+// as the daemon does, it resolves again when it starts; joined are the IDs
+// of the networks it did join.
 type fakeObject struct {
 	id, name string
 	labels   map[string]string
 	volumes  []string
+	networks []string
+	joined   []string
 }
 
 func newDaemon(t *testing.T) *daemon {
@@ -211,8 +216,12 @@ func (d *daemon) serve(w http.ResponseWriter, r *http.Request) {
 			Image      string
 			Labels     map[string]string
 			HostConfig struct {
-				Binds  []string
-				Mounts []struct{ Type, Source string }
+				NetworkMode string
+				Binds       []string
+				Mounts      []struct{ Type, Source string }
+			}
+			NetworkingConfig struct {
+				EndpointsConfig map[string]json.RawMessage
 			}
 		}
 		_ = json.Unmarshal(body, &req)
@@ -233,8 +242,33 @@ func (d *daemon) serve(w http.ResponseWriter, r *http.Request) {
 				c.volumes = append(c.volumes, m.Source)
 			}
 		}
+		if mode := req.HostConfig.NetworkMode; mode != "" && mode != "none" {
+			c.networks = append(c.networks, mode)
+		}
+		for _, n := range slices.Sorted(maps.Keys(req.NetworkingConfig.EndpointsConfig)) {
+			if !slices.Contains(c.networks, n) {
+				c.networks = append(c.networks, n)
+			}
+		}
 		d.containers = append(d.containers, c)
 		reply(http.StatusCreated, map[string]any{"Id": c.id, "Warnings": []string{}})
+	case "POST containers * start":
+		c := find(d.containers, segs[1])
+		if c == nil {
+			missing("container: " + segs[1])
+			return
+		}
+		var joined []string
+		for _, ref := range c.networks {
+			n := find(d.networks, ref)
+			if n == nil {
+				reply(http.StatusNotFound, map[string]string{"message": "failed to set up container networking: network " + ref + " not found"})
+				return
+			}
+			joined = append(joined, n.id)
+		}
+		c.joined = joined
+		_, _ = io.WriteString(w, "{}")
 	case "POST containers * exec":
 		c := find(d.containers, segs[1])
 		if c == nil {

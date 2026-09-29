@@ -1042,3 +1042,60 @@ func Example() {
 	fmt.Println(Address("triptease/data-lab"), Names("triptease/data-lab"))
 	// Output: 127.1.191.78 [data-lab.internal data-lab.triptease.internal]
 }
+
+// A create goes upstream naming every network it attaches to by the ID the
+// daemon gave for it, in NetworkMode and as each key of EndpointsConfig,
+// with each endpoint's own settings kept: the daemon resolves a name again
+// at every start, when it may be another project's network.
+func TestANetworkAContainerAttachesToGoesUpstreamAsItsID(t *testing.T) {
+	const a, b = "372e029d9dd22674f10f3dfb1ba4aa9f9fa8a8de46589f67eab8fa3425d7915c",
+		"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+	body := captured(t, 17)
+	eps := body["NetworkingConfig"].(map[string]any)["EndpointsConfig"].(map[string]any)
+	eps["other_net"] = map[string]any{"Aliases": []any{"x"}}
+	got, err := tables(t)["ContainerCreate"].Check(encode(t, body), route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := got.Attached(map[string]string{"frisket-capture_default": a, "other_net": b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, _ := Read(out)
+	if mode := sent["HostConfig"].(map[string]any)["NetworkMode"]; mode != a {
+		t.Errorf("NetworkMode %v", mode)
+	}
+	sentEps := sent["NetworkingConfig"].(map[string]any)["EndpointsConfig"].(map[string]any)
+	if !reflect.DeepEqual(slices.Sorted(maps.Keys(sentEps)), []string{a, b}) {
+		t.Errorf("EndpointsConfig keys %v", slices.Sorted(maps.Keys(sentEps)))
+	}
+	if aliases := sentEps[a].(map[string]any)["Aliases"]; !reflect.DeepEqual(aliases, []any{"frisket-capture-test-db-1", "test-db"}) {
+		t.Errorf("the endpoint lost its aliases: %v", aliases)
+	}
+	if sent["Labels"].(map[string]any)[LabelKey] != project {
+		t.Errorf("unstamped: %s", out)
+	}
+}
+
+// "none" is no network, and is sent as it came; a network with no ID given
+// for it is refused rather than sent by its name.
+func TestAttachedKeepsNoneAndRefusesANetworkWithNoID(t *testing.T) {
+	tabs := tables(t)
+	got, err := tabs["ContainerCreate"].Check([]byte(`{"Image":"postgres:18","HostConfig":{"NetworkMode":"none"}}`), route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := got.Attached(nil); err != nil || !strings.Contains(string(out), `"NetworkMode":"none"`) {
+		t.Errorf("%s %v", out, err)
+	}
+	got, err = tabs["ContainerCreate"].Check([]byte(`{"Image":"postgres:18","HostConfig":{"NetworkMode":"n"}}`), route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ids := range []map[string]string{nil, {"n": ""}, {"n": "abc"}, {"n": strings.Repeat("A", 64)}} {
+		var r *Refusal
+		if _, err := got.Attached(ids); !errors.As(err, &r) {
+			t.Errorf("%v: %v", ids, err)
+		}
+	}
+}

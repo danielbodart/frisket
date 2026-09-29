@@ -37,7 +37,8 @@ const (
 	// carries an anonymous volume over a recreate.
 	Mount
 	// Attach is a network in NetworkMode or a key of EndpointsConfig. It must
-	// exist and be owned.
+	// exist and be owned, and the body goes upstream naming it by the ID the
+	// daemon gave for it (see Checked.Attached).
 	Attach
 	// Create is the Name of a VolumeCreate or NetworkCreate. It is locked;
 	// a volume's must be absent or owned, since VolumeCreate on an existing
@@ -65,6 +66,70 @@ type Checked struct {
 	// "stamped", "hostip 5432/tcp->127.1.191.78:64320" and the like. It
 	// holds no value from an `any` field.
 	Account []string
+
+	// tree is the body as Body encodes it, and attached is every place in it
+	// that names a network to attach to, for Attached to rewrite.
+	tree     map[string]any
+	attached []slot
+}
+
+// slot is one place a body names a network: a field's value, or a map's key.
+type slot struct {
+	obj   map[string]any
+	key   string
+	isKey bool
+}
+
+// Attached is the body as it goes upstream once every network it attaches
+// to has been looked up: each name, in NetworkMode and as a key of
+// EndpointsConfig, replaced by the full ID the daemon gave for it under the
+// name's lock. The daemon keeps what a create names and resolves it again at
+// every start, long after the lock is let go; a name would by then be
+// whatever network holds it, which another project may have made after this
+// one's was deleted, while an ID names the one network that was checked, or
+// none. ids must hold an ID for every name the body attaches to. It rewrites
+// the tree Body was encoded from, so it is called once.
+func (c Checked) Attached(ids map[string]string) ([]byte, error) {
+	if len(c.attached) == 0 {
+		return c.Body, nil
+	}
+	// Values before keys: a value's slot is found by its map's key, which a
+	// key's rewrite would move.
+	ordered := slices.Clone(c.attached)
+	slices.SortStableFunc(ordered, func(a, b slot) int {
+		switch {
+		case a.isKey == b.isKey:
+			return 0
+		case b.isKey:
+			return -1
+		}
+		return 1
+	})
+	for _, s := range ordered {
+		var name string
+		if s.isKey {
+			name = s.key
+		} else {
+			name, _ = s.obj[s.key].(string)
+		}
+		id, ok := ids[name]
+		if !ok || !anonVol.MatchString(id) {
+			return nil, &Refusal{Reason: ReasonBody, Detail: "a network with no ID", Log: "network=" + quote(name) + " no ID"}
+		}
+		if !s.isKey {
+			s.obj[s.key] = id
+			continue
+		}
+		if _, taken := s.obj[id]; taken {
+			// Two names for one network: one endpoint, twice, which the
+			// daemon would read as the last of the two it met.
+			return nil, &Refusal{Reason: ReasonBody, Detail: "a network named twice", Log: "network=" + quote(name) + " named twice"}
+		}
+		v := s.obj[name]
+		delete(s.obj, name)
+		s.obj[id] = v
+	}
+	return Encode(c.tree)
 }
 
 // stamps are the operations whose objects frisket labels.
@@ -91,7 +156,7 @@ func (t *Table) Check(body []byte, rt Route) (Checked, error) {
 	if err != nil {
 		return Checked{}, err
 	}
-	return Checked{Body: out, Lookups: w.lookups, Account: w.account}, nil
+	return Checked{Body: out, Lookups: w.lookups, Account: w.account, tree: tree, attached: w.attached}, nil
 }
 
 // stamp sets the project's label, making Labels if it is absent or null.
@@ -120,6 +185,22 @@ type walker struct {
 	route   Route
 	lookups []Lookup
 	account []string
+	// attached are the places the body names a network to attach to.
+	attached []slot
+}
+
+// attach notes where a network n judged was named, once it passed: a field's
+// value, or with isKey a map's key. "none" is no network, and stays.
+func (w *walker) attach(obj map[string]any, key string, isKey bool) {
+	if isKey {
+		if key != "none" {
+			w.attached = append(w.attached, slot{obj: obj, key: key, isKey: true})
+		}
+		return
+	}
+	if s, ok := obj[key].(string); ok && s != "none" {
+		w.attached = append(w.attached, slot{obj: obj, key: key})
+	}
 }
 
 // lookup records a name, once.
@@ -181,6 +262,9 @@ func (w *walker) value(n *node, v any, present bool, at string) error {
 			if err := w.value(n.children[name], child, ok, join(at, name)); err != nil {
 				return err
 			}
+			if ok && n.children[name].kind == kNetwork {
+				w.attach(obj, name, false)
+			}
 		}
 		return nil
 	case kMap:
@@ -198,6 +282,12 @@ func (w *walker) value(n *node, v any, present bool, at string) error {
 			}
 			if err := w.value(n.elem, obj[k], true, kat); err != nil {
 				return err
+			}
+			if n.key == keyNetwork {
+				w.attach(obj, k, true)
+			}
+			if n.elem.kind == kNetwork {
+				w.attach(obj, k, false)
 			}
 		}
 		return nil
