@@ -218,6 +218,10 @@ type Verdict struct {
 	// jsonBody is a Docker request whose body frisket re-encoded, which goes
 	// upstream as application/json whatever the client's headers said.
 	jsonBody bool
+	// upgrade is a Docker request that switches to the rule's protocol,
+	// which frisket carries itself, both ways, so that either side can
+	// finish sending and still be sent to.
+	upgrade bool
 	// status is a refusal's status where it is not 403: 502 for a daemon
 	// that could not say whose an object is.
 	status int

@@ -718,6 +718,12 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(rt.credentialHeader()) == "" {
 			rec.credential = CredentialNone
 		}
+		if v.upgrade {
+			// Not through the proxy, which would end both directions as
+			// soon as either finished sending.
+			i.stream(lw, r.WithContext(context.WithValue(r.Context(), recordKey{}, rec)), ic)
+			return
+		}
 		rt.proxy.ServeHTTP(lw, r.WithContext(context.WithValue(r.Context(), recordKey{}, rec)))
 		return
 	}
@@ -815,9 +821,8 @@ func (rt *route) rewrite(pr *httputil.ProxyRequest) {
 		// dropped whatever headers the client's Connection named, and a
 		// Connection: Content-Type would otherwise send the re-encoded body
 		// with none.
-		if rec, _ := pr.In.Context().Value(recordKey{}).(*record); rec != nil && rec.dockerJSON {
-			pr.Out.Header.Set("Content-Type", "application/json")
-			pr.Out.Header.Del("Content-Encoding")
+		if rec, _ := pr.In.Context().Value(recordKey{}).(*record); rec != nil {
+			rec.dockerHeaders(pr.Out.Header)
 		}
 		return
 	}
@@ -1029,6 +1034,15 @@ type record struct {
 	respBytes atomic.Int64
 }
 
+// dockerHeaders are what a Docker request's headers must say of a body
+// frisket re-encoded.
+func (r *record) dockerHeaders(h http.Header) {
+	if r.dockerJSON {
+		h.Set("Content-Type", "application/json")
+		h.Del("Content-Encoding")
+	}
+}
+
 func (r *record) refuse(reason string) {
 	r.decision, r.reason = DecisionRefused, reason
 }
@@ -1095,6 +1109,15 @@ func (c *countingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	c.rec.respBytes.Add(int64(n))
 	return n, err
+}
+
+// CloseWrite finishes sending on an upgraded connection and leaves it
+// receiving: on TLS, it sends close_notify.
+func (c *countingConn) CloseWrite() error {
+	if cw, ok := c.Conn.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return errors.ErrUnsupported
 }
 
 type countingBody struct {

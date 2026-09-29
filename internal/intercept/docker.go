@@ -356,18 +356,21 @@ func (d *dockerRoute) transport() *http.Transport {
 	return &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			c, err := (&net.Dialer{}).DialContext(ctx, "unix", d.socket)
-			if err != nil {
-				return nil, dialFailed(ctx, err)
-			}
-			// The bare *net.UnixConn, so that an upgraded stream can close
-			// its write side.
-			return c, nil
+			return d.dial(ctx)
 		},
 		DisableCompression: true,
 		IdleConnTimeout:    90 * time.Second,
 		Protocols:          &protocols,
 	}
+}
+
+// dial is a connection to the daemon's socket, and the only way one is made.
+func (d *dockerRoute) dial(ctx context.Context) (*net.UnixConn, error) {
+	c, err := (&net.Dialer{}).DialContext(ctx, "unix", d.socket)
+	if err != nil {
+		return nil, dialFailed(ctx, err)
+	}
+	return c.(*net.UnixConn), nil
 }
 
 // dialFailed is a dial error without the socket's path, which says where on
@@ -559,7 +562,8 @@ func (d *dockerRule) decide(r *http.Request) Verdict {
 		}
 	}
 	r.URL.RawQuery, r.URL.ForceQuery = query, false
-	v := Verdict{Outcome: Admit, Reason: "path", Operation: d.operation, Docker: strings.Join(account, "; "), jsonBody: bodied}
+	v := Verdict{Outcome: Admit, Reason: "path", Operation: d.operation, Docker: strings.Join(account, "; "), jsonBody: bodied,
+		upgrade: d.Upgrade != "" && len(r.Header.Values("Upgrade")) > 0}
 	if len(c.held) > 0 {
 		v.release = c.release
 	}
