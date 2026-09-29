@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -219,4 +220,21 @@ func TestValidNamesAreValidFDNames(t *testing.T) {
 			}
 		}
 	})
+}
+
+// An open's answer comes back as it was sent: the CA, and the relay's
+// destinations in their order.
+func TestAnOpensResponseRoundTrips(t *testing.T) {
+	want := Response{
+		CACert: []byte("the session's CA\n"),
+		Relay:  []string{"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320"},
+	}
+	path := serveOnce(t, func(Request, []*os.File) Response { return want })
+	got, err := Call(context.Background(), path, Request{Op: OpList}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("response = %+v, want %+v", got, want)
+	}
 }

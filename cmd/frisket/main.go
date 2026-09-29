@@ -428,6 +428,11 @@ func runSteering(argv []string) error {
 	fmt.Printf("listeners %s\n", nsnet.FormatSpecs(p.Listeners))
 	fmt.Printf("service %v\n", p.Service)
 	fmt.Printf("mark %#x, route table %d\n", p.Mark, p.RouteTable)
+	if p.HasRelaySets() {
+		fmt.Printf("relay sets inet %s relay4, relay6, filled by steer from a Docker route\n", p.Table)
+	} else {
+		fmt.Println("no relay sets: a session with a Docker route is refused; rebuild the file with this frisket")
+	}
 	for _, part := range []struct {
 		name  string
 		steps []steering.Step

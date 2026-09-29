@@ -20,11 +20,17 @@
 #      line below.
 #   1. DNS first, or a loopback resolver (127.0.0.53, or glibc's 127.0.0.1
 #      default) is caught by the local exemption and never steered.
-#   2. frisket's service address next, because it is assigned to lo -- so it
+#   2. A Docker project's relayed ports, 127.0.0.1:P, [::1]:P and the
+#      project's own address at P, for the same reason: they are local, and
+#      the exemption would hand them to a loopback where nothing listens.
+#      Their sets are empty here; `frisket steer` fills them from what the
+#      daemon answers `open` with, so a session with no Docker route steers
+#      exactly what it steered before the sets existed.
+#   3. frisket's service address next, because it is assigned to lo -- so it
 #      is "local", and the exemption below would otherwise let it through to
 #      nothing.
-#   3. The local exemption, so the sandbox's own loopback still works.
-#   4. Everything else that is TCP.
+#   4. The local exemption, so the sandbox's own loopback still works.
+#   5. Everything else that is TCP.
 #
 # Other UDP is not marked, and in `all` is REJECTED rather than dropped, so a
 # QUIC client fails over to TCP at once instead of hanging (measured).
@@ -101,6 +107,8 @@ let
   steer = ''
     socket transparent 1 return
         meta l4proto { tcp, udp } th dport 53 meta mark set ${m} return
+        ip daddr . tcp dport @relay4 meta mark set ${m} return
+        ip6 daddr . tcp dport @relay6 meta mark set ${m} return
         ip daddr ${svc.v4} meta l4proto tcp meta mark set ${m} return
         ip6 daddr ${svc.v6} meta l4proto tcp meta mark set ${m} return'';
 
@@ -141,9 +149,17 @@ let
         meta mark ${m} oifname != "lo" drop
       }'';
 
+  # The relay's destinations, address and port, one set per family. Only
+  # TCP: a published Docker port is relayed as a stream, and a datagram to one
+  # is left to the sandbox's own loopback, where nothing answers it.
+  relaySets = ''
+    set relay4 { type ipv4_addr . inet_service; }
+      set relay6 { type ipv6_addr . inet_service; }'';
+
   rulesets = {
     all = ''
       table inet ${table} {
+        ${relaySets}
         chain steer {
           type route hook output priority mangle; policy accept;
           ${steer}
@@ -165,6 +181,7 @@ let
     '';
     service = ''
       table inet ${table} {
+        ${relaySets}
         chain steer {
           type route hook output priority mangle; policy accept;
           ${steer}

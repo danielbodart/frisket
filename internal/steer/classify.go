@@ -57,8 +57,10 @@ func (v Verdict) Steered() bool { return v.Decision == Steered }
 // workload chose instead of something the ruleset did.
 //
 // Sound only because no steered TCP connection can legitimately be FOR the
-// listener's address: the ruleset steers loopback only on port 53, and the TCP
-// listener is never on 53 (steering.Plan refuses it). bound must be a concrete
+// listener's address: the ruleset steers loopback only on port 53 and on a
+// Docker project's relayed ports, the TCP listener is never on 53
+// (steering.Plan refuses it), and a session whose relayed port is one of its
+// listeners' is refused at open (serve.Daemon.Open). bound must be a concrete
 // address; a wildcard listener would match every loopback destination, which
 // is why nsnet.Spec refuses one.
 func Classify(bound, dst netip.AddrPort) Verdict {

@@ -32,6 +32,22 @@ type Handlers struct {
 	Authority []byte
 	// CACert is that CA's certificate, PEM: what root puts in the sandbox.
 	CACert []byte
+	// Docker is the session's Docker project, if its policy has a Docker
+	// route, and nil otherwise.
+	Docker *Docker
+}
+
+// Docker is what the daemon must know of a session's Docker route: whose
+// project it is, the address the project's ports are published on, and the
+// destinations the session's ruleset steers to frisket for the relay. The
+// daemon holds sessions of different projects off one address, and hands
+// Relay to steer, which puts it in the ruleset's sets.
+type Docker struct {
+	Project string
+	Address netip.Addr
+	// Relay are 127.0.0.1:P, Address:P and [::1]:P for each of the project's
+	// ports P, in that order.
+	Relay []netip.AddrPort
 }
 
 // DNSHandler answers DNS over both transports.

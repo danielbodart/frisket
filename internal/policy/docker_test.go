@@ -2,10 +2,15 @@ package policy
 
 import (
 	"encoding/json"
+	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/danielbodart/frisket/internal/control"
 )
 
 // dockerPolicy is a session's document with data-lab's Docker route, as
@@ -157,5 +162,58 @@ func TestAQueryCheckIsANameOrAList(t *testing.T) {
 	}
 	if !strings.Contains(string(mustJSON(t, dockerPolicy(t))), `"filters":{"filters":["label"`) {
 		t.Error("a document's filters check was not written as a list")
+	}
+}
+
+// A session reaches each of its project's ports at 127.0.0.1, at the
+// project's own address and at ::1, in that order, port by port; a document
+// with no Docker route steers nothing for a relay.
+func TestRelayDestinationsAreEachPortOnBothLoopbacksAndTheProjectsAddress(t *testing.T) {
+	p := dockerPolicy(t)
+	p.Routes[0].Docker.Ports = []int{64320, 64321}
+	var got []string
+	for _, d := range p.RelayDestinations() {
+		got = append(got, d.String())
+	}
+	want := []string{
+		"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320",
+		"127.0.0.1:64321", "127.1.191.78:64321", "[::1]:64321",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("relay destinations = %v, want %v", got, want)
+	}
+	if got := valid(t).RelayDestinations(); len(got) != 0 {
+		t.Errorf("a document with no Docker route relays %v", got)
+	}
+	p.Routes[0].Docker.Ports = nil
+	if got := p.RelayDestinations(); len(got) != 0 {
+		t.Errorf("a Docker route with no ports relays %v", got)
+	}
+}
+
+// A session's handlers say which project it is, at which address, and what
+// its ruleset steers for the relay: what the daemon keeps projects apart by
+// and answers open with. A session with no Docker route says nothing.
+func TestASessionsHandlersCarryItsDockerProject(t *testing.T) {
+	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2")}
+	log := slog.New(slog.NewJSONHandler(&journal{}, nil))
+	p := dockerPolicy(t)
+	h, err := open(t, &counting{}, "p", p).Handlers(control.Session{Name: "s", Policy: "/p.json", Service: svc}, nil, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Docker == nil {
+		t.Fatal("a session with a Docker route has no Docker project")
+	}
+	if h.Docker.Project != "triptease/data-lab" || h.Docker.Address != netip.MustParseAddr("127.1.191.78") ||
+		!slices.Equal(h.Docker.Relay, p.RelayDestinations()) {
+		t.Errorf("docker = %+v", *h.Docker)
+	}
+	h, err = open(t, &counting{}, "p", valid(t)).Handlers(control.Session{Name: "s", Policy: "/p.json", Service: svc}, nil, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Docker != nil {
+		t.Errorf("a session with no Docker route has %+v", *h.Docker)
 	}
 }

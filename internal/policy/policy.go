@@ -142,6 +142,44 @@ type DockerRoute struct {
 	Bodies map[string]json.RawMessage `json:"bodies,omitempty"`
 }
 
+// dockerRoute is the document's Docker route, or nil. build holds a document
+// to one.
+func (p Policy) dockerRoute() *DockerRoute {
+	for _, r := range p.Routes {
+		if r.Docker != nil {
+			return r.Docker
+		}
+	}
+	return nil
+}
+
+// RelayDestinations are what a session's ruleset steers to frisket for its
+// Docker project's ports: for each port P, in the route's order,
+// 127.0.0.1:P, the project's address at P, and [::1]:P. The address is
+// frisket's own derivation from the project, never taken from the document
+// alone; build refuses a route whose address is not that anyway. Empty
+// without a Docker route.
+func (p Policy) RelayDestinations() []netip.AddrPort {
+	d := p.dockerRoute()
+	if d == nil {
+		return nil
+	}
+	addr := docker.Address(d.Project)
+	out := make([]netip.AddrPort, 0, 3*len(d.Ports))
+	for _, port := range d.Ports {
+		if port < 0 || port > 65535 {
+			continue // refused by build; never a destination
+		}
+		pp := uint16(port)
+		out = append(out,
+			netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), pp),
+			netip.AddrPortFrom(addr, pp),
+			netip.AddrPortFrom(netip.IPv6Loopback(), pp),
+		)
+	}
+	return out
+}
+
 // APIVersions are "1.NN", min to max, and the paths asked with no version.
 type APIVersions struct {
 	Min         string   `json:"min"`
@@ -618,6 +656,13 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 	}
 	closers = append(closers, ic.Close)
 
+	// What the daemon keeps apart and steer steers: the same for every
+	// session under this document.
+	var dock *serve.Docker
+	if d := p.dockerRoute(); d != nil {
+		dock = &serve.Docker{Project: d.Project, Address: docker.Address(d.Project), Relay: p.RelayDestinations()}
+	}
+
 	return serve.PolicyFunc(func(s control.Session, authority []byte, log *slog.Logger) (serve.Handlers, error) {
 		ca, authority, err := sessionCA(hosts, authority)
 		if err != nil {
@@ -657,6 +702,7 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 			DNS:       srv,
 			Authority: authority,
 			CACert:    ca.CertPEM(),
+			Docker:    dock,
 		}, nil
 	}), closers, nil
 }

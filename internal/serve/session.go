@@ -25,6 +25,9 @@ type session struct {
 	info     control.Session
 	restored bool
 	log      *slog.Logger
+	// docker is the session's Docker project, or nil: what another
+	// project's session is held off the address by.
+	docker *Docker
 
 	socks []*nsnet.Sock
 	// meta is the session's record, a sealed memfd stored beside its listeners

@@ -53,6 +53,9 @@
         # kernel refuses, so this passes in the Nix sandbox and means something
         # on a machine where it does not have to.
         doCheck = true;
+        # The ruleset lib.steering writes is loaded by nft, in a namespace of
+        # the test's own, to see a relayed port reach the session's listener.
+        nativeCheckInputs = [ pkgs.nftables ];
 
         meta = {
           description = "Keeps credentials out of sandboxes by adding them on the wire";
@@ -89,7 +92,9 @@
         let pkgs = nixpkgs.legacyPackages.${system}; in
         {
           default = pkgs.mkShell {
-            packages = [ pkgs.go pkgs.gopls pkgs.golangci-lint ];
+            # nft, for the test that loads a session's ruleset in a namespace
+            # of its own; it skips without one.
+            packages = [ pkgs.go pkgs.gopls pkgs.golangci-lint pkgs.nftables ];
             # The same setting the package builds with, so a `go build` in the
             # shell produces the same binary the flake does rather than a
             # dynamically linked one that works here and nowhere else.
@@ -169,6 +174,15 @@
           # frisket's own reader, which is what steer and connect run, and by
           # nft itself, in a network namespace of the build's own so the check
           # has the privilege to ask the kernel without touching anything.
+          #
+          # The relay's sets are declared, and marked after DNS and before the
+          # service address -- and in `all` before the local exemption, which
+          # would otherwise hand a relayed port to a loopback where nothing
+          # listens. And the copies the Go tests load in a namespace are
+          # lib.steering's own, so what they show is what ships; regenerate
+          # one with
+          #   nix eval --raw .#lib.steering --apply 's: (s { set = "all"; }).json' | jq . \
+          #     > internal/steering/testdata/steering-all.json
           steering =
             let
               file = set: pkgs.writeText "steering-${set}.json"
@@ -177,17 +191,35 @@
             pkgs.runCommand "steering"
               { nativeBuildInputs = [ pkg pkgs.nftables pkgs.util-linux pkgs.jq ]; }
               ''
+                fail() { echo "steering $set: $*" >&2; exit 1; }
+                line() { grep -n -F -m1 -- "$1" "$set.nft" | cut -d: -f1; }
                 check() {
-                  frisket steering "$2"
-                  jq -r .ruleset "$2" > "$1.nft"
+                  set=$1
+                  frisket steering "$2" | tee "$set.out"
+                  grep -q '^relay sets inet frisket relay4, relay6' "$set.out" || fail "frisket steering does not print the relay sets"
+                  jq -r .ruleset "$2" > "$set.nft"
+                  grep -q '^  set relay4 { type ipv4_addr . inet_service; }$' "$set.nft" || fail "no relay4 set"
+                  grep -q '^  set relay6 { type ipv6_addr . inet_service; }$' "$set.nft" || fail "no relay6 set"
+                  dns=$(line 'th dport 53 meta mark set')
+                  r4=$(line 'ip daddr . tcp dport @relay4 meta mark set')
+                  r6=$(line 'ip6 daddr . tcp dport @relay6 meta mark set')
+                  svc=$(line 'ip daddr 192.0.2.2 ')
+                  [ -n "$dns" ] && [ -n "$r4" ] && [ -n "$r6" ] && [ -n "$svc" ] || fail "a mark is missing"
+                  [ "$dns" -lt "$r4" ] && [ "$r4" -lt "$r6" ] && [ "$r6" -lt "$svc" ] ||
+                    fail "the relay is not marked after DNS ($dns) and before the service address ($svc): $r4, $r6"
+                  if [ "$set" = all ]; then
+                    local=$(line 'fib daddr type local return')
+                    [ -n "$local" ] && [ "$r6" -lt "$local" ] || fail "the relay is not marked before the local exemption ($local)"
+                  fi
+                  cmp <(jq -S . "$2") <(jq -S . "$3") || fail "$3 is not what lib.steering writes"
                   if unshare -rn true 2>/dev/null; then
-                    unshare -rn nft -c -f "$1.nft"
+                    unshare -rn nft -c -f "$set.nft"
                   else
-                    echo "no user namespace in this build sandbox: nft -c skipped for $1" >&2
+                    echo "no user namespace in this build sandbox: nft -c skipped for $set" >&2
                   fi
                 }
-                check all ${file "all"}
-                check service ${file "service"}
+                check all ${file "all"} ${./internal/steering/testdata/steering-all.json}
+                check service ${file "service"} ${./internal/steering/testdata/steering-service.json}
                 touch $out
               '';
 

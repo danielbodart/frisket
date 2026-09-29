@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -122,6 +123,10 @@ type fakeRoot struct {
 	rules   []ruleInfo
 	routes  []routeInfo
 	mounted request
+	// relay is what the fake daemon answers open with, and loaded the
+	// ruleset the helper was given.
+	relay  []string
+	loaded string
 }
 
 // The steps' names, as the tests below spell them.
@@ -155,6 +160,8 @@ func (f *fakeRoot) Do(_ context.Context, req, result any) error {
 	switch r.Op {
 	case opMount:
 		f.mounted = r
+	case opRuleset:
+		f.loaded = r.Ruleset
 	case opLinks:
 		*result.(*[]string) = f.links
 	case opRules:
@@ -190,7 +197,7 @@ func (f *fakeRoot) steerer() *Steerer {
 			if f.fail == "daemon "+req.Op {
 				return control.Response{}, errors.New("refused")
 			}
-			return control.Response{Sessions: f.held, Closed: true, CACert: []byte("the session's CA\n")}, nil
+			return control.Response{Sessions: f.held, Closed: true, CACert: []byte("the session's CA\n"), Relay: f.relay}, nil
 		},
 	}
 }
@@ -354,5 +361,98 @@ func TestConnectRefusesToRunOutOfTurn(t *testing.T) {
 		if strings.Join(c.f.steps, ", ") != strings.Join(c.want, ", ") {
 			t.Errorf("%s: steps = %v, want %v", c.name, c.f.steps, c.want)
 		}
+	}
+}
+
+// A ruleset with the relay's sets, as lib.steering writes them.
+const relayRuleset = `table inet frisket {
+  set relay4 { type ipv4_addr . inet_service; }
+  set relay6 { type ipv6_addr . inet_service; }
+  chain steer {
+  }
+}
+`
+
+// The relay's destinations the daemon answers open with go into the
+// ruleset's sets in the one load that brings the rules, each family in its
+// own set; with none, the ruleset loaded is the file's, byte for byte.
+func TestSteerFillsTheRelaySetsInTheSameLoadAsTheRules(t *testing.T) {
+	rootsPath, _ := roots(t)
+	sess := Session{Name: "s", Policy: "/etc/frisket/policies/research.json", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}
+	file := allFile()
+	file.Ruleset = relayRuleset
+	p, err := file.Plan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRoot{relay: []string{
+		"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320",
+		"127.0.0.1:64321", "127.1.191.78:64321", "[::1]:64321",
+	}}
+	if err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, sess); err != nil {
+		t.Fatal(err)
+	}
+	want := relayRuleset +
+		"add element inet frisket relay4 { 127.0.0.1 . 64320, 127.1.191.78 . 64320, 127.0.0.1 . 64321, 127.1.191.78 . 64321 }\n" +
+		"add element inet frisket relay6 { ::1 . 64320, ::1 . 64321 }\n"
+	if f.loaded != want {
+		t.Errorf("loaded\n%s\nwant\n%s", f.loaded, want)
+	}
+
+	for _, rs := range []string{relayRuleset, ruleset} {
+		file.Ruleset = rs
+		p, err := file.Plan()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := &fakeRoot{}
+		if err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, sess); err != nil {
+			t.Fatal(err)
+		}
+		if f.loaded != rs {
+			t.Errorf("with no relay, loaded\n%q\nwant the file's\n%q", f.loaded, rs)
+		}
+	}
+}
+
+// A steering file from before the relay steers none of a Docker project's
+// ports, so a session that has some is refused: nothing is loaded, and the
+// session the daemon opened is closed.
+func TestSteerRefusesARelayWithAFileThatHasNoRelaySets(t *testing.T) {
+	rootsPath, _ := roots(t)
+	sess := Session{Name: "s", Policy: "/etc/frisket/policies/research.json", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}
+	p, _ := allFile().Plan()
+	f := &fakeRoot{relay: []string{"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320"}}
+	err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, sess)
+	if err == nil || !strings.Contains(err.Error(), "the steering file has no relay sets; rebuild it with this frisket") ||
+		!strings.Contains(err.Error(), "the session was closed") {
+		t.Errorf("err = %v", err)
+	}
+	if want := []string{"listeners", "daemon open", routing, "daemon close"}; !slices.Equal(f.steps, want) {
+		t.Errorf("steps = %v, want %v", f.steps, want)
+	}
+}
+
+// What the daemon answers is parsed before it goes into text nft reads as
+// root: anything but an address and a port is refused, not pasted.
+func TestARelayDestinationIsParsedNotPasted(t *testing.T) {
+	file := allFile()
+	file.Ruleset = relayRuleset
+	p, err := file.Plan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{
+		"127.0.0.1:64320 }; flush ruleset; add element inet frisket relay4 { 1.2.3.4 . 1",
+		"127.0.0.1", "localhost:64320", "[fe80::1%eth0]:64320", "127.0.0.1:0", "",
+	} {
+		if got, err := p.WithRelay([]string{bad}); err == nil {
+			t.Errorf("%q was loaded as\n%s", bad, got)
+		}
+	}
+	// A mapped v4 address is v4, in the v4 set.
+	got, err := p.WithRelay([]string{"[::ffff:127.1.191.78]:64320"})
+	if err != nil || !strings.HasSuffix(got, "add element inet frisket relay4 { 127.1.191.78 . 64320 }\n") {
+		t.Errorf("a mapped address: %v\n%s", err, got)
 	}
 }

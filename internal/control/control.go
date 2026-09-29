@@ -116,6 +116,11 @@ type Response struct {
 	// CACert is the session's CA certificate, PEM (OpOpen): what root puts in
 	// the sandbox for it to trust. Public; the key never leaves the daemon.
 	CACert []byte `json:"caCert,omitempty"`
+	// Relay are the destinations the session's ruleset is to steer to
+	// frisket for its Docker project's ports (OpOpen), each "addr:port" as
+	// netip.AddrPort spells it: "127.0.0.1:64320", "[::1]:64320". Empty for a
+	// session with no Docker route.
+	Relay []string `json:"relay,omitempty"`
 }
 
 // ValidName refuses a name that cannot be an fd store name or a log field:

@@ -177,11 +177,14 @@ func (d *Daemon) handle(c *net.UnixConn) {
 			resp.Error = "open without a session"
 			break
 		}
-		cert, err := d.Open(*req.Session, files)
+		cert, relay, err := d.Open(*req.Session, files)
 		if err != nil {
 			resp.Error = err.Error()
 		}
 		resp.CACert = cert
+		for _, r := range relay {
+			resp.Relay = append(resp.Relay, r.String())
+		}
 	case control.OpClose:
 		control.CloseAll(files)
 		closed, err := d.Close(req.Name)
@@ -210,8 +213,9 @@ func (d *Daemon) handle(c *net.UnixConn) {
 // crash could lose.
 //
 // Returns the certificate of the session's CA, made here, for the caller to
-// put in the sandbox.
-func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, err error) {
+// put in the sandbox, and the destinations its ruleset is to steer to frisket
+// for its Docker project's ports, which are none without a Docker route.
+func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, relay []netip.AddrPort, err error) {
 	defer func() {
 		if err != nil {
 			control.CloseAll(files)
@@ -219,11 +223,11 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, er
 		}
 	}()
 	if err := info.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	policy, release, err := d.Policies.Open(info.Policy)
 	if err != nil {
-		return nil, fmt.Errorf("session %s: %w", info.Name, err)
+		return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
 	}
 	// Released here unless a session came to hold it.
 	held := false
@@ -234,20 +238,20 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, er
 	}()
 	specs, err := parseSpecs(info.Listeners)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(files) != len(specs) {
-		return nil, fmt.Errorf("session %s: %d descriptors for %d listeners", info.Name, len(files), len(specs))
+		return nil, nil, fmt.Errorf("session %s: %d descriptors for %d listeners", info.Name, len(files), len(specs))
 	}
 
 	d.mu.Lock()
 	if d.sessions == nil {
 		d.mu.Unlock()
-		return nil, errors.New("frisket is stopping")
+		return nil, nil, errors.New("frisket is stopping")
 	}
 	if _, dup := d.sessions[info.Name]; dup {
 		d.mu.Unlock()
-		return nil, fmt.Errorf("session %s is already open", info.Name)
+		return nil, nil, fmt.Errorf("session %s is already open", info.Name)
 	}
 	// Reserved while it is being built, so two opens of one name cannot both
 	// get past the check above.
@@ -269,31 +273,43 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, er
 	infos := make([]sockInfo, len(specs))
 	for i, spec := range specs {
 		if infos[i], err = inspect(files[i]); err != nil {
-			return nil, fmt.Errorf("session %s: %s: %w", info.Name, spec, err)
+			return nil, nil, fmt.Errorf("session %s: %s: %w", info.Name, spec, err)
 		}
 		if err := infos[i].matches(spec); err != nil {
-			return nil, fmt.Errorf("session %s: %w", info.Name, err)
+			return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
 		}
 	}
 	if err := sameForeignNamespace(specs, infos, d.own); err != nil {
-		return nil, fmt.Errorf("session %s: %w", info.Name, err)
+		return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
 	}
 
 	// The handlers before the record, because the record carries the CA the
 	// policy makes with them.
 	h, err := d.handlers(info, policy, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	// Refused before anything is stored, as everything above is; serve
+	// asks again under the lock that makes a session live, so two opens of
+	// different projects racing for one address cannot both get in.
+	if err := relayPorts(info.Name, specs, h.Docker); err != nil {
+		return nil, nil, err
+	}
+	d.mu.Lock()
+	err = d.addressHeld(info.Name, h.Docker)
+	d.mu.Unlock()
+	if err != nil {
+		return nil, nil, err
 	}
 	meta, err := newRecord(info, h.Authority)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	stored := false
 	if d.Notify != nil {
 		if err := d.Notify.Store(info.Name, append(append([]*os.File{}, files...), meta)...); err != nil {
 			meta.Close()
-			return nil, fmt.Errorf("session %s: storing its listeners with systemd: %w", info.Name, err)
+			return nil, nil, fmt.Errorf("session %s: storing its listeners with systemd: %w", info.Name, err)
 		}
 		stored = true
 	}
@@ -305,16 +321,16 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, er
 		if stored {
 			_ = d.Notify.Remove(info.Name)
 		}
-		return nil, fmt.Errorf("session %s: %w", info.Name, err)
+		return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
 	}
-	s := &session{info: info, log: d.Log, socks: socks, meta: meta, release: release}
+	s := &session{info: info, log: d.Log, docker: h.Docker, socks: socks, meta: meta, release: release}
 	held = true
 	if err := d.serve(s, h); err != nil {
 		s.closeAll(closeWait)
 		if stored {
 			_ = d.Notify.Remove(info.Name)
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	d.Log.Info("session opened",
 		"session", info.Name,
@@ -324,7 +340,7 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, er
 		"listeners", info.Listeners,
 		"stored", stored,
 	)
-	return h.CACert, nil
+	return h.CACert, relayOf(h.Docker), nil
 }
 
 // handlers asks the policy for the session's handlers and its CA.
@@ -342,12 +358,66 @@ func (d *Daemon) handlers(info control.Session, policy Policy, authority []byte)
 	return h, nil
 }
 
+// relayOf is how Open answers with a session's relay destinations.
+func relayOf(dk *Docker) []netip.AddrPort {
+	if dk == nil {
+		return nil
+	}
+	return dk.Relay
+}
+
+// relayPorts refuses a relay destination on a port the session's own
+// listeners are on, or on DNS's. The ruleset would steer a connection to the
+// listener's own address, which steer.Classify refuses as frisket's own, or
+// take DNS's port, whose case in Dispatch comes first: either way a port the
+// project named would never reach its relay, and Classify's soundness rests
+// on the first never being steered.
+func relayPorts(name string, specs []nsnet.Spec, dk *Docker) error {
+	if dk == nil {
+		return nil
+	}
+	for _, r := range dk.Relay {
+		if r.Port() == DNSPort {
+			return fmt.Errorf("session %s: docker port %d is DNS's, which every session steers to frisket's resolver", name, r.Port())
+		}
+		for _, spec := range specs {
+			if spec.Addr.Port() == r.Port() {
+				return fmt.Errorf("session %s: docker port %d is the port of its listener %s", name, r.Port(), spec)
+			}
+		}
+	}
+	return nil
+}
+
+// addressHeld refuses a Docker project whose address a live or restored
+// session of another project holds (the contract's I10): a relay reaches
+// what is published on its own project's address, and two projects on one
+// address would reach each other's. Sessions of one project share it, as
+// they share its objects. d.mu is held.
+func (d *Daemon) addressHeld(name string, dk *Docker) error {
+	if dk == nil {
+		return nil
+	}
+	for other, s := range d.sessions {
+		if s == nil || other == name || s.docker == nil {
+			continue
+		}
+		if s.docker.Address == dk.Address && s.docker.Project != dk.Project {
+			return fmt.Errorf("session %s: docker project %s is at %s: address held by another project, %s, whose session %s is open", name, dk.Project, dk.Address, s.docker.Project, other)
+		}
+	}
+	return nil
+}
+
 // serve starts the session with its handlers.
 func (d *Daemon) serve(s *session, h Handlers) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.sessions == nil {
 		return errors.New("frisket is stopping")
+	}
+	if err := d.addressHeld(s.info.Name, h.Docker); err != nil {
+		return err
 	}
 	s.start(d.ctx, Dispatch{Service: s.info.Service, Handlers: h}, d.MaxConns, d.dst)
 	d.sessions[s.info.Name] = s
@@ -530,12 +600,17 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 		meta.Close()
 		return err
 	}
+	if err := relayPorts(name, specs, h.Docker); err != nil {
+		control.CloseAll(ordered)
+		meta.Close()
+		return err
+	}
 	socksHeld, err := adoptSockets(specs, ordered, d.own)
 	if err != nil {
 		meta.Close()
 		return err
 	}
-	s := &session{info: info, restored: true, log: d.Log, socks: socksHeld, meta: meta, release: release}
+	s := &session{info: info, restored: true, log: d.Log, docker: h.Docker, socks: socksHeld, meta: meta, release: release}
 	held = true
 	d.mu.Lock()
 	d.sessions[name] = nil

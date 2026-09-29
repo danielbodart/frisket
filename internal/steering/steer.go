@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/nsnet"
@@ -172,7 +175,11 @@ func (s *Steerer) Steer(ctx context.Context, netns string, p *Plan, sess Session
 	if err := in.Do(ctx, request{Op: opApply, Steps: routing}, nil); err != nil {
 		return closeOnFailure("installing the policy routing", err)
 	}
-	if err := in.Do(ctx, request{Op: opRuleset, Nft: nft, Ruleset: p.Ruleset}, nil); err != nil {
+	ruleset, err := p.WithRelay(opened.Relay)
+	if err != nil {
+		return closeOnFailure("loading the ruleset", err)
+	}
+	if err := in.Do(ctx, request{Op: opRuleset, Nft: nft, Ruleset: ruleset}, nil); err != nil {
 		return closeOnFailure("loading the ruleset", err)
 	}
 
@@ -188,6 +195,64 @@ func (s *Steerer) Steer(ctx context.Context, netns string, p *Plan, sess Session
 	}
 	return nil
 }
+
+// ErrNoRelaySets is a steering file from before the relay, asked to steer a
+// session that has one.
+var ErrNoRelaySets = errors.New("the steering file has no relay sets; rebuild it with this frisket")
+
+// WithRelay is the ruleset with the relay's destinations added to its sets,
+// so one `nft -f` loads the rules and what they steer together, and nothing
+// is ever loaded that steers half of it. With no destinations it is the
+// ruleset, byte for byte. Each destination is parsed, not pasted: it goes
+// into text nft reads as root in the sandbox.
+func (p *Plan) WithRelay(relay []string) (string, error) {
+	if len(relay) == 0 {
+		return p.Ruleset, nil
+	}
+	if !p.HasRelaySets() {
+		return "", ErrNoRelaySets
+	}
+	var v4, v6 []string
+	for _, r := range relay {
+		ap, err := netip.ParseAddrPort(r)
+		if err != nil || ap.Addr().Zone() != "" || ap.Port() == 0 {
+			return "", fmt.Errorf("relay destination %q from frisket is not an address and port", r)
+		}
+		a := ap.Addr().Unmap()
+		elem := fmt.Sprintf("%s . %d", a, ap.Port())
+		if a.Is4() {
+			v4 = append(v4, elem)
+		} else {
+			v6 = append(v6, elem)
+		}
+	}
+	var b strings.Builder
+	b.WriteString(p.Ruleset)
+	if !strings.HasSuffix(p.Ruleset, "\n") {
+		b.WriteString("\n")
+	}
+	for _, set := range []struct {
+		name  string
+		elems []string
+	}{{"relay4", v4}, {"relay6", v6}} {
+		if len(set.elems) > 0 {
+			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", p.Table, set.name, strings.Join(set.elems, ", "))
+		}
+	}
+	return b.String(), nil
+}
+
+// HasRelaySets is whether the ruleset declares the relay's two sets, as
+// lib.steering has since the relay: a file built before it steers no Docker
+// port, and a session that has some is refused rather than left without them.
+func (p *Plan) HasRelaySets() bool {
+	return relay4Set.MatchString(p.Ruleset) && relay6Set.MatchString(p.Ruleset)
+}
+
+var (
+	relay4Set = regexp.MustCompile(`(?m)^\s*set relay4 \{\s*type ipv4_addr \. inet_service;`)
+	relay6Set = regexp.MustCompile(`(?m)^\s*set relay6 \{\s*type ipv6_addr \. inet_service;`)
+)
 
 func family(v6 bool) string {
 	if v6 {

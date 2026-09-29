@@ -25,6 +25,20 @@ const roleInside = "frisket-test-inside"
 const exitUnprivileged = 77
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 2 && os.Args[1] == roleRelay {
+		if err := loUp(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, syscall.EPERM) {
+				os.Exit(exitUnprivileged)
+			}
+			os.Exit(1)
+		}
+		if err := relayInside(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == roleInside {
 		if err := loUp(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -46,7 +60,14 @@ func TestMain(m *testing.M) {
 // as in order, in a real namespace: the requests go through Serve as JSON, as
 // they do from the helper.
 func TestTheStepsAreWhatConnectChecksFor(t *testing.T) {
-	cmd := exec.Command(os.Args[0], roleInside)
+	runInside(t, roleInside)
+}
+
+// runInside re-runs the test binary as uid 0 of a user and network namespace
+// of its own, in role, and fails the test with what it said if it fails.
+func runInside(t *testing.T, role ...string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], role...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
