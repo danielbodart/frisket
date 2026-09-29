@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
+
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/relay"
@@ -226,6 +228,32 @@ func TestASessionsHandlersCarryItsDockerProject(t *testing.T) {
 	}
 	if h.Docker != nil {
 		t.Errorf("a session with no Docker route has %+v", *h.Docker)
+	}
+}
+
+// A built session with data-lab's route answers data-lab's names with its
+// address, though its allowlist names only the route's host, and asks the
+// upstream nothing; another project's name is refused as any name is.
+func TestADockerSessionAnswersItsOwnNames(t *testing.T) {
+	up := &counting{}
+	svc := []netip.Addr{netip.MustParseAddr("192.0.2.2")}
+	h, err := open(t, up, "p", dockerPolicy(t)).Handlers(control.Session{Name: "s", Policy: "/p.json", Service: svc}, nil, slog.New(slog.NewJSONHandler(&journal{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"data-lab.internal.", "Data-Lab.triptease.internal."} {
+		m := ask(t, h, name)
+		if len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{127, 1, 191, 78} {
+			t.Errorf("%s answered %+v, want 127.1.191.78", name, m.Answers)
+		}
+	}
+	if m := ask(t, h, "finance-api.internal."); m.RCode != dnsmessage.RCodeNameError {
+		t.Errorf("another project's name answered %v", m.RCode)
+	}
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	if len(up.asked) != 0 {
+		t.Errorf("upstream was asked %v", up.asked)
 	}
 }
 

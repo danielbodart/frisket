@@ -662,8 +662,16 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 	dr := p.dockerRoute()
 	var dock *serve.Docker
 	var ports []uint16
+	var names map[string]netip.Addr
 	if dr != nil {
 		dock = &serve.Docker{Project: dr.Project, Address: docker.Address(dr.Project), Relay: p.RelayDestinations()}
+		// The session's own names, answered with the project's address --
+		// frisket's derivation, which build has already held the document's
+		// to.
+		names = make(map[string]netip.Addr, len(dr.Names))
+		for _, n := range dr.Names {
+			names[dns.Normalize(n)] = dock.Address
+		}
 		for _, port := range dr.Ports {
 			ports = append(ports, uint16(port)) // held between 1024 and 65535 by dockerRoute
 		}
@@ -690,6 +698,7 @@ func build(name string, p Policy, d Deps, up dns.Exchanger) (_ serve.Policy, clo
 			Allow:     allow,
 			Intercept: icpt,
 			Service:   s.Service,
+			Names:     names,
 			Upstream:  up,
 			Resolved:  resolved,
 			Log:       log,

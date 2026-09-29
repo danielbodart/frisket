@@ -633,6 +633,9 @@ frisket answers every query it is given. A name on the session's allowlist that
 is intercepted resolves to the service address; a name that is allowed but not
 intercepted is resolved upstream and returned; a name that is not allowed is
 answered NXDOMAIN without an upstream lookup, so it cannot leak through DNS.
+A session's own Docker names, and nothing else under `.internal`, are answered
+first, before the allowlist, with the project's address: logged
+`decision=local`, never asked upstream and never recorded for egress.
 
 NXDOMAIN and not REFUSED, because musl-based programs (Alpine, and static
 binaries built on it) treat REFUSED as a hard failure and stop walking the

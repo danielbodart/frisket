@@ -41,6 +41,7 @@ const (
 const (
 	DecisionResolved    = "resolved"
 	DecisionIntercepted = "intercepted"
+	DecisionLocal       = "local"
 	DecisionRefused     = "refused"
 	DecisionDropped     = "dropped"
 	DecisionFailed      = "failed"
@@ -69,6 +70,12 @@ type Config struct {
 	// answers AAAA.
 	Service    []netip.Addr
 	ServiceTTL time.Duration
+	// Names are the session's own names -- its Docker project's .internal
+	// names -- each answered with its project's IPv4 address, before the
+	// allowlist and never upstream. Only an exact match is: frisket does not
+	// fence the rest of .internal, which holds names that are not the
+	// project's, like metadata.google.internal.
+	Names map[string]netip.Addr
 
 	Upstream Exchanger
 	Resolved Recorder
@@ -118,6 +125,18 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("dns: service address %v is not a plain address", a)
 		}
 	}
+	names := make(map[string]netip.Addr, len(cfg.Names))
+	for n, a := range cfg.Names {
+		norm := Normalize(n)
+		if !ValidQueryName(norm) {
+			return nil, fmt.Errorf("dns: session name %q is not a valid name", n)
+		}
+		if !a.Is4() {
+			return nil, fmt.Errorf("dns: session name %s: %v is not an IPv4 address", norm, a)
+		}
+		names[norm] = a
+	}
+	cfg.Names = names
 	if cfg.ServiceTTL <= 0 {
 		cfg.ServiceTTL = DefaultServiceTTL
 	}
@@ -365,6 +384,15 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 		l.refuse("invalid name", dnsmessage.RCodeNameError)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
+	// THE SESSION'S OWN NAMES ARE ANSWERED HERE, before the allowlist and
+	// not by adding to it: the allowlist feeds the upstream lookup and
+	// egress's resolved set, and these names must reach neither. The address
+	// is loopback, reached through frisket's relay, and egress never serves
+	// it, so nothing is recorded. Any other name, .internal or not, carries
+	// on as it always has.
+	if a, ok := s.cfg.Names[name]; ok {
+		return s.reply(h, &q, l, s.local(q, a, l), nil, edns, limit)
+	}
 	// NOT ALLOWED MEANS NO UPSTREAM LOOKUP. A refused name must not leave the
 	// host at all, or DNS is an exfiltration channel with a refusal on top.
 	//
@@ -428,6 +456,19 @@ func (s *Server) intercept(q dnsmessage.Question, l *line) []dnsmessage.Resource
 	// Any other type -- HTTPS, TXT, MX -- is NOERROR with no records: the name
 	// exists, there is just nothing of that type. A client falls back to A.
 	return out
+}
+
+// local answers one of the session's own names with its project's address.
+// Any type but A -- AAAA included, as the address is IPv4 only -- is NOERROR
+// with no records, as intercept answers.
+func (s *Server) local(q dnsmessage.Question, a netip.Addr, l *line) []dnsmessage.Resource {
+	l.decision, l.rcode = DecisionLocal, dnsmessage.RCodeSuccess
+	if q.Type != dnsmessage.TypeA {
+		return nil
+	}
+	l.answers = append(l.answers, a.String())
+	hdr := dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: uint32(s.cfg.ServiceTTL / time.Second)}
+	return []dnsmessage.Resource{{Header: hdr, Body: &dnsmessage.AResource{A: a.As4()}}}
 }
 
 // reply builds the answer. Everything sent goes through dnsmessage's builder;

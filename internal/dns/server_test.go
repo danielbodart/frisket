@@ -326,6 +326,145 @@ func TestAnInterceptedNameMustAlsoBeAllowed(t *testing.T) {
 	expect(t, line, map[string]any{"decision": DecisionRefused, "reason": "not allowed"})
 }
 
+// dataLab is a session's own names, as its Docker route gives them.
+var dataLab = netip.MustParseAddr("127.1.191.78")
+
+func withNames(c *Config) {
+	c.Names = map[string]netip.Addr{"data-lab.internal": dataLab, "data-lab.triptease.internal": dataLab}
+}
+
+// failingUpstream fails the test if it is asked anything.
+type failingUpstream struct{ t testing.TB }
+
+func (f failingUpstream) Exchange(context.Context, dnsmessage.Question) (*dnsmessage.Message, Trace, error) {
+	f.t.Errorf("upstream was asked")
+	return nil, Trace{}, errors.New("not to be asked")
+}
+
+// A SESSION'S OWN NAMES ARE ITS PROJECT'S ADDRESS, answered by frisket before
+// the allowlist -- which here covers neither -- without an upstream exchange,
+// and without entering the resolved set: the address is loopback, reached
+// through the relay, never egress.
+func TestASessionsOwnNamesAreItsProjectsAddressAnsweredLocally(t *testing.T) {
+	f := newFixture(t, func(c *Config) { withNames(c); c.Upstream = failingUpstream{t} })
+	for _, name := range []string{"data-lab.internal.", "data-lab.triptease.internal.", "Data-Lab.TripTease.Internal."} {
+		m, line := f.ask(t, query(t, 3, name, dnsmessage.TypeA, false))
+		if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 1 {
+			t.Fatalf("%s: reply = %+v", name, m)
+		}
+		a, ok := m.Answers[0].Body.(*dnsmessage.AResource)
+		if !ok || netip.AddrFrom4(a.A) != dataLab || m.Answers[0].Header.TTL != uint32(DefaultServiceTTL/time.Second) {
+			t.Errorf("%s: answer = %+v", name, m.Answers[0])
+		}
+		if m.Answers[0].Header.Name.String() != name {
+			t.Errorf("%s: answer is for %s", name, m.Answers[0].Header.Name)
+		}
+		expect(t, line, map[string]any{"decision": DecisionLocal, "rcode": "Success", "name": Normalize(name)})
+		if got, _ := line["answers"].([]any); len(got) != 1 || got[0] != dataLab.String() {
+			t.Errorf("%s: answers = %v", name, line["answers"])
+		}
+		if _, ok := line["upstream"]; ok {
+			t.Errorf("%s: line says it went upstream: %v", name, line)
+		}
+	}
+	for _, typ := range []dnsmessage.Type{dnsmessage.TypeAAAA, dnsmessage.TypeHTTPS, dnsmessage.TypeTXT} {
+		m, line := f.ask(t, query(t, 4, "data-lab.internal.", typ, false))
+		if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 0 {
+			t.Errorf("%v: reply = %+v, want NOERROR with no records", typ, m)
+		}
+		expect(t, line, map[string]any{"decision": DecisionLocal, "rcode": "Success"})
+	}
+	if recs := f.rec.all(); len(recs) != 0 {
+		t.Errorf("a session's own name was recorded: %+v", recs)
+	}
+}
+
+// A NAME IS MATCHED HOWEVER IT WAS GIVEN: New normalises the keys of Names,
+// so one given mixed-case and fully qualified is still the session's own.
+func TestNewNormalisesTheSessionsOwnNames(t *testing.T) {
+	f := newFixture(t, func(c *Config) {
+		c.Names = map[string]netip.Addr{"Data-Lab.Internal.": dataLab}
+		c.Upstream = failingUpstream{t}
+	})
+	m, line := f.ask(t, query(t, 3, "data-lab.internal.", dnsmessage.TypeA, false))
+	if len(m.Answers) != 1 {
+		t.Fatalf("reply = %+v", m)
+	}
+	if a, ok := m.Answers[0].Body.(*dnsmessage.AResource); !ok || netip.AddrFrom4(a.A) != dataLab {
+		t.Errorf("answer = %+v", m.Answers[0])
+	}
+	expect(t, line, map[string]any{"decision": DecisionLocal, "rcode": "Success"})
+}
+
+// ONLY THE SESSION'S OWN NAMES ARE: another project's, or one under the
+// session's own, is handled exactly as any name -- refused when not allowed,
+// resolved upstream under "*" -- and .internal is not fenced, so
+// metadata.google.internal is still intercepted when a route has it.
+func TestOnlyASessionsOwnNamesAreAnsweredLocally(t *testing.T) {
+	others := []string{"finance-api.internal.", "x.data-lab.internal.", "data-lab.other.internal.", "internal."}
+	f := newFixture(t, withNames)
+	for _, name := range others {
+		m, line := f.ask(t, query(t, 5, name, dnsmessage.TypeA, false))
+		if m.RCode != dnsmessage.RCodeNameError || len(m.Answers) != 0 {
+			t.Errorf("%s: reply = %+v, want NXDOMAIN", name, m)
+		}
+		expect(t, line, map[string]any{"decision": DecisionRefused, "reason": "not allowed", "rcode": "NameError"})
+	}
+	if n := f.up.count(); n != 0 {
+		t.Errorf("refused names caused %d upstream lookups", n)
+	}
+
+	f = newFixture(t, func(c *Config) {
+		withNames(c)
+		c.Allow = MustMatcher("*")
+		c.Intercept = MustMatcher("metadata.google.internal")
+	})
+	for _, name := range others {
+		_, line := f.ask(t, query(t, 6, name, dnsmessage.TypeA, false))
+		expect(t, line, map[string]any{"decision": DecisionResolved, "upstream": "192.0.2.53:53"})
+	}
+	if n := f.up.count(); n != len(others) {
+		t.Errorf("upstream was asked %d times under *, want %d", n, len(others))
+	}
+	m, line := f.ask(t, query(t, 7, "metadata.google.internal.", dnsmessage.TypeA, false))
+	expect(t, line, map[string]any{"decision": DecisionIntercepted})
+	if len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != service[0].As4() {
+		t.Errorf("metadata.google.internal answered %+v, want the service address", m.Answers)
+	}
+}
+
+// A session without names -- no Docker route, or one whose label is too long
+// to leave any -- answers every .internal name as it always has.
+func TestWithoutNamesEveryInternalNameIsAnsweredAsBefore(t *testing.T) {
+	for label, names := range map[string]map[string]netip.Addr{"no Docker route": nil, "a route with no names": {}} {
+		f := newFixture(t, func(c *Config) { c.Names = names; c.Allow = MustMatcher("*") })
+		for _, name := range []string{"data-lab.internal.", "data-lab.triptease.internal."} {
+			_, line := f.ask(t, query(t, 8, name, dnsmessage.TypeA, false))
+			expect(t, line, map[string]any{"decision": DecisionResolved})
+		}
+		f = newFixture(t, func(c *Config) { c.Names = names })
+		_, line := f.ask(t, query(t, 9, "data-lab.internal.", dnsmessage.TypeA, false))
+		if line["decision"] != DecisionRefused {
+			t.Errorf("%s: %v", label, line)
+		}
+	}
+}
+
+// A name is held to what a query could ask, and its address to IPv4: the
+// project's address is never IPv6.
+func TestNewRefusesANameItCouldNeverAnswer(t *testing.T) {
+	for label, names := range map[string]map[string]netip.Addr{
+		"an IPv6 address": {"data-lab.internal": netip.MustParseAddr("::1")},
+		"no address":      {"data-lab.internal": {}},
+		"an invalid name": {"data lab.internal": dataLab},
+	} {
+		_, err := New(Config{Names: names, Upstream: failingUpstream{t}, Resolved: &fakeRecorder{}, Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
+		if err == nil {
+			t.Errorf("%s was accepted", label)
+		}
+	}
+}
+
 // OTTERGATE'S AUDIT-LOG BUG. One 14-byte wire label "api.github.com" -- not
 // three labels -- is what ottergate's hand-rolled parser turned into the name
 // api.github.com, which matched an exact allowlist entry and was logged as that

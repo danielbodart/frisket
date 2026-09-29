@@ -364,6 +364,10 @@ the project's own running containers publishes it there. The session's
 names, `<label>.internal` and `<label>.<owner>.internal`, resolve to that
 address in its DNS, before the allowlist; the rest of `.internal`, such as
 `metadata.google.internal` and `docker.frisket.internal`, resolves as before.
+Its own names are logged `decision=local`, never asked upstream and never
+recorded for egress. Under `allow = ["*"]`, another project's name may be
+answered by the host's resolver from `/etc/hosts`, but its address is not
+steered and egress refuses loopback, so the session cannot reach it.
 A name equal to or under `frisket.internal` or `google.internal` is never
 generated, and a document whose names equal or fall under one of its own
 route hosts does not load. The names say `internal`, not `docker`, because
