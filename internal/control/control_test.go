@@ -227,7 +227,7 @@ func TestValidNamesAreValidFDNames(t *testing.T) {
 func TestAnOpensResponseRoundTrips(t *testing.T) {
 	want := Response{
 		CACert: []byte("the session's CA\n"),
-		Relay:  []string{"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320"},
+		Relay:  []string{"127.0.0.1:64320", "127.101.170.171:64320", "[::1]:64320"},
 	}
 	path := serveOnce(t, func(Request, []*os.File) Response { return want })
 	got, err := Call(context.Background(), path, Request{Op: OpList}, nil)

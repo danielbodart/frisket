@@ -91,12 +91,12 @@ func alpns(t *testing.T, fn func(t *testing.T, alpn []string)) {
 func TestAnExecsOutputArrivesAfterItsClientHasFinishedSending(t *testing.T) {
 	for _, tc := range []struct{ name, path, body string }{
 		{"exec start", "/v1.55/exec/" + execID + "/start", execBody},
-		{"attach", "/v1.55/containers/data-lab-db-1/attach?stream=1&stdin=1&stdout=1", ""},
+		{"attach", "/v1.55/containers/shop-db-1/attach?stream=1&stdin=1&stdout=1", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			alpns(t, func(t *testing.T, alpn []string) {
 				f, d, j := dockerFixture(t)
-				d.container(containerID, "data-lab-db-1", dockerProject)
+				d.container(containerID, "shop-db-1", dockerProject)
 				d.exec(execID, containerID)
 				d.answer(switching(func(conn net.Conn, in *bufio.Reader) {
 					stdin, err := io.ReadAll(in)
@@ -154,7 +154,7 @@ func TestAnExecsOutputArrivesAfterItsClientHasFinishedSending(t *testing.T) {
 // answered, is not lost in frisket's buffer: it reaches the daemon first.
 func TestStdinSentWithTheRequestReachesTheDaemon(t *testing.T) {
 	f, d, j := dockerFixture(t)
-	d.container(containerID, "data-lab-db-1", dockerProject)
+	d.container(containerID, "shop-db-1", dockerProject)
 	d.exec(execID, containerID)
 	d.answer(switching(func(conn net.Conn, in *bufio.Reader) {
 		stdin, _ := io.ReadAll(in)
@@ -185,7 +185,7 @@ func TestStdinSentWithTheRequestReachesTheDaemon(t *testing.T) {
 func TestAnExecThatFinishesFirstDeliversAllItsOutput(t *testing.T) {
 	alpns(t, func(t *testing.T, alpn []string) {
 		f, d, j := dockerFixture(t)
-		d.container(containerID, "data-lab-db-1", dockerProject)
+		d.container(containerID, "shop-db-1", dockerProject)
 		d.exec(execID, containerID)
 		output := bytes.Repeat([]byte("0123456789abcdef"), 1<<16)
 		d.answer(switching(func(conn net.Conn, _ *bufio.Reader) {
@@ -216,7 +216,7 @@ func TestAnExecThatFinishesFirstDeliversAllItsOutput(t *testing.T) {
 func TestAnUpgradeAnsweredWithoutASwitchIsPassedThrough(t *testing.T) {
 	alpns(t, func(t *testing.T, alpn []string) {
 		f, d, j := dockerFixture(t)
-		d.container(containerID, "data-lab-db-1", dockerProject)
+		d.container(containerID, "shop-db-1", dockerProject)
 		d.exec(execID, containerID)
 		d.answer(func(w http.ResponseWriter, r *http.Request) bool {
 			if r.Header.Get("Upgrade") == "" {
@@ -247,7 +247,7 @@ func TestAnUpgradeAnsweredWithoutASwitchIsPassedThrough(t *testing.T) {
 // ends with it, both ways, and its line is written.
 func TestASessionsEndEndsAStreamInFlight(t *testing.T) {
 	d := newDaemon(t)
-	d.container(containerID, "data-lab-db-1", dockerProject)
+	d.container(containerID, "shop-db-1", dockerProject)
 	d.exec(execID, containerID)
 	testOver := make(chan struct{})
 	t.Cleanup(func() { close(testOver) })

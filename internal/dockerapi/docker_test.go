@@ -14,11 +14,11 @@ import (
 	"github.com/danielbodart/frisket/docker"
 )
 
-const project = "triptease/data-lab"
+const project = "example/shop"
 
 var route = Route{
 	Project: project,
-	Address: netip.MustParseAddr("127.1.191.78"),
+	Address: netip.MustParseAddr("127.101.170.171"),
 	Ports:   []uint16{64320, 64321, 64322, 64323, 64324, 64325, 64328, 64329},
 	Images:  []string{"postgres:18", "library/postgres:18", "docker.io/postgres:18", "docker.io/library/postgres:18"},
 }
@@ -145,11 +145,11 @@ func TestEveryBodyComposeSentIsAdmitted(t *testing.T) {
 		}
 		if p, ok := wantPort[b.Seq]; ok {
 			bindings := out["HostConfig"].(map[string]any)["PortBindings"].(map[string]any)["5432/tcp"]
-			want := []any{map[string]any{"HostIp": "127.1.191.78", "HostPort": p}}
+			want := []any{map[string]any{"HostIp": "127.101.170.171", "HostPort": p}}
 			if !reflect.DeepEqual(bindings, want) {
 				t.Errorf("%d: bindings %v", b.Seq, bindings)
 			}
-			if !slices.Contains(got.Account, "hostip 5432/tcp->127.1.191.78:"+p) {
+			if !slices.Contains(got.Account, "hostip 5432/tcp->127.101.170.171:"+p) {
 				t.Errorf("%d: account %v", b.Seq, got.Account)
 			}
 		}
@@ -165,7 +165,7 @@ func TestEveryBodyComposeSentIsAdmitted(t *testing.T) {
 		}
 		if _, ok := wantPort[b.Seq]; ok {
 			bindings := in["HostConfig"].(map[string]any)["PortBindings"].(map[string]any)["5432/tcp"].([]any)
-			bindings[0].(map[string]any)["HostIp"] = "127.1.191.78"
+			bindings[0].(map[string]any)["HostIp"] = "127.101.170.171"
 		}
 		if !reflect.DeepEqual(in, out) {
 			t.Errorf("%d: changed beyond the label and address", b.Seq)
@@ -203,14 +203,14 @@ func TestEveryFilterComposeSentIsMergedWithTheLabel(t *testing.T) {
 
 func TestAListWithNoFilterGetsOnlyTheLabel(t *testing.T) {
 	got, err := MergeFilter("", []string{"label"}, project)
-	if err != nil || got != `{"label":{"frisket.project=triptease/data-lab":true}}` {
+	if err != nil || got != `{"label":{"frisket.project=example/shop":true}}` {
 		t.Errorf("%s %v", got, err)
 	}
 }
 
 func TestAFilterInTheOlderArrayFormIsNormalisedToTheObject(t *testing.T) {
 	got, err := MergeFilter(`{"name":["db"],"label":["a=b"]}`, []string{"label", "name"}, project)
-	want := `{"label":{"a=b":true,"frisket.project=triptease/data-lab":true},"name":{"db":true}}`
+	want := `{"label":{"a=b":true,"frisket.project=example/shop":true},"name":{"db":true}}`
 	if err != nil || got != want {
 		t.Errorf("%s %v", got, err)
 	}
@@ -290,7 +290,7 @@ func binding(ip any, port string) map[string]any {
 // really sent, so that each case differs from an admitted body in one thing.
 func TestWhatReachesTheHostIsRefused(t *testing.T) {
 	tabs := tables(t)
-	other := docker.Address("triptease/finance-api").String()
+	other := docker.Address("example/billing").String()
 	containerCases := []struct {
 		name   string
 		change func(map[string]any)
@@ -409,7 +409,7 @@ func TestWhatReachesTheHostIsRefused(t *testing.T) {
 		{"Dns", func(b map[string]any) { set(b, "HostConfig.Dns", []any{"1.1.1.1"}) }, ReasonBody},
 		{"DnsOptions", func(b map[string]any) { set(b, "HostConfig.DnsOptions", []any{"ndots:1"}) }, ReasonBody},
 		{"DnsSearch", func(b map[string]any) { set(b, "HostConfig.DnsSearch", []any{"example.com"}) }, ReasonBody},
-		{"a label frisket.project", func(b map[string]any) { label(b, LabelKey, "triptease/finance-api") }, ReasonBody},
+		{"a label frisket.project", func(b map[string]any) { label(b, LabelKey, "example/billing") }, ReasonBody},
 		{"a label Frisket.X", func(b map[string]any) { label(b, "Frisket.X", "y") }, ReasonBody},
 		{"a label that is not a string", func(b map[string]any) { label(b, "x", true) }, ReasonBody},
 		{"\"privileged\": true", func(b map[string]any) { set(b, "HostConfig.privileged", true) }, ReasonBody},
@@ -570,11 +570,11 @@ func portBindings(t *testing.T, body map[string]any) (map[string]any, Checked) {
 // upstream, so nothing is published on an address another project's session
 // could reach.
 func TestAHostIpThatSaysNothingOrLoopbackBecomesTheProjectsAddress(t *testing.T) {
-	for _, ip := range []any{nil, "", "0.0.0.0", "127.0.0.1", "127.1.191.78"} {
+	for _, ip := range []any{nil, "", "0.0.0.0", "127.0.0.1", "127.101.170.171"} {
 		body := captured(t, 17)
 		set(body, "HostConfig.PortBindings", map[string]any{"5432/tcp": []any{binding(ip, "64320")}})
 		pb, _ := portBindings(t, body)
-		want := []any{map[string]any{"HostIp": "127.1.191.78", "HostPort": "64320"}}
+		want := []any{map[string]any{"HostIp": "127.101.170.171", "HostPort": "64320"}}
 		if !reflect.DeepEqual(pb["5432/tcp"], want) {
 			t.Errorf("%v: %v", ip, pb)
 		}
@@ -588,13 +588,13 @@ func TestTwoBindingsOfOneHostPortCollapseIntoOne(t *testing.T) {
 	})
 	pb, got := portBindings(t, body)
 	want := []any{
-		map[string]any{"HostIp": "127.1.191.78", "HostPort": "64320"},
-		map[string]any{"HostIp": "127.1.191.78", "HostPort": "64321"},
+		map[string]any{"HostIp": "127.101.170.171", "HostPort": "64320"},
+		map[string]any{"HostIp": "127.101.170.171", "HostPort": "64321"},
 	}
 	if !reflect.DeepEqual(pb["5432/tcp"], want) {
 		t.Errorf("%v", pb)
 	}
-	if !slices.Contains(got.Account, "hostip 5432/tcp->127.1.191.78:64320 collapsed") {
+	if !slices.Contains(got.Account, "hostip 5432/tcp->127.101.170.171:64320 collapsed") {
 		t.Errorf("the log does not say so: %v", got.Account)
 	}
 }
@@ -905,7 +905,7 @@ func TestABodyWithLabelsInAnotherCaseIsNotStamped(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tree = map[string]any{"Image": "postgres:18", "HostConfig": map[string]any{"NetworkMode": "none"},
-		"labels": map[string]any{LabelKey: "triptease/finance-api"}}
+		"labels": map[string]any{LabelKey: "example/billing"}}
 	if err := stamp(tree, project); err == nil {
 		t.Errorf("stamped beside %v", tree["labels"])
 	}

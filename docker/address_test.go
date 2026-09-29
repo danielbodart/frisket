@@ -13,19 +13,19 @@ func TestTheDerivationGivesTheContractsVectors(t *testing.T) {
 		project, address string
 		names            []string
 	}{
-		{"triptease/data-lab", "127.1.191.78", []string{"data-lab.internal", "data-lab.triptease.internal"}},
-		{"triptease/finance-api", "127.6.18.253", []string{"finance-api.internal", "finance-api.triptease.internal"}},
+		{"example/shop", "127.101.170.171", []string{"shop.internal", "shop.example.internal"}},
+		{"example/billing", "127.10.146.214", []string{"billing.internal", "billing.example.internal"}},
 		// frisket.internal is the reserved apex.
 		{"danielbodart/frisket", "127.103.202.234", []string{"frisket.danielbodart.internal"}},
 		{"test/repo-66", "127.211.18.75", []string{"repo-66.internal", "repo-66.test.internal"}},
-		{"TripTease/Data-Lab", "127.1.191.78", []string{"data-lab.internal", "data-lab.triptease.internal"}},
+		{"Example/Shop", "127.101.170.171", []string{"shop.internal", "shop.example.internal"}},
 		{"bodar/bodar.ts", "127.100.84.99", []string{"bodar-ts.internal", "bodar-ts.bodar.internal"}},
 		{"bodar/bodar-ts", "127.113.253.232", []string{"bodar-ts.internal", "bodar-ts.bodar.internal"}},
 		{"test/" + a63, "127.9.96.222", []string{a63 + ".internal", a63 + ".test.internal"}},
 		{"test/" + a64, "127.60.34.62", nil},
 		{"frisket/docker", "", []string{"docker.internal"}},
 		{"google/metadata", "", []string{"metadata.internal"}},
-		{"google/data-lab", "", []string{"data-lab.internal"}},
+		{"google/shop", "", []string{"shop.internal"}},
 		{"frisket/frisket", "", nil},
 		{"google/google", "", nil},
 		{"test/_.._", "", nil},
@@ -52,7 +52,7 @@ func TestTheEmbeddedReservedListIsExactlyFrisketsAndGooglesInternalApexes(t *tes
 			t.Errorf("%s is not reserved", n)
 		}
 	}
-	for _, n := range []string{"data-lab.internal", "frisket.danielbodart.internal"} {
+	for _, n := range []string{"shop.internal", "frisket.danielbodart.internal"} {
 		if Reserved(n) {
 			t.Errorf("%s is reserved", n)
 		}
@@ -80,12 +80,12 @@ func TestAReservedListThatWouldReserveLessThanItSaysDoesNotParse(t *testing.T) {
 }
 
 func Example() {
-	fmt.Println(Address("triptease/data-lab"), Names("triptease/data-lab"))
-	// Output: 127.1.191.78 [data-lab.internal data-lab.triptease.internal]
+	fmt.Println(Address("example/shop"), Names("example/shop"))
+	// Output: 127.101.170.171 [shop.internal shop.example.internal]
 }
 
 func TestAProjectIsAnOwnerAndARepositoryAsARouteMayNameThem(t *testing.T) {
-	for _, p := range []string{"triptease/data-lab", "o/r", "bodar/bodar.ts", "a-b/_", strings.Repeat("o", 39) + "/" + strings.Repeat("r", 100), "o/.x", "o/..."} {
+	for _, p := range []string{"example/shop", "o/r", "bodar/bodar.ts", "a-b/_", strings.Repeat("o", 39) + "/" + strings.Repeat("r", 100), "o/.x", "o/..."} {
 		if !ValidProject(p) {
 			t.Errorf("%q was refused", p)
 		}

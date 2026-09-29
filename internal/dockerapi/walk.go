@@ -63,7 +63,7 @@ type Checked struct {
 	// the body gave them.
 	Lookups []Lookup
 	// Account is what frisket did, for the log line's docker attribute:
-	// "stamped", "hostip 5432/tcp->127.1.191.78:64320" and the like. It
+	// "stamped", "hostip 5432/tcp->127.101.170.171:64320" and the like. It
 	// holds no value from an `any` field.
 	Account []string
 

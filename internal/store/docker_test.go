@@ -27,7 +27,7 @@ import (
 	"github.com/danielbodart/frisket/internal/steer"
 )
 
-// dockerPolicy is a session's document with data-lab's Docker route, as
+// dockerPolicy is a session's document with shop's Docker route, as
 // chase writes it: every Engine operation, and the body tables.
 func dockerPolicy(t *testing.T) policy.Policy {
 	t.Helper()
@@ -49,12 +49,12 @@ func dockerPolicy(t *testing.T) policy.Policy {
 			Refusal:   &policy.Refusal{ContentType: "application/json", Body: `{"message":"{{message}}"}`},
 			Paths:     paths,
 			Docker: &policy.DockerRoute{
-				Project:     "triptease/data-lab",
+				Project:     "example/shop",
 				APIVersions: policy.APIVersions{Min: "1.55", Max: "1.56", Unversioned: []string{"/_ping"}},
 				Images:      []string{"postgres:18", "docker.io/library/postgres:18"},
-				Address:     "127.1.191.78",
+				Address:     "127.101.170.171",
 				Ports:       []int{64320, 64321, 64322},
-				Names:       []string{"data-lab.internal", "data-lab.triptease.internal"},
+				Names:       []string{"shop.internal", "shop.example.internal"},
 				MaxBody:     262144,
 				Bodies:      bodies,
 			},
@@ -85,7 +85,7 @@ func TestADockerRouteLoads(t *testing.T) {
 			Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
 		policy.Route{Name: "frisket", Host: "*.frisket.internal", Upstream: "https://*.frisket.internal",
 			Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
-		// frisket/docker's name, not data-lab's.
+		// frisket/docker's name, not shop's.
 		policy.Route{Name: "other", Host: "docker.internal", Upstream: "https://docker.internal",
 			Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
 	)
@@ -125,12 +125,12 @@ func TestBuildRefusesABadDockerRoute(t *testing.T) {
 		"a git scope":       func(p *policy.Policy) { p.Routes[0].Git = &policy.GitRule{} },
 		"a docker on https": func(p *policy.Policy) { p.Routes[0].Upstream = "https://docker.frisket.internal" },
 		"an IPv6 address":   func(p *policy.Policy) { p.Routes[0].Docker.Address = "::1" },
-		"a padded address":  func(p *policy.Policy) { p.Routes[0].Docker.Address = "127.001.191.78" },
-		"another's address": func(p *policy.Policy) { p.Routes[0].Docker.Address = "127.6.18.253" },
+		"a padded address":  func(p *policy.Policy) { p.Routes[0].Docker.Address = "127.101.170.0171" },
+		"another's address": func(p *policy.Policy) { p.Routes[0].Docker.Address = "127.10.146.214" },
 		"a port past 65535": func(p *policy.Policy) { p.Routes[0].Docker.Ports = []int{65536 + 64320} },
 		"a port of 80":      func(p *policy.Policy) { p.Routes[0].Docker.Ports = []int{80} },
 		"names under .docker": func(p *policy.Policy) {
-			p.Routes[0].Docker.Names = []string{"data-lab.docker", "data-lab.triptease.docker"}
+			p.Routes[0].Docker.Names = []string{"shop.docker", "shop.example.docker"}
 		},
 		"a table weaker than the floor": func(p *policy.Policy) {
 			p.Routes[0].Docker.Bodies["ExecCreate"] = json.RawMessage(`{"Privileged": "any"}`)
@@ -145,10 +145,10 @@ func TestBuildRefusesABadDockerRoute(t *testing.T) {
 			p.Routes = append(p.Routes, other)
 		},
 		"a name under a wildcard route":       func(p *policy.Policy) { wildcard(p, "*.internal") },
-		"a long name under a wildcard route":  func(p *policy.Policy) { wildcard(p, "*.triptease.internal") },
-		"a name that is a route's host":       func(p *policy.Policy) { wildcard(p, "data-lab.internal") },
-		"a long name that is a route's host":  func(p *policy.Policy) { wildcard(p, "data-lab.triptease.internal") },
-		"a name that is a route's, spelt big": func(p *policy.Policy) { wildcard(p, "Data-Lab.Internal.") },
+		"a long name under a wildcard route":  func(p *policy.Policy) { wildcard(p, "*.example.internal") },
+		"a name that is a route's host":       func(p *policy.Policy) { wildcard(p, "shop.internal") },
+		"a long name that is a route's host":  func(p *policy.Policy) { wildcard(p, "shop.example.internal") },
+		"a name that is a route's, spelt big": func(p *policy.Policy) { wildcard(p, "Shop.Internal.") },
 	} {
 		p := dockerPolicy(t)
 		mutate(&p)
@@ -192,8 +192,8 @@ func TestRelayDestinationsAreEachPortOnBothLoopbacksAndTheProjectsAddress(t *tes
 		got = append(got, d.String())
 	}
 	want := []string{
-		"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320",
-		"127.0.0.1:64321", "127.1.191.78:64321", "[::1]:64321",
+		"127.0.0.1:64320", "127.101.170.171:64320", "[::1]:64320",
+		"127.0.0.1:64321", "127.101.170.171:64321", "[::1]:64321",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("relay destinations = %v, want %v", got, want)
@@ -221,7 +221,7 @@ func TestASessionsHandlersCarryItsDockerProject(t *testing.T) {
 	if h.Docker == nil {
 		t.Fatal("a session with a Docker route has no Docker project")
 	}
-	if h.Docker.Project != "triptease/data-lab" || h.Docker.Address != netip.MustParseAddr("127.1.191.78") ||
+	if h.Docker.Project != "example/shop" || h.Docker.Address != netip.MustParseAddr("127.101.170.171") ||
 		!slices.Equal(h.Docker.Relay, p.RelayDestinations()) {
 		t.Errorf("docker = %+v", *h.Docker)
 	}
@@ -234,7 +234,7 @@ func TestASessionsHandlersCarryItsDockerProject(t *testing.T) {
 	}
 }
 
-// A built session with data-lab's route answers data-lab's names with its
+// A built session with shop's route answers shop's names with its
 // address, though its allowlist names only the route's host, and asks the
 // upstream nothing; another project's name is refused as any name is.
 func TestADockerSessionAnswersItsOwnNames(t *testing.T) {
@@ -244,13 +244,13 @@ func TestADockerSessionAnswersItsOwnNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"data-lab.internal.", "Data-Lab.triptease.internal."} {
+	for _, name := range []string{"shop.internal.", "Shop.example.internal."} {
 		m := ask(t, h, name)
-		if len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{127, 1, 191, 78} {
-			t.Errorf("%s answered %+v, want 127.1.191.78", name, m.Answers)
+		if len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{127, 101, 170, 171} {
+			t.Errorf("%s answered %+v, want 127.101.170.171", name, m.Answers)
 		}
 	}
-	if m := ask(t, h, "finance-api.internal."); m.RCode != dnsmessage.RCodeNameError {
+	if m := ask(t, h, "billing.internal."); m.RCode != dnsmessage.RCodeNameError {
 		t.Errorf("another project's name answered %v", m.RCode)
 	}
 	up.mu.Lock()
@@ -357,7 +357,7 @@ func TestADockerSessionRelaysThroughItsRoutesSocket(t *testing.T) {
 	if !ok {
 		t.Fatalf("a Docker session's relay is %T", h.Relay)
 	}
-	if rl.Project != "triptease/data-lab" || rl.Address != netip.MustParseAddr("127.1.191.78") ||
+	if rl.Project != "example/shop" || rl.Address != netip.MustParseAddr("127.101.170.171") ||
 		!slices.Equal(rl.Ports, []uint16{64320, 64321, 64322}) || rl.APIVersion != "1.56" || rl.Idle != 0 {
 		t.Errorf("relay = %+v", *rl)
 	}

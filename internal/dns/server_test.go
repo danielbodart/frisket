@@ -326,11 +326,11 @@ func TestAnInterceptedNameMustAlsoBeAllowed(t *testing.T) {
 	expect(t, line, map[string]any{"decision": DecisionRefused, "reason": "not allowed"})
 }
 
-// dataLab is a session's own names, as its Docker route gives them.
-var dataLab = netip.MustParseAddr("127.1.191.78")
+// shop is a session's own names, as its Docker route gives them.
+var shop = netip.MustParseAddr("127.101.170.171")
 
 func withNames(c *Config) {
-	c.Names = map[string]netip.Addr{"data-lab.internal": dataLab, "data-lab.triptease.internal": dataLab}
+	c.Names = map[string]netip.Addr{"shop.internal": shop, "shop.example.internal": shop}
 }
 
 // failingUpstream fails the test if it is asked anything.
@@ -347,20 +347,20 @@ func (f failingUpstream) Exchange(context.Context, dnsmessage.Question) (*dnsmes
 // through the relay, never egress.
 func TestASessionsOwnNamesAreItsProjectsAddressAnsweredLocally(t *testing.T) {
 	f := newFixture(t, func(c *Config) { withNames(c); c.Upstream = failingUpstream{t} })
-	for _, name := range []string{"data-lab.internal.", "data-lab.triptease.internal.", "Data-Lab.TripTease.Internal."} {
+	for _, name := range []string{"shop.internal.", "shop.example.internal.", "Shop.Example.Internal."} {
 		m, line := f.ask(t, query(t, 3, name, dnsmessage.TypeA, false))
 		if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 1 {
 			t.Fatalf("%s: reply = %+v", name, m)
 		}
 		a, ok := m.Answers[0].Body.(*dnsmessage.AResource)
-		if !ok || netip.AddrFrom4(a.A) != dataLab || m.Answers[0].Header.TTL != uint32(DefaultServiceTTL/time.Second) {
+		if !ok || netip.AddrFrom4(a.A) != shop || m.Answers[0].Header.TTL != uint32(DefaultServiceTTL/time.Second) {
 			t.Errorf("%s: answer = %+v", name, m.Answers[0])
 		}
 		if m.Answers[0].Header.Name.String() != name {
 			t.Errorf("%s: answer is for %s", name, m.Answers[0].Header.Name)
 		}
 		expect(t, line, map[string]any{"decision": DecisionLocal, "rcode": "Success", "name": Normalize(name)})
-		if got, _ := line["answers"].([]any); len(got) != 1 || got[0] != dataLab.String() {
+		if got, _ := line["answers"].([]any); len(got) != 1 || got[0] != shop.String() {
 			t.Errorf("%s: answers = %v", name, line["answers"])
 		}
 		if _, ok := line["upstream"]; ok {
@@ -368,7 +368,7 @@ func TestASessionsOwnNamesAreItsProjectsAddressAnsweredLocally(t *testing.T) {
 		}
 	}
 	for _, typ := range []dnsmessage.Type{dnsmessage.TypeAAAA, dnsmessage.TypeHTTPS, dnsmessage.TypeTXT} {
-		m, line := f.ask(t, query(t, 4, "data-lab.internal.", typ, false))
+		m, line := f.ask(t, query(t, 4, "shop.internal.", typ, false))
 		if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 0 {
 			t.Errorf("%v: reply = %+v, want NOERROR with no records", typ, m)
 		}
@@ -383,14 +383,14 @@ func TestASessionsOwnNamesAreItsProjectsAddressAnsweredLocally(t *testing.T) {
 // so one given mixed-case and fully qualified is still the session's own.
 func TestNewNormalisesTheSessionsOwnNames(t *testing.T) {
 	f := newFixture(t, func(c *Config) {
-		c.Names = map[string]netip.Addr{"Data-Lab.Internal.": dataLab}
+		c.Names = map[string]netip.Addr{"Shop.Internal.": shop}
 		c.Upstream = failingUpstream{t}
 	})
-	m, line := f.ask(t, query(t, 3, "data-lab.internal.", dnsmessage.TypeA, false))
+	m, line := f.ask(t, query(t, 3, "shop.internal.", dnsmessage.TypeA, false))
 	if len(m.Answers) != 1 {
 		t.Fatalf("reply = %+v", m)
 	}
-	if a, ok := m.Answers[0].Body.(*dnsmessage.AResource); !ok || netip.AddrFrom4(a.A) != dataLab {
+	if a, ok := m.Answers[0].Body.(*dnsmessage.AResource); !ok || netip.AddrFrom4(a.A) != shop {
 		t.Errorf("answer = %+v", m.Answers[0])
 	}
 	expect(t, line, map[string]any{"decision": DecisionLocal, "rcode": "Success"})
@@ -401,7 +401,7 @@ func TestNewNormalisesTheSessionsOwnNames(t *testing.T) {
 // resolved upstream under "*" -- and .internal is not fenced, so
 // metadata.google.internal is still intercepted when a route has it.
 func TestOnlyASessionsOwnNamesAreAnsweredLocally(t *testing.T) {
-	others := []string{"finance-api.internal.", "x.data-lab.internal.", "data-lab.other.internal.", "internal."}
+	others := []string{"billing.internal.", "x.shop.internal.", "shop.other.internal.", "internal."}
 	f := newFixture(t, withNames)
 	for _, name := range others {
 		m, line := f.ask(t, query(t, 5, name, dnsmessage.TypeA, false))
@@ -438,12 +438,12 @@ func TestOnlyASessionsOwnNamesAreAnsweredLocally(t *testing.T) {
 func TestWithoutNamesEveryInternalNameIsAnsweredAsBefore(t *testing.T) {
 	for label, names := range map[string]map[string]netip.Addr{"no Docker route": nil, "a route with no names": {}} {
 		f := newFixture(t, func(c *Config) { c.Names = names; c.Allow = MustMatcher("*") })
-		for _, name := range []string{"data-lab.internal.", "data-lab.triptease.internal."} {
+		for _, name := range []string{"shop.internal.", "shop.example.internal."} {
 			_, line := f.ask(t, query(t, 8, name, dnsmessage.TypeA, false))
 			expect(t, line, map[string]any{"decision": DecisionResolved})
 		}
 		f = newFixture(t, func(c *Config) { c.Names = names })
-		_, line := f.ask(t, query(t, 9, "data-lab.internal.", dnsmessage.TypeA, false))
+		_, line := f.ask(t, query(t, 9, "shop.internal.", dnsmessage.TypeA, false))
 		if line["decision"] != DecisionRefused {
 			t.Errorf("%s: %v", label, line)
 		}
@@ -454,9 +454,9 @@ func TestWithoutNamesEveryInternalNameIsAnsweredAsBefore(t *testing.T) {
 // project's address is never IPv6.
 func TestNewRefusesANameItCouldNeverAnswer(t *testing.T) {
 	for label, names := range map[string]map[string]netip.Addr{
-		"an IPv6 address": {"data-lab.internal": netip.MustParseAddr("::1")},
-		"no address":      {"data-lab.internal": {}},
-		"an invalid name": {"data lab.internal": dataLab},
+		"an IPv6 address": {"shop.internal": netip.MustParseAddr("::1")},
+		"no address":      {"shop.internal": {}},
+		"an invalid name": {"data lab.internal": shop},
 	} {
 		_, err := New(Config{Names: names, Upstream: failingUpstream{t}, Resolved: &fakeRecorder{}, Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
 		if err == nil {

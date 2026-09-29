@@ -59,13 +59,13 @@ func held(f *daemonFixture) []string {
 // no Docker route is answered with none.
 func TestOpenAnswersWithTheRelayDestinationsItsPolicyGives(t *testing.T) {
 	f := startDaemon(t, newFakeSystemd(), &recorder{}, nil, nil)
-	resp, err := openAs(t, f, "docker-1", "triptease/data-lab", "64320,64321")
+	resp, err := openAs(t, f, "docker-1", "example/shop", "64320,64321")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
-		"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320",
-		"127.0.0.1:64321", "127.1.191.78:64321", "[::1]:64321",
+		"127.0.0.1:64320", "127.101.170.171:64320", "[::1]:64320",
+		"127.0.0.1:64321", "127.101.170.171:64321", "[::1]:64321",
 	}
 	if !slices.Equal(resp.Relay, want) {
 		t.Errorf("open answered relay %v, want %v", resp.Relay, want)
@@ -94,14 +94,14 @@ func TestOpenRefusesARelayPortThatIsAListenersOrDNSs(t *testing.T) {
 	info, files, ln := listeners(t, "docker-2")
 	port := ln.Addr().(interface{ AddrPort() netip.AddrPort }).AddrPort().Port()
 	_ = ln.Close()
-	info.Params = map[string]string{"project": "triptease/data-lab", "ports": "64320," + strconv.Itoa(int(port))}
+	info.Params = map[string]string{"project": "example/shop", "ports": "64320," + strconv.Itoa(int(port))}
 	_, err := control.Call(context.Background(), f.path, control.Request{Op: control.OpOpen, Session: &info}, files)
 	control.CloseAll(files)
 	if err == nil || !strings.Contains(err.Error(), "is the port of its listener") {
 		t.Errorf("a relay port that is the listener's: err = %v", err)
 	}
 
-	if _, err := openAs(t, f, "docker-3", "triptease/data-lab", "53"); err == nil || !strings.Contains(err.Error(), "DNS's") {
+	if _, err := openAs(t, f, "docker-3", "example/shop", "53"); err == nil || !strings.Contains(err.Error(), "DNS's") {
 		t.Errorf("a relay port of 53: err = %v", err)
 	}
 	if told := sd.told(); len(told) != 0 {
@@ -114,7 +114,7 @@ func TestOpenRefusesARelayPortThatIsAListenersOrDNSs(t *testing.T) {
 
 // collide is a derivation that puts every project at one address, as two
 // slugs searched to hash alike would be.
-func collide(string) netip.Addr { return netip.MustParseAddr("127.1.191.78") }
+func collide(string) netip.Addr { return netip.MustParseAddr("127.101.170.171") }
 
 // Two projects never share an address: a session whose project's address a
 // session of another project holds is refused, before systemd is told of it.
@@ -122,7 +122,7 @@ func collide(string) netip.Addr { return netip.MustParseAddr("127.1.191.78") }
 func TestOpenRefusesAnAddressAnotherProjectHolds(t *testing.T) {
 	sd := newFakeSystemd()
 	f := startDaemon(t, sd, &recorder{derive: collide}, nil, nil)
-	if _, err := openAs(t, f, "data-lab-1", "triptease/data-lab", "64320"); err != nil {
+	if _, err := openAs(t, f, "shop-1", "example/shop", "64320"); err != nil {
 		t.Fatal(err)
 	}
 	stored := sd.told()
@@ -135,19 +135,19 @@ func TestOpenRefusesAnAddressAnotherProjectHolds(t *testing.T) {
 		t.Errorf("systemd was told %v about the refused session", told[len(stored):])
 	}
 
-	if _, err := openAs(t, f, "data-lab-2", "triptease/data-lab", "64320"); err != nil {
+	if _, err := openAs(t, f, "shop-2", "example/shop", "64320"); err != nil {
 		t.Errorf("a second session of the same project: %v", err)
 	}
 	// One with no Docker route holds no address, and is held off none.
 	if _, err := openAs(t, f, "plain-2", "", ""); err != nil {
 		t.Errorf("a session with no Docker route: %v", err)
 	}
-	if got, want := held(f), []string{"data-lab-1", "data-lab-2", "plain-2"}; !slices.Equal(got, want) {
+	if got, want := held(f), []string{"plain-2", "shop-1", "shop-2"}; !slices.Equal(got, want) {
 		t.Errorf("held %v, want %v", got, want)
 	}
 
 	// Once every session of the project is closed, its address is free.
-	for _, name := range []string{"data-lab-1", "data-lab-2"} {
+	for _, name := range []string{"shop-1", "shop-2"} {
 		if _, err := f.d.Close(name); err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +163,7 @@ func TestAnAdoptedSessionHoldsItsAddressToo(t *testing.T) {
 	sd := newFakeSystemd()
 	rec := &recorder{derive: collide}
 	first := startDaemon(t, sd, rec, nil, nil)
-	if _, err := openAs(t, first, "data-lab-1", "triptease/data-lab", "64320"); err != nil {
+	if _, err := openAs(t, first, "shop-1", "example/shop", "64320"); err != nil {
 		t.Fatal(err)
 	}
 	first.stop()
@@ -175,7 +175,7 @@ func TestAnAdoptedSessionHoldsItsAddressToo(t *testing.T) {
 	if _, err := openAs(t, second, "evil-1", "evil/x", "64320"); err == nil || !strings.Contains(err.Error(), "address held by another project") {
 		t.Errorf("another project at an adopted session's address: err = %v", err)
 	}
-	if _, err := openAs(t, second, "data-lab-2", "triptease/data-lab", "64320"); err != nil {
+	if _, err := openAs(t, second, "shop-2", "example/shop", "64320"); err != nil {
 		t.Errorf("a second session of the adopted one's project: %v", err)
 	}
 }
@@ -187,7 +187,7 @@ func TestAnAdoptedSessionHoldsItsAddressToo(t *testing.T) {
 func TestAdoptionRefusesAnAddressAnotherAdoptedProjectHolds(t *testing.T) {
 	sd := newFakeSystemd()
 	first := startDaemon(t, sd, &recorder{}, nil, nil)
-	for _, s := range []struct{ name, project string }{{"data-lab-1", "triptease/data-lab"}, {"evil-1", "evil/x"}} {
+	for _, s := range []struct{ name, project string }{{"shop-1", "example/shop"}, {"evil-1", "evil/x"}} {
 		if _, err := openAs(t, first, s.name, s.project, "64320"); err != nil {
 			t.Fatal(err)
 		}
@@ -202,7 +202,7 @@ func TestAdoptionRefusesAnAddressAnotherAdoptedProjectHolds(t *testing.T) {
 		t.Errorf("%d 'session not restored' lines, want 1", n)
 	}
 	var stored int
-	for _, name := range []string{"data-lab-1", "evil-1"} {
+	for _, name := range []string{"shop-1", "evil-1"} {
 		if sd.held(name) > 0 {
 			stored++
 		}
@@ -231,7 +231,7 @@ func TestAdoptionChecksRelayPorts(t *testing.T) {
 			info, files, ln := listeners(t, "docker-1")
 			port := ln.Addr().(interface{ AddrPort() netip.AddrPort }).AddrPort().Port()
 			_ = ln.Close()
-			info.Params = map[string]string{"project": "triptease/data-lab", "ports": "64320"}
+			info.Params = map[string]string{"project": "example/shop", "ports": "64320"}
 			_, err := control.Call(context.Background(), first.path, control.Request{Op: control.OpOpen, Session: &info}, files)
 			control.CloseAll(files)
 			if err != nil {
@@ -273,7 +273,7 @@ func routed(withRelay bool) (Dispatch, *[]string) {
 		DNS:       dnsNoting{note("dns")},
 	}}
 	if withRelay {
-		d.Relay = relayNoting{&relay.Handler{Address: netip.MustParseAddr("127.1.191.78")}, note("relay")}
+		d.Relay = relayNoting{&relay.Handler{Address: netip.MustParseAddr("127.101.170.171")}, note("relay")}
 	}
 	return d, &got
 }
@@ -302,15 +302,15 @@ func TestDispatchRoutesLoopbackToTheRelayAfterDNS(t *testing.T) {
 	}{
 		{"127.0.0.1:53", true, "dns"},
 		{"[::1]:53", true, "dns"},
-		{"127.1.191.78:53", true, "dns"},
+		{"127.101.170.171:53", true, "dns"},
 		{"127.0.0.1:64320", true, "relay"},
 		{"[::1]:64320", true, "relay"},
 		{"[::ffff:127.0.0.1]:64320", true, "relay"},
-		{"127.1.191.78:64320", true, "relay"},
-		{"127.1.191.78:64399", true, "relay"}, // the relay judges the port
+		{"127.101.170.171:64320", true, "relay"},
+		{"127.101.170.171:64399", true, "relay"}, // the relay judges the port
 		{"192.0.2.2:443", true, "intercept"},
 		{"192.0.2.2:53", true, "dns"},
-		{"127.6.18.253:64320", true, "egress"},
+		{"127.10.146.214:64320", true, "egress"},
 		{"203.0.113.20:80", true, "egress"},
 		{"127.0.0.1:64320", false, "egress"},
 		{"[::1]:64320", false, "egress"},
@@ -396,7 +396,7 @@ func realRelay(tr http.RoundTripper, at netip.AddrPort) func(*Docker, *slog.Logg
 	}
 }
 
-// openRelayed opens a session of data-lab with ports, and returns the
+// openRelayed opens a session of shop with ports, and returns the
 // address its listener is at.
 func openRelayed(t *testing.T, f *daemonFixture, name, ports string) string {
 	t.Helper()
@@ -404,7 +404,7 @@ func openRelayed(t *testing.T, f *daemonFixture, name, ports string) string {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 	defer control.CloseAll(files)
-	info.Params = map[string]string{"project": "triptease/data-lab", "ports": ports}
+	info.Params = map[string]string{"project": "example/shop", "ports": ports}
 	if _, err := control.Call(context.Background(), f.path, control.Request{Op: control.OpOpen, Session: &info}, files); err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func echoes(t *testing.T, addr string) (net.Conn, bool) {
 // ends it, in flight, and its line is written.
 func TestClosingASessionEndsARelayedConnection(t *testing.T) {
 	at := standIn(t)
-	tr, _ := fakeEngine(t, "triptease/data-lab", at)
+	tr, _ := fakeEngine(t, "example/shop", at)
 	orig := make(chan netip.AddrPort, 4)
 	f := startDaemon(t, newFakeSystemd(), &recorder{relay: realRelay(tr, at)}, func(*net.TCPConn) netip.AddrPort { return <-orig }, nil)
 	addr := openRelayed(t, f, "docker-1", strconv.Itoa(int(at.Port())))
@@ -459,7 +459,7 @@ func TestClosingASessionEndsARelayedConnection(t *testing.T) {
 // daemon is asked; the port it kept is still relayed.
 func TestARestoredSessionIsRefusedAPortItsDocumentDropped(t *testing.T) {
 	at := standIn(t)
-	tr, asked := fakeEngine(t, "triptease/data-lab", at)
+	tr, asked := fakeEngine(t, "example/shop", at)
 	dropped := at.Port() + 1
 	if at.Port() == 65535 {
 		dropped = at.Port() - 1

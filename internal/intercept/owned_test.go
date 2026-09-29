@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	otherProject = "triptease/finance-api"
+	otherProject = "example/billing"
 	networkID    = "372e029d9dd22674f10f3dfb1ba4aa9f9fa8a8de46589f67eab8fa3425d7915c"
 	anonVolume   = "a43153268aa27b711843120e030d35d73b89d312f1942a11027a2eae1aaf28e8"
 )
@@ -72,14 +72,14 @@ func lastLine(t *testing.T, j *journal, n int) map[string]any {
 // log says what was found.
 func TestAnOwnedObjectIsActedOnByItsFullID(t *testing.T) {
 	f, d, j := dockerFixture(t)
-	d.container(containerID, "data-lab-db-1", dockerProject)
-	d.network(networkID, "data-lab_default", dockerProject)
+	d.container(containerID, "shop-db-1", dockerProject)
+	d.network(networkID, "shop_default", dockerProject)
 	d.volume("pgdata", labelled(dockerProject))
 
 	for i, c := range []struct{ method, target, want, account string }{
-		{"GET", "/v1.55/containers/data-lab-db-1/json", "/v1.55/containers/" + containerID + "/json", "container=fdd16f31d6ce owned"},
+		{"GET", "/v1.55/containers/shop-db-1/json", "/v1.55/containers/" + containerID + "/json", "container=fdd16f31d6ce owned"},
 		{"POST", "/v1.55/containers/fdd16f31d6ce/start", "/v1.55/containers/" + containerID + "/start", "container=fdd16f31d6ce owned"},
-		{"GET", "/v1.55/networks/data-lab_default", "/v1.55/networks/" + networkID, "network=372e029d9dd2 owned"},
+		{"GET", "/v1.55/networks/shop_default", "/v1.55/networks/" + networkID, "network=372e029d9dd2 owned"},
 		{"DELETE", "/v1.55/networks/372e029d", "/v1.55/networks/" + networkID, "network=372e029d9dd2 owned"},
 		{"GET", "/v1.55/volumes/pgdata", "/v1.55/volumes/pgdata", "volume=pgdata owned"},
 	} {
@@ -177,7 +177,7 @@ func TestAnAbsentObjectIsAnsweredWithTheDaemonsOwn404(t *testing.T) {
 // project's: the exec is asked about, then its container.
 func TestAnExecIsActedOnOnlyWhenItsContainerIsOwned(t *testing.T) {
 	f, d, j := dockerFixture(t)
-	d.container(containerID, "data-lab-db-1", dockerProject)
+	d.container(containerID, "shop-db-1", dockerProject)
 	d.exec(execID, containerID)
 	res, body := f.do(t, dockerRequest(t, "GET", "/v1.55/exec/"+execID+"/json", nil))
 	if res.StatusCode != http.StatusOK {
@@ -276,7 +276,7 @@ func TestAVolumeNamedTwiceInOneCreateIsAskedAboutOnce(t *testing.T) {
 // as its NetworkMode or as an endpoint.
 func TestANetworkAContainerJoinsIsThisProjects(t *testing.T) {
 	f, d, _ := dockerFixture(t)
-	d.network(networkID, "data-lab_default", dockerProject)
+	d.network(networkID, "shop_default", dockerProject)
 	d.network(strings.Repeat("ef", 32), "finance_default", otherProject)
 	d.network(strings.Repeat("01", 32), "made-by-hand", "")
 	endpoint := func(n string) string {
@@ -290,7 +290,7 @@ func TestANetworkAContainerJoinsIsThisProjects(t *testing.T) {
 		"another's mode":     {createContainer("finance_default", "", ""), http.StatusForbidden, ReasonNotOwned},
 		"an unlabelled mode": {createContainer("made-by-hand", "", ""), http.StatusForbidden, ReasonNotOwned},
 		"an absent mode":     {createContainer("nowhere", "", ""), http.StatusForbidden, ReasonAbsent},
-		"another's endpoint": {createContainer("data-lab_default", "", endpoint("finance_default")), http.StatusForbidden, ReasonNotOwned},
+		"another's endpoint": {createContainer("shop_default", "", endpoint("finance_default")), http.StatusForbidden, ReasonNotOwned},
 	} {
 		res, body := f.do(t, jsonRequest(t, "POST", "/v1.55/containers/create", c.body))
 		status(t, name, res, body, c.status, c.reason)
@@ -299,10 +299,10 @@ func TestANetworkAContainerJoinsIsThisProjects(t *testing.T) {
 		t.Fatalf("%d refused creates reached the daemon", n)
 	}
 	before := len(d.lookups())
-	res, body := f.do(t, jsonRequest(t, "POST", "/v1.55/containers/create", createContainer("data-lab_default", "", endpoint("data-lab_default"))))
+	res, body := f.do(t, jsonRequest(t, "POST", "/v1.55/containers/create", createContainer("shop_default", "", endpoint("shop_default"))))
 	status(t, "owned", res, body, http.StatusCreated, "")
 	// One network, named twice, is asked about once.
-	if asked := d.lookups()[before:]; len(asked) != 1 || asked[0].path != "/v1.56/networks/data-lab_default" {
+	if asked := d.lookups()[before:]; len(asked) != 1 || asked[0].path != "/v1.56/networks/shop_default" {
 		t.Errorf("asked %+v", asked)
 	}
 }
@@ -319,12 +319,12 @@ func TestAnAnonymousVolumeCarriesOverARecreateOnlyFromThisProjectsContainer(t *t
 	d.volume(theirs, anon)
 	d.volume(unmounted, anon)
 	d.volume("named-bare", nil)
-	d.container(containerID, "data-lab-db-1", dockerProject, anonVolume, "named-bare")
+	d.container(containerID, "shop-db-1", dockerProject, anonVolume, "named-bare")
 	d.container(strings.Repeat("ab", 32), "finance-db-1", otherProject, theirs)
 	mount := func(src string) string {
 		return `"Mounts":[{"Type":"volume","Source":"` + src + `","Target":"/var/lib/postgresql/data","VolumeOptions":{}}]`
 	}
-	res, body := f.do(t, jsonRequest(t, "POST", "/v1.55/containers/create?name=data-lab-db-1-new", createContainer("none", mount(anonVolume), "")))
+	res, body := f.do(t, jsonRequest(t, "POST", "/v1.55/containers/create?name=shop-db-1-new", createContainer("none", mount(anonVolume), "")))
 	status(t, "ours", res, body, http.StatusCreated, "")
 	asked := d.lookups()
 	if len(asked) != 2 || asked[1].path != "/v1.56/containers/json" {
@@ -369,7 +369,7 @@ func TestEveryCreateIsStampedWithThisProject(t *testing.T) {
 	f, d, _ := dockerFixture(t)
 	for _, c := range []struct{ target, body, then string }{
 		{"/v1.55/volumes/create", `{"Name":"pgdata"}`, "/v1.55/volumes/pgdata"},
-		{"/v1.55/networks/create", `{"Name":"data-lab_default"}`, "/v1.55/networks/data-lab_default"},
+		{"/v1.55/networks/create", `{"Name":"shop_default"}`, "/v1.55/networks/shop_default"},
 		{"/v1.55/containers/create?name=pg", createContainer("none", "", `"Labels":null`), "/v1.55/containers/pg/json"},
 	} {
 		res, body := f.do(t, jsonRequest(t, "POST", c.target, c.body))
@@ -402,7 +402,7 @@ func TestAnImagesLabelNeverOutranksTheStamp(t *testing.T) {
 // and goes nowhere.
 func TestADaemonThatCannotSayWhoseIsA502(t *testing.T) {
 	f, d, j := dockerFixture(t)
-	d.container(containerID, "data-lab-db-1", dockerProject)
+	d.container(containerID, "shop-db-1", dockerProject)
 	cases := map[string]func(w http.ResponseWriter){
 		"500": func(w http.ResponseWriter) { http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError) },
 		"an answer over 4 MiB": func(w http.ResponseWriter) {
@@ -432,7 +432,7 @@ func TestADaemonThatCannotSayWhoseIsA502(t *testing.T) {
 			reply(w)
 			return true
 		})
-		res, body := f.do(t, dockerRequest(t, "POST", "/v1.55/containers/data-lab-db-1/stop", nil))
+		res, body := f.do(t, dockerRequest(t, "POST", "/v1.55/containers/shop-db-1/stop", nil))
 		status(t, name, res, body, http.StatusBadGateway, ReasonLookup)
 		n++
 		if line := lastLine(t, j, n); line["reason"] != ReasonLookup || !strings.Contains(line["docker"].(string), "lookup failed") {
@@ -638,7 +638,7 @@ func TestTheCaptureIsAdmittedInOrder(t *testing.T) {
 		for port, bindings := range sent.HostConfig.PortBindings {
 			for _, pb := range bindings {
 				published++
-				if pb.HostIp != "127.1.191.78" {
+				if pb.HostIp != "127.101.170.171" {
 					t.Errorf("%s published on %q", port, pb.HostIp)
 				}
 			}

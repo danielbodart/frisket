@@ -23,12 +23,12 @@ import (
 // dials them.
 const roleRelay = "frisket-test-relay"
 
-// The destinations of data-lab's one port, as the daemon answers open with
+// The destinations of shop's one port, as the daemon answers open with
 // them, and another project's address.
 const (
 	relayPort    = 64320
-	relayAddress = "127.1.191.78"
-	otherAddress = "127.6.18.253"
+	relayAddress = "127.101.170.171"
+	otherAddress = "127.10.146.214"
 )
 
 // A session's Docker ports on its own loopback, and at its project's address,

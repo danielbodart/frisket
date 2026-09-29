@@ -25,7 +25,7 @@ import (
 
 const (
 	dockerHost    = "docker.frisket.internal"
-	dockerProject = "triptease/data-lab"
+	dockerProject = "example/shop"
 	execID        = "38f66d86a5c74f0d7e5401fe2675d4b1a7556ea7aa1c4f6cb8cf40b7aafc1ab2"
 	containerID   = "fdd16f31d6ce54c159845ce34fa35e5a4a7f37cd3852bdb712190bd34cf3bf7e"
 )
@@ -107,7 +107,7 @@ func engineTables(t testing.TB) map[string]*dockerapi.Table {
 	return out
 }
 
-// newUnixUpstream is data-lab's Docker route, to the daemon at socket.
+// newUnixUpstream is shop's Docker route, to the daemon at socket.
 func newUnixUpstream(t testing.TB, socket string) Route {
 	t.Helper()
 	return Route{
@@ -129,7 +129,7 @@ func newUnixUpstream(t testing.TB, socket string) Route {
 	}
 }
 
-// dockerFixture is frisket serving data-lab's Docker route, with an egress
+// dockerFixture is frisket serving shop's Docker route, with an egress
 // dialer that fails the test if anything asks it for a connection: the
 // socket is dialled by the route's own transport, and by nothing else.
 func dockerFixture(t *testing.T, routes ...Route) (*fixture, *daemon, *journal) {
@@ -337,7 +337,7 @@ func mustMarshal(t *testing.T, v any) []byte {
 // no Content-Type at all, passes.
 func TestAnOperationThatTakesNoBodyIsSentNone(t *testing.T) {
 	f, d, _ := dockerFixture(t)
-	d.container(containerID, "data-lab-db-1", dockerProject)
+	d.container(containerID, "shop-db-1", dockerProject)
 
 	form := dockerRequest(t, "POST", "/v1.55/images/create?fromImage=postgres&tag=18", strings.NewReader("fromSrc=-"))
 	form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -370,7 +370,7 @@ func TestAnOperationThatTakesNoBodyIsSentNone(t *testing.T) {
 // names none, and never h2c or a websocket, even where tcp is allowed.
 func TestAnUpgradeIsOnlyTheRulesOwn(t *testing.T) {
 	f, d, _ := dockerFixture(t)
-	d.container(containerID, "data-lab-db-1", dockerProject)
+	d.container(containerID, "shop-db-1", dockerProject)
 	d.exec(execID, containerID)
 
 	inspect := dockerRequest(t, "GET", "/v1.55/containers/"+containerID+"/json", nil)
@@ -550,7 +550,7 @@ func TestAReencodedBodyIsSentAsJSON(t *testing.T) {
 	if got := seen[0].header.Values("Content-Encoding"); len(got) != 0 {
 		t.Errorf("Content-Encoding %q", got)
 	}
-	want := `{"Labels":{"a":"b","frisket.project":"triptease/data-lab"},"Name":""}`
+	want := `{"Labels":{"a":"b","frisket.project":"example/shop"},"Name":""}`
 	if seen[0].body != want {
 		t.Errorf("body %s, want %s", seen[0].body, want)
 	}
@@ -648,7 +648,7 @@ func TestAnObjectIsNamedByItsOwnSegment(t *testing.T) {
 	for i, name := range names {
 		d.container(strings.Repeat(fmt.Sprintf("%x", i+1), 64), name, dockerProject)
 	}
-	d.container(containerID, "data-lab-db-1", dockerProject)
+	d.container(containerID, "shop-db-1", dockerProject)
 	for i, name := range names {
 		res, body := f.do(t, dockerRequest(t, "GET", "/v1.55/containers/"+name+"/json", nil))
 		if res.StatusCode != http.StatusOK {
@@ -662,7 +662,7 @@ func TestAnObjectIsNamedByItsOwnSegment(t *testing.T) {
 			t.Errorf("%s was asked about as %q", name, asked[len(asked)-1].path)
 		}
 	}
-	res, body := f.do(t, dockerRequest(t, "POST", "/v1.56/containers/data-lab-db-1/stop?t=10", nil))
+	res, body := f.do(t, dockerRequest(t, "POST", "/v1.56/containers/shop-db-1/stop?t=10", nil))
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status %d: %s", res.StatusCode, body)
 	}
@@ -841,16 +841,16 @@ func TestNewRefusesBadDockerRoutes(t *testing.T) {
 			return []Route{other}
 		},
 		"another project's address": func(r *Route) []Route {
-			r.Docker.Address = docker.Address("triptease/finance-api")
+			r.Docker.Address = docker.Address("example/billing")
 			return nil
 		},
 		"names that are not the project's": func(r *Route) []Route {
-			r.Docker.Names = []string{"data-lab.docker", "data-lab.triptease.docker"}
+			r.Docker.Names = []string{"shop.docker", "shop.example.docker"}
 			return nil
 		},
 		"no names": func(r *Route) []Route { r.Docker.Names = nil; return nil },
 		"a project that is not owner/repo": func(r *Route) []Route {
-			r.Docker.Project, r.Docker.Address, r.Docker.Names = "data-lab", docker.Address("data-lab"), docker.Names("data-lab")
+			r.Docker.Project, r.Docker.Address, r.Docker.Names = "shop", docker.Address("shop"), docker.Names("shop")
 			return nil
 		},
 		"a project of dots": func(r *Route) []Route {

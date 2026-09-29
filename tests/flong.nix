@@ -156,7 +156,7 @@ let
   '';
 
   # A session's document with a Docker route, as chase writes one for
-  # data-lab: every Engine operation and the body tables, from frisket's own
+  # shop: every Engine operation and the body tables, from frisket's own
   # test data; the project's address and .internal names as frisket derives
   # them; one port. Beside it, a route whose host is under .internal and is
   # not the project's, which must resolve as it always has.
@@ -172,12 +172,12 @@ let
         refusal = { contentType = "application/json"; body = ''{"message":"{{message}}"}''; };
         paths = lib.importJSON ../internal/intercept/testdata/engine-operations.json;
         docker = {
-          project = "triptease/data-lab";
+          project = "example/shop";
           apiVersions = { min = "1.55"; max = "1.56"; unversioned = [ "/_ping" ]; };
           images = [ "postgres:18" "library/postgres:18" "docker.io/postgres:18" "docker.io/library/postgres:18" ];
-          address = "127.1.191.78";
+          address = "127.101.170.171";
           ports = [ 64320 ];
-          names = [ "data-lab.internal" "data-lab.triptease.internal" ];
+          names = [ "shop.internal" "shop.example.internal" ];
           maxBody = 262144;
           bodies = lib.importJSON ../internal/dockerapi/testdata/fields.json;
         };
@@ -1189,17 +1189,17 @@ in
           release(name)
 
       # A Docker route and its relay, end to end: a session under the
-      # document chase would write for data-lab, the Engine faked on the test
+      # document chase would write for shop, the Engine faked on the test
       # user's socket, and the project's published port stood in for by a
       # listener on the host at the project's own address.
-      project, address, other = "triptease/data-lab", "127.1.191.78", "127.6.18.253"
+      project, address, other = "example/shop", "127.101.170.171", "127.10.146.214"
 
       def container(n, owner, state, ip, ports):
           return {"Id": f"{n:064x}", "Labels": {"frisket.project": owner}, "State": state,
                   "Ports": [{"IP": ip, "PrivatePort": 5432, "PublicPort": p, "Type": "tcp"} for p in ports]}
 
       owned = container(1, project, "running", address, [64320, 64321])
-      theirs = container(2, "triptease/finance-api", "running", other, [64320])
+      theirs = container(2, "example/billing", "running", other, [64320])
 
       def engine_lists(containers):
           machine.succeed(f"printf '%s' {shlex.quote(json.dumps(containers))} > /srv/engine/containers.json.new "
@@ -1277,7 +1277,7 @@ in
           code, body = get("/v1.56/containers/json?all=1")
           assert code == "200" and json.loads(body) == [owned, theirs], (code, body)
           seen = engine_saw("GET /v1.56/containers/json?all=1&")
-          assert '"label":{"frisket.project=triptease/data-lab":true}' in seen, seen
+          assert '"label":{"frisket.project=example/shop":true}' in seen, seen
           [r] = wait_log("request", name, lambda m: m["path"] == "/v1.56/containers/json", "the list")
           assert r["decision"] == "allowed" and r["operation"] == "ContainerList" and r["api"] == "1.56", r
           assert "filters+label" in r["docker"], r
@@ -1292,7 +1292,7 @@ in
               assert engine_saw(needle) == "", (needle, engine_saw(needle))
 
       with subtest("the project's published port is reached from the session at both loopbacks, its address and its name"):
-          for host in ["127.0.0.1", "::1", address, "data-lab.internal"]:
+          for host in ["127.0.0.1", "::1", address, "shop.internal"]:
               out = dial(leader, host, 64320)
               assert out == "project\nhello\n", (host, out)
           lines = relay_lines(name, 4)
@@ -1301,11 +1301,11 @@ in
           # Each only after asking the Engine, as frisket, for exactly this.
           lookups = engine_saw("agent=frisket").splitlines()
           assert len(lookups) == 4, lookups
-          assert all('"label":["frisket.project=triptease/data-lab"],"publish":["64320/tcp"],"status":["running"]' in l
+          assert all('"label":["frisket.project=example/shop"],"publish":["64320/tcp"],"status":["running"]' in l
                      for l in lookups), lookups
 
       with subtest("the session's own .internal names are its project's address, and every other .internal name is as it was"):
-          for n in ["data-lab.internal", "data-lab.triptease.internal", "Data-Lab.Internal"]:
+          for n in ["shop.internal", "shop.example.internal", "Shop.Internal"]:
               assert machine.succeed(as_workload(leader, f"dig +short A {n} @127.0.0.1")).strip() == address, n
               assert machine.succeed(as_workload(leader, f"dig +short AAAA {n} @127.0.0.1")).strip() == "", n
           # The route's own host and another route's under .internal: intercepted.
@@ -1313,16 +1313,16 @@ in
               out = machine.succeed(as_workload(leader, f"dig +short A {n} @127.0.0.1"))
               assert out.strip() == "192.0.2.2", (n, out)
           # Another project's name, and a name under the project's: on no allowlist.
-          for n in ["finance-api.internal", "x.data-lab.internal"]:
+          for n in ["billing.internal", "x.shop.internal"]:
               out = machine.succeed(as_workload(leader, f"dig +time=2 +tries=1 {n} @127.0.0.1"))
               assert "status: NXDOMAIN" in out, (n, out)
           dns = lines_of("dns", name)
-          local = [m for m in dns if m.get("name") in ("data-lab.internal", "data-lab.triptease.internal")]
+          local = [m for m in dns if m.get("name") in ("shop.internal", "shop.example.internal")]
           assert local and all(m["decision"] == "local" and "upstream" not in m for m in local), local
           for n in ["docker.frisket.internal", "metadata.google.internal"]:
               d = [m for m in dns if m.get("name") == n]
               assert d and all(m["decision"] == "intercepted" for m in d), (n, d)
-          for n in ["finance-api.internal", "x.data-lab.internal"]:
+          for n in ["billing.internal", "x.shop.internal"]:
               [d] = [m for m in dns if m.get("name") == n]
               assert d["decision"] == "refused" and d["reason"] == "not allowed" and "upstream" not in d, d
           upstream.fail("journalctl -u dnsmasq -o cat | grep -q internal")

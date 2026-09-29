@@ -386,14 +386,14 @@ func TestSteerFillsTheRelaySetsInTheSameLoadAsTheRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := &fakeRoot{relay: []string{
-		"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320",
-		"127.0.0.1:64321", "127.1.191.78:64321", "[::1]:64321",
+		"127.0.0.1:64320", "127.101.170.171:64320", "[::1]:64320",
+		"127.0.0.1:64321", "127.101.170.171:64321", "[::1]:64321",
 	}}
 	if err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, sess); err != nil {
 		t.Fatal(err)
 	}
 	want := relayRuleset +
-		"add element inet frisket relay4 { 127.0.0.1 . 64320, 127.1.191.78 . 64320, 127.0.0.1 . 64321, 127.1.191.78 . 64321 }\n" +
+		"add element inet frisket relay4 { 127.0.0.1 . 64320, 127.101.170.171 . 64320, 127.0.0.1 . 64321, 127.101.170.171 . 64321 }\n" +
 		"add element inet frisket relay6 { ::1 . 64320, ::1 . 64321 }\n"
 	if f.loaded != want {
 		t.Errorf("loaded\n%s\nwant\n%s", f.loaded, want)
@@ -422,7 +422,7 @@ func TestSteerRefusesARelayWithAFileThatHasNoRelaySets(t *testing.T) {
 	rootsPath, _ := roots(t)
 	sess := Session{Name: "s", Policy: "/etc/frisket/policies/research.json", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}
 	p, _ := allFile().Plan()
-	f := &fakeRoot{relay: []string{"127.0.0.1:64320", "127.1.191.78:64320", "[::1]:64320"}}
+	f := &fakeRoot{relay: []string{"127.0.0.1:64320", "127.101.170.171:64320", "[::1]:64320"}}
 	err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, sess)
 	if err == nil || !strings.Contains(err.Error(), "the steering file has no relay sets; rebuild it with this frisket") ||
 		!strings.Contains(err.Error(), "the session was closed") {
@@ -451,8 +451,8 @@ func TestARelayDestinationIsParsedNotPasted(t *testing.T) {
 		}
 	}
 	// A mapped v4 address is v4, in the v4 set.
-	got, err := p.WithRelay([]string{"[::ffff:127.1.191.78]:64320"})
-	if err != nil || !strings.HasSuffix(got, "add element inet frisket relay4 { 127.1.191.78 . 64320 }\n") {
+	got, err := p.WithRelay([]string{"[::ffff:127.101.170.171]:64320"})
+	if err != nil || !strings.HasSuffix(got, "add element inet frisket relay4 { 127.101.170.171 . 64320 }\n") {
 		t.Errorf("a mapped address: %v\n%s", err, got)
 	}
 }

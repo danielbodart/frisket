@@ -23,7 +23,7 @@ import (
 	"github.com/danielbodart/frisket/internal/steer"
 )
 
-const project = "triptease/data-lab"
+const project = "example/shop"
 
 type journal struct {
 	mu  sync.Mutex
@@ -450,19 +450,19 @@ func TestEveryLoopbackGoesToTheProjectsAddressAtTheSteeredPort(t *testing.T) {
 // Steers takes 127.0.0.1, ::1 and the project's address however they are
 // spelt, at any port, and nothing else: the port is the handler's to judge.
 func TestTheRelaySteersItsAddressesAtAnyPort(t *testing.T) {
-	h := &Handler{Address: netip.MustParseAddr("127.1.191.78")}
+	h := &Handler{Address: netip.MustParseAddr("127.101.170.171")}
 	for s, want := range map[string]bool{
-		"127.0.0.1:64320":          true,
-		"127.0.0.1:1":              true,
-		"[::1]:64320":              true,
-		"[::1%lo]:64320":           true,
-		"[::ffff:127.0.0.1]:64320": true,
-		"127.1.191.78:64320":       true,
-		"[::ffff:127.1.191.78]:80": true,
-		"127.6.18.253:64320":       false,
-		"127.0.0.2:64320":          false,
-		"192.0.2.2:443":            false,
-		"[2001:db8::2]:64320":      false,
+		"127.0.0.1:64320":             true,
+		"127.0.0.1:1":                 true,
+		"[::1]:64320":                 true,
+		"[::1%lo]:64320":              true,
+		"[::ffff:127.0.0.1]:64320":    true,
+		"127.101.170.171:64320":       true,
+		"[::ffff:127.101.170.171]:80": true,
+		"127.10.146.214:64320":        false,
+		"127.0.0.2:64320":             false,
+		"192.0.2.2:443":               false,
+		"[2001:db8::2]:64320":         false,
 	} {
 		if got := h.Steers(netip.MustParseAddrPort(s)); got != want {
 			t.Errorf("Steers(%s) = %v, want %v", s, got, want)
