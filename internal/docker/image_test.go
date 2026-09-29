@@ -4,7 +4,9 @@ import "testing"
 
 // An image is listed only from docker.io or a known public registry, so no
 // spelling of a registry, and no name that resolves to one, can send the
-// daemon's pull to the host's own loopback.
+// daemon's pull to the host's own loopback; and only by a name, never by an
+// ID or an ID's prefix, which the daemon would answer with whatever local
+// image has it.
 func TestAnImageIsFromDockerHubOrAKnownPublicRegistryOnly(t *testing.T) {
 	for _, ok := range []string{
 		"postgres:18",
@@ -42,6 +44,14 @@ func TestAnImageIsFromDockerHubOrAKnownPublicRegistryOnly(t *testing.T) {
 		"a.b-docker.pkg.dev/x:1",
 		"-docker.pkg.dev/x:1",
 		"postgres",
+		"sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"SHA256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"sha256:0123456789ab",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:1",
+		"library/sha256:0123456789ab",
+		"docker.io/library/sha256:0123456789ab",
+		"x/0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef:1",
 	} {
 		if err := ValidImage(bad); err == nil {
 			t.Errorf("%s: accepted", bad)

@@ -8,7 +8,11 @@ import (
 	"unicode"
 )
 
-var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var (
+	digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	// hex64RE is an image's ID without its algorithm, in any case.
+	hex64RE = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+)
 
 // registries are the only registries a route may name an image from, by
 // the exact lower-case host moby would read from a reference's first
@@ -44,6 +48,19 @@ func ValidImage(ref string) error {
 	for _, p := range parts {
 		if p == "" {
 			return errors.New("an image with an empty component")
+		}
+	}
+	// The daemon takes sha256:<hex>, and a bare 64-hex string, for an
+	// image's ID, and sha256:<prefix> for any image whose ID begins so: it
+	// would run whatever local image has that ID, made or loaded by anyone,
+	// and not one pulled from a registry by name. A component named either
+	// way is refused wherever it stands, rather than judged by where the
+	// daemon would read it as an ID.
+	for _, p := range parts {
+		name, _, _ := strings.Cut(p, "@")
+		name, _, _ = strings.Cut(name, ":")
+		if strings.EqualFold(name, "sha256") || hex64RE.MatchString(name) {
+			return errors.New("an image's ID, not its name")
 		}
 	}
 	if len(parts) > 1 && isDomain(parts[0]) && !knownRegistry(parts[0]) {
