@@ -101,6 +101,95 @@ let
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     srv.serve_forever()
   '';
+
+  # Where the test user's rootless Docker would listen, and so where the
+  # Docker route's upstream is: frisket runs as her, the socket's owner.
+  dockerSocket = "/run/user/1000/docker.sock";
+
+  # A stand-in for the Engine on that socket, as much of it as frisket and
+  # this test ask: _ping, the version, and the container list, which it
+  # answers from a file the test writes, whatever the filters -- the relay
+  # must check what it is told itself. It says in its own journal what it
+  # was asked, query decoded, so a refusal is seen never to arrive.
+  engine = pkgs.writeText "engine.py" ''
+    import json, os, socketserver, http.server, urllib.parse
+    SOCK = "${dockerSocket}"
+    class H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def answer(self, code, body, ctype="application/json"):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Api-Version", "1.56")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        def do_GET(self):
+            agent = self.headers.get("User-Agent", "-")
+            print(f"engine-request {self.command} {urllib.parse.unquote(self.path)} agent={agent}", flush=True)
+            path = urllib.parse.urlsplit(self.path).path
+            if path == "/_ping":
+                self.answer(200, b"OK", "text/plain")
+            elif path.endswith("/containers/json"):
+                try:
+                    with open("/srv/engine/containers.json", "rb") as f:
+                        body = f.read()
+                except FileNotFoundError:
+                    body = b"[]"
+                self.answer(200, body)
+            elif path.endswith("/version"):
+                self.answer(200, json.dumps({"ApiVersion": "1.56", "Version": "29.8.0"}).encode())
+            else:
+                self.answer(404, b'{"message":"page not found"}')
+        do_HEAD = do_GET
+        def log_message(self, *a):
+            pass
+    class S(socketserver.ThreadingUnixStreamServer):
+        daemon_threads = True
+    try:
+        os.unlink(SOCK)
+    except FileNotFoundError:
+        pass
+    srv = S(SOCK, H)
+    os.chmod(SOCK, 0o600)
+    srv.serve_forever()
+  '';
+
+  # A session's document with a Docker route, as chase writes one for
+  # data-lab: every Engine operation and the body tables, from frisket's own
+  # test data; the project's address and .internal names as frisket derives
+  # them; one port. Beside it, a route whose host is under .internal and is
+  # not the project's, which must resolve as it always has.
+  dockerDoc = pkgs.writeText "frisket-test-docker.json" (builtins.toJSON {
+    name = "docker";
+    allow = [ "docker.frisket.internal" "metadata.google.internal" ];
+    routes = [
+      {
+        name = "docker";
+        host = "docker.frisket.internal";
+        upstream = "unix://${dockerSocket}";
+        unmatched = "refuse";
+        refusal = { contentType = "application/json"; body = ''{"message":"{{message}}"}''; };
+        paths = lib.importJSON ../internal/intercept/testdata/engine-operations.json;
+        docker = {
+          project = "triptease/data-lab";
+          apiVersions = { min = "1.55"; max = "1.56"; unversioned = [ "/_ping" ]; };
+          images = [ "postgres:18" "library/postgres:18" "docker.io/postgres:18" "docker.io/library/postgres:18" ];
+          address = "127.1.191.78";
+          ports = [ 64320 ];
+          names = [ "data-lab.internal" "data-lab.triptease.internal" ];
+          maxBody = 262144;
+          bodies = lib.importJSON ../internal/docker/testdata/fields.json;
+        };
+      }
+      {
+        name = "metadata";
+        host = "metadata.google.internal";
+        upstream = "https://metadata.google.internal";
+        paths = [{ methods = [ "GET" ]; prefix = "/"; }];
+      }
+    ];
+  });
 in
 {
   name = "frisket-flong";
@@ -274,7 +363,21 @@ in
       "d /srv/work 0777 root root -"
       "d /srv/secrets 0700 alice users -"
       "d /srv/policies 0755 root root -"
+      "d /srv/engine 0755 root root -"
     ];
+
+    # The fake Engine, as her, on her runtime directory's socket: there as
+    # soon as her lingering user manager has made the directory.
+    systemd.services.fake-engine = {
+      wantedBy = [ "multi-user.target" ];
+      requires = [ "user-runtime-dir@1000.service" ];
+      after = [ "user-runtime-dir@1000.service" ];
+      serviceConfig = {
+        User = "alice";
+        Group = "users";
+        ExecStart = "${pkgs.python3}/bin/python3 ${engine}";
+      };
+    };
 
     # What a workload tries against what the hook installed. In the store, which
     # every session can read, rather than quoted through three shells.
@@ -449,6 +552,25 @@ in
     };
     services.frisket.flong.gapi = { policy = "test"; policyFile = "/srv/policies/gapi.json"; };
     services.frisket.policyRoots = [ "/srv/policies" ];
+
+    # A session with a Docker route, on the `service` set with a network of
+    # its own whose every listener pasta republishes on the host, as a dev
+    # tier's is: what shows the relay's ports are no listener pasta could
+    # see, though frisket's own TCP listener, which the relay runs through,
+    # is one. The pasta is this test's nixpkgs' (2025_09_19), not a
+    # consumer's, and its `auto` takes no exclusions.
+    flong.docker = {
+      container = "strict";
+      user = "alice";
+      inherit workspace;
+      command = [ "bash" "-c" ];
+      network.forwardPorts = "auto";
+      # As the trusted tier, where Docker is, has it: the host's loopback
+      # reaches the session's, so what pasta republishes arrives there.
+      network.hostLoopbackToSession = true;
+      postStart = mark;
+    };
+    services.frisket.flong.docker = { policy = "test"; set = "service"; policyFile = "/srv/policies/docker.json"; };
   };
 
   testScript = { nodes, ... }:
@@ -459,6 +581,7 @@ in
       networked = lib.getExe nodes.machine.flong.networked.launcher;
       trusted = lib.getExe nodes.machine.flong.trusted.launcher;
       gapi = lib.getExe nodes.machine.flong.gapi.launcher;
+      docker = lib.getExe nodes.machine.flong.docker.launcher;
       frisket = lib.getExe nodes.machine.services.frisket.package;
       roots = nodes.machine.security.pki.caBundle;
     in
@@ -505,6 +628,7 @@ in
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("frisket.service")
       machine.wait_for_unit("user@1000.service")
+      machine.wait_for_unit("fake-engine.service")
       # Both families reach the upstream from the host, which is where
       # frisket dials from. v6 waits out duplicate address detection.
       machine.wait_until_succeeds("curl -sSf -m 2 ${url4}")
@@ -1063,6 +1187,179 @@ in
           hosts = {m["host"] for m in lines_of("request", name) if m.get("credential") == "injected"}
           assert hosts == {"storage.wild.test", "eu.rep.wild.test"}, hosts
           release(name)
+
+      # A Docker route and its relay, end to end: a session under the
+      # document chase would write for data-lab, the Engine faked on the test
+      # user's socket, and the project's published port stood in for by a
+      # listener on the host at the project's own address.
+      project, address, other = "triptease/data-lab", "127.1.191.78", "127.6.18.253"
+
+      def container(n, owner, state, ip, ports):
+          return {"Id": f"{n:064x}", "Labels": {"frisket.project": owner}, "State": state,
+                  "Ports": [{"IP": ip, "PrivatePort": 5432, "PublicPort": p, "Type": "tcp"} for p in ports]}
+
+      owned = container(1, project, "running", address, [64320, 64321])
+      theirs = container(2, "triptease/finance-api", "running", other, [64320])
+
+      def engine_lists(containers):
+          machine.succeed(f"printf '%s' {shlex.quote(json.dumps(containers))} > /srv/engine/containers.json.new "
+                          "&& chmod 0644 /srv/engine/containers.json.new "
+                          "&& mv -f /srv/engine/containers.json.new /srv/engine/containers.json")
+
+      def engine_saw(needle):
+          return machine.execute(f"journalctl -u fake-engine -o cat | grep -F -- {shlex.quote(needle)}")[1]
+
+      # A listener on the host that says who it is, then echoes.
+      def listen(unit, addr, port, says):
+          machine.succeed(f"systemd-run --unit={unit} --collect -- ${pkgs.socat}/bin/socat "
+                          f"TCP-LISTEN:{port},bind={addr},reuseaddr,fork "
+                          f"SYSTEM:{shlex.quote(f'echo {says}; exec ${pkgs.coreutils}/bin/cat')}")
+          machine.wait_until_succeeds(f"ss -Htln 'sport = :{port}' | grep -qF '{addr}:{port}'")
+
+      def dial(leader, host, port):
+          return machine.execute(as_workload(leader, f"printf 'hello\\n' | nc -N -w 5 {host} {port} 2>&1"))[1]
+
+      def relay_lines(name, n, pred=lambda m: True):
+          for _ in range(100):
+              lines = [m for m in lines_of("relay", name) if pred(m)]
+              if len(lines) >= n:
+                  return lines
+              time.sleep(0.1)
+          raise AssertionError(f"fewer than {n} relay lines: {lines_of('relay', name)}")
+
+      machine.succeed("install -m 0644 ${dockerDoc} /srv/policies/docker.json")
+      engine_lists([owned, theirs])
+      # A listener of the workload's own, on every address: pasta
+      # republishing it is the proof that `auto` is at work, so that what it
+      # does not republish means something.
+      name, leader = hold("${docker}", "ip route show default | grep -q .",
+                          "{ nc -lk 64330 </dev/null >/dev/null 2>&1 & }")
+      opened = time.monotonic()
+
+      with subtest("pasta republishes no relayed port, so the host can still publish it, and frisket's own listener it does republish carries nothing"):
+          machine.wait_until_succeeds("ss -Htln 'sport = :64330' | grep -q .")
+          time.sleep(max(0, opened + 2 - time.monotonic()))
+          # The relayed ports are steered, not listened on, so pasta has
+          # nothing of them to see.
+          assert machine.succeed("ss -Htln 'sport = :64320'").strip() == "", machine.succeed("ss -Htlnp")
+          # What Docker's publish would do, and could not with *:64320 held.
+          listen("echo-project", address, 64320, "project")
+          # DNS on 53 is under the host's unprivileged port floor, which
+          # `auto` never publishes.
+          assert "passt" not in machine.succeed("ss -Htlnp 'sport = :53'"), machine.succeed("ss -Htlnp")
+          # frisket's TCP listener is a real socket above that floor, and
+          # this pasta's `auto` cannot exclude a port, so the host gets it
+          # on every address: the accepted residual of the contract's 2.8,
+          # which pasta's exclusions are to remove. What pins it harmless is
+          # that anything through it arrives, by the host's loopback,
+          # dialling the listener itself, and is refused as unsteered:
+          # nothing back, nothing relayed.
+          held = machine.succeed("ss -Htlnp 'sport = :15001'")
+          assert "passt" in held, held
+          before = len(lines_of("connection", name))
+          relays = len(lines_of("relay", name))
+          for host in ["127.0.0.1", "::1"]:
+              out = machine.execute(f"printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -N -w 3 {host} 15001 2>&1")[1]
+              assert out == "", (host, out)
+          for listener in ["127.0.0.1:15001", "[::1]:15001"]:
+              [c] = wait_log("connection", name, lambda m: m["listener"] == listener and m["decision"] == "unsteered", listener)[-1:]
+              assert c["action"] == "refused" and c["reason"] == "listener's own address", c
+          assert len(lines_of("connection", name)) >= before + 2, lines_of("connection", name)[before:]
+          assert len(lines_of("relay", name)) == relays, lines_of("relay", name)[relays:]
+
+      with subtest("a Docker route admits what its rules do, lists only the project's, and refuses the rest before the Engine"):
+          def get(path):
+              out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -w '\\n%{http_code}' "
+                                                f"'https://docker.frisket.internal:2376{path}'"))
+              body, code = out.rsplit("\n", 1)
+              return code, body
+          assert get("/_ping") == ("200", "OK"), get("/_ping")
+          code, body = get("/v1.56/containers/json?all=1")
+          assert code == "200" and json.loads(body) == [owned, theirs], (code, body)
+          seen = engine_saw("GET /v1.56/containers/json?all=1&")
+          assert '"label":{"frisket.project=triptease/data-lab":true}' in seen, seen
+          [r] = wait_log("request", name, lambda m: m["path"] == "/v1.56/containers/json", "the list")
+          assert r["decision"] == "allowed" and r["operation"] == "ContainerList" and r["api"] == "1.56", r
+          assert "filters+label" in r["docker"], r
+          for path in ["/v1.56/info", "/v1.40/version"]:
+              code, _ = get(path)
+              assert code != "200", (path, code)
+          [r] = wait_log("request", name, lambda m: m["path"] == "/v1.56/info", "the refused operation")
+          assert r["decision"] == "refused" and r["operation"] == "SystemInfo" and r["status"] == 403, r
+          [r] = wait_log("request", name, lambda m: m["path"] == "/v1.40/version", "the refused version")
+          assert r["decision"] == "refused" and r["reason"] == "api version not allowed", r
+          for needle in ["/info", "/v1.40/"]:
+              assert engine_saw(needle) == "", (needle, engine_saw(needle))
+
+      with subtest("the project's published port is reached from the session at both loopbacks, its address and its name"):
+          for host in ["127.0.0.1", "::1", address, "data-lab.internal"]:
+              out = dial(leader, host, 64320)
+              assert out == "project\nhello\n", (host, out)
+          lines = relay_lines(name, 4)
+          assert sorted(m["orig"] for m in lines) == sorted(["127.0.0.1:64320", "[::1]:64320", f"{address}:64320", f"{address}:64320"]), lines
+          assert all(m["decision"] == "relayed" and m["to"] == f"{address}:64320" and m["project"] == project for m in lines), lines
+          # Each only after asking the Engine, as frisket, for exactly this.
+          lookups = engine_saw("agent=frisket").splitlines()
+          assert len(lookups) == 4, lookups
+          assert all('"label":["frisket.project=triptease/data-lab"],"publish":["64320/tcp"],"status":["running"]' in l
+                     for l in lookups), lookups
+
+      with subtest("the session's own .internal names are its project's address, and every other .internal name is as it was"):
+          for n in ["data-lab.internal", "data-lab.triptease.internal", "Data-Lab.Internal"]:
+              assert machine.succeed(as_workload(leader, f"dig +short A {n} @127.0.0.1")).strip() == address, n
+              assert machine.succeed(as_workload(leader, f"dig +short AAAA {n} @127.0.0.1")).strip() == "", n
+          # The route's own host and another route's under .internal: intercepted.
+          for n in ["docker.frisket.internal", "metadata.google.internal"]:
+              out = machine.succeed(as_workload(leader, f"dig +short A {n} @127.0.0.1"))
+              assert out.strip() == "192.0.2.2", (n, out)
+          # Another project's name, and a name under the project's: on no allowlist.
+          for n in ["finance-api.internal", "x.data-lab.internal"]:
+              out = machine.succeed(as_workload(leader, f"dig +time=2 +tries=1 {n} @127.0.0.1"))
+              assert "status: NXDOMAIN" in out, (n, out)
+          dns = lines_of("dns", name)
+          local = [m for m in dns if m.get("name") in ("data-lab.internal", "data-lab.triptease.internal")]
+          assert local and all(m["decision"] == "local" and "upstream" not in m for m in local), local
+          for n in ["docker.frisket.internal", "metadata.google.internal"]:
+              d = [m for m in dns if m.get("name") == n]
+              assert d and all(m["decision"] == "intercepted" for m in d), (n, d)
+          for n in ["finance-api.internal", "x.data-lab.internal"]:
+              [d] = [m for m in dns if m.get("name") == n]
+              assert d["decision"] == "refused" and d["reason"] == "not allowed" and "upstream" not in d, d
+          upstream.fail("journalctl -u dnsmasq -o cat | grep -q internal")
+
+      with subtest("a port the project does not name, and another project's address, are not reached"):
+          listen("echo-unlisted", address, 64321, "unlisted")
+          listen("echo-theirs", other, 64320, "theirs")
+          before = len(lines_of("relay", name))
+          # The Engine lists both as published; neither is steered, so each
+          # goes to the session's own loopback, where nothing listens.
+          for host, port in [(address, 64321), ("127.0.0.1", 64321), ("::1", 64321), (other, 64320)]:
+              out = dial(leader, host, port)
+              assert not {"unlisted", "theirs", "hello"} & set(out.split()), (host, port, out)
+          time.sleep(1)
+          assert len(lines_of("relay", name)) == before, lines_of("relay", name)[before:]
+          # A bind on every address at 64320 cannot share the port with them.
+          machine.succeed("systemctl stop echo-unlisted echo-theirs")
+
+      with subtest("with no running container of the project publishing it, a host listener on every address is not reached"):
+          machine.succeed("systemctl stop echo-project")
+          listen("echo-wild", "0.0.0.0", 64320, "wildcard")
+          # From the host it answers at the project's address: what a dial
+          # without the Engine's word would reach.
+          assert machine.succeed(f"printf 'hello\\n' | nc -N -w 5 {address} 64320") == "wildcard\nhello\n"
+          lookups = len(engine_saw("agent=frisket").splitlines())
+          impostor = dict(theirs, Ports=owned["Ports"])
+          for containers in [[], [theirs], [dict(owned, State="exited")], [impostor]]:
+              engine_lists(containers)
+              for host in ["127.0.0.1", "::1"]:
+                  out = dial(leader, host, 64320)
+                  assert not {"wildcard", "hello"} & set(out.split()), (containers, host, out)
+          refused = relay_lines(name, 8, lambda m: m["decision"] == "refused")
+          assert all(m["reason"] == "no owned container publishes it" and m["to"] == f"{address}:64320" for m in refused), refused
+          assert len(engine_saw("agent=frisket").splitlines()) == lookups + 8
+          machine.succeed("systemctl stop echo-wild")
+
+      release(name)
 
       with subtest("the host's resolv.conf rewritten mid-session: the next query reaches the new resolver"):
           def nameservers():
