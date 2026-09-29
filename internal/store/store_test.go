@@ -1,4 +1,4 @@
-package policy
+package store
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"github.com/danielbodart/frisket/policy"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -64,17 +65,17 @@ func deps(t *testing.T, up dns.Exchanger) Deps {
 	return Deps{Classifier: c, Dialer: &egress.Dialer{Classifier: c}, Upstream: up, Log: slog.New(slog.NewJSONHandler(&journal{}, nil))}
 }
 
-func valid(t *testing.T) Policy {
+func valid(t *testing.T) policy.Policy {
 	t.Helper()
 	token := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return Policy{
+	return policy.Policy{
 		Allow: []string{"allowed.test", "api.test", "*.cdn.test"},
-		Routes: []Route{{
+		Routes: []policy.Route{{
 			Name: "api", Host: "api.test", Upstream: "https://api.test", CredentialFile: token, Placeholder: "proxy-injected",
-			Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/v1"}},
+			Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/v1"}},
 		}},
 	}
 }
@@ -84,82 +85,86 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		t.Fatalf("a valid policy was refused: %v", err)
 	}
 
-	for name, mutate := range map[string]func(*Policy){
+	for name, mutate := range map[string]func(*policy.Policy){
 		// Interception is how an allowed host gets its credential, not a way
 		// round the allowlist.
-		"a route for a name not on the allowlist": func(p *Policy) { p.Allow = []string{"allowed.test"} },
-		"a wildcard route upstream of one name":   func(p *Policy) { p.Routes[0].Host = "*.cdn.test" },
-		"a route for *":                           func(p *Policy) { p.Allow = []string{"*"}; p.Routes[0].Host = "*" },
-		"a wildcard route wider than allowed": func(p *Policy) {
+		"a route for a name not on the allowlist": func(p *policy.Policy) { p.Allow = []string{"allowed.test"} },
+		"a wildcard route upstream of one name":   func(p *policy.Policy) { p.Routes[0].Host = "*.cdn.test" },
+		"a route for *":                           func(p *policy.Policy) { p.Allow = []string{"*"}; p.Routes[0].Host = "*" },
+		"a wildcard route wider than allowed": func(p *policy.Policy) {
 			p.Allow = []string{"*.cdn.test"}
 			p.Routes[0].Host, p.Routes[0].Upstream = "*.test", "https://*.test"
 		},
-		"a wildcard route only one of whose names is allowed": func(p *Policy) {
+		"a wildcard route only one of whose names is allowed": func(p *policy.Policy) {
 			p.Allow = []string{"a.gapi.test"}
 			p.Routes[0].Host, p.Routes[0].Upstream = "*.gapi.test", "https://*.gapi.test"
 		},
-		"a session key with no credential": func(p *Policy) {
+		"a session key with no credential": func(p *policy.Policy) {
 			p.Routes[0].CredentialFile, p.Routes[0].Placeholder = "", ""
-			p.Routes[0].SessionKey = &SessionKey{PublicKey: sessionKeyPEM(t), Issuer: "sa@x.test"}
+			p.Routes[0].SessionKey = &policy.SessionKey{PublicKey: sessionKeyPEM(t), Issuer: "sa@x.test"}
 		},
-		"a session key that is not PEM": func(p *Policy) {
-			p.Routes[0].SessionKey = &SessionKey{PublicKey: "nope", Issuer: "sa@x.test"}
+		"a session key that is not PEM": func(p *policy.Policy) {
+			p.Routes[0].SessionKey = &policy.SessionKey{PublicKey: "nope", Issuer: "sa@x.test"}
 		},
-		"a session key with no issuer": func(p *Policy) {
-			p.Routes[0].SessionKey = &SessionKey{PublicKey: sessionKeyPEM(t)}
+		"a session key with no issuer": func(p *policy.Policy) {
+			p.Routes[0].SessionKey = &policy.SessionKey{PublicKey: sessionKeyPEM(t)}
 		},
-		"a session key granting at another host": func(p *Policy) {
-			p.Routes[0].SessionKey = &SessionKey{PublicKey: sessionKeyPEM(t), Issuer: "sa@x.test", Grants: []string{"allowed.test/token"}}
+		"a session key granting at another host": func(p *policy.Policy) {
+			p.Routes[0].SessionKey = &policy.SessionKey{PublicKey: sessionKeyPEM(t), Issuer: "sa@x.test", Grants: []string{"allowed.test/token"}}
 		},
-		"a route with no scope":            func(p *Policy) { p.Routes[0].Paths = nil },
-		"a placeholder with no credential": func(p *Policy) { p.Routes[0].CredentialFile = "" },
-		"basicUser with no credential": func(p *Policy) {
+		"a route with no scope":            func(p *policy.Policy) { p.Routes[0].Paths = nil },
+		"a placeholder with no credential": func(p *policy.Policy) { p.Routes[0].CredentialFile = "" },
+		"basicUser with no credential": func(p *policy.Policy) {
 			p.Routes[0].CredentialFile, p.Routes[0].Placeholder, p.Routes[0].BasicUser = "", "", "x-access-token"
 		},
-		"a header and basicUser":                       func(p *Policy) { p.Routes[0].Header = "X-Api-Key"; p.Routes[0].BasicUser = "u" },
-		"a basicUser with a colon":                     func(p *Policy) { p.Routes[0].BasicUser = "a:b" },
-		"git with no repositories":                     func(p *Policy) { p.Routes[0].Git = &GitRule{} },
-		"git with * among repositories":                func(p *Policy) { p.Routes[0].Git = &GitRule{Repos: []string{"*", "owner/repo"}} },
-		"git with a repository that is not owner/name": func(p *Policy) { p.Routes[0].Git = &GitRule{Repos: []string{"owner"}} },
-		"git with a wildcard owner":                    func(p *Policy) { p.Routes[0].Git = &GitRule{Repos: []string{"owner/*"}} },
-		"a JSON credential that names no token":        func(p *Policy) { p.Routes[0].CredentialJSON = &CredentialJSON{} },
-		"a JSON credential that expires twice": func(p *Policy) {
-			p.Routes[0].CredentialJSON = &CredentialJSON{Token: "t", ExpiresMillis: "e", ExpiresJWT: "t"}
+		"a header and basicUser":                       func(p *policy.Policy) { p.Routes[0].Header = "X-Api-Key"; p.Routes[0].BasicUser = "u" },
+		"a basicUser with a colon":                     func(p *policy.Policy) { p.Routes[0].BasicUser = "a:b" },
+		"git with no repositories":                     func(p *policy.Policy) { p.Routes[0].Git = &policy.GitRule{} },
+		"git with * among repositories":                func(p *policy.Policy) { p.Routes[0].Git = &policy.GitRule{Repos: []string{"*", "owner/repo"}} },
+		"git with a repository that is not owner/name": func(p *policy.Policy) { p.Routes[0].Git = &policy.GitRule{Repos: []string{"owner"}} },
+		"git with a wildcard owner":                    func(p *policy.Policy) { p.Routes[0].Git = &policy.GitRule{Repos: []string{"owner/*"}} },
+		"a JSON credential that names no token":        func(p *policy.Policy) { p.Routes[0].CredentialJSON = &policy.CredentialJSON{} },
+		"a JSON credential that expires twice": func(p *policy.Policy) {
+			p.Routes[0].CredentialJSON = &policy.CredentialJSON{Token: "t", ExpiresMillis: "e", ExpiresJWT: "t"}
 		},
-		"a route with no placeholder":              func(p *Policy) { p.Routes[0].Placeholder = "" },
-		"a plain-HTTP upstream":                    func(p *Policy) { p.Routes[0].Upstream = "http://api.test" },
-		"a * inside an allowlist name":             func(p *Policy) { p.Allow = append(p.Allow, "api.*.test") },
-		"a * glued to an allowlist name":           func(p *Policy) { p.Allow = append(p.Allow, "*cdn.test") },
-		"Authorization named as a bare header":     func(p *Policy) { p.Routes[0].Header = "authorization" },
-		"unmatched that is neither refuse nor ask": func(p *Policy) { p.Routes[0].Unmatched = "admit" },
-		"a rule with a path and a prefix":          func(p *Policy) { p.Routes[0].Paths[0].Path = "/v1/x" },
-		"a * inside a template segment":            func(p *Policy) { p.Routes[0].Paths[0].Prefix = "/v1/x*" },
-		"a verb with no name":                      func(p *Policy) { p.Routes[0].Paths[0].Prefix = "/v1/*:" },
-		"encoded slashes with no *":                func(p *Policy) { p.Routes[0].Paths[0].EncodedSlashes = true },
-		"a refusal with no message in it": func(p *Policy) {
-			p.Routes[0].Refusal = &Refusal{ContentType: "application/json", Body: `{"error":"no"}`}
+		"a route with no placeholder":              func(p *policy.Policy) { p.Routes[0].Placeholder = "" },
+		"a plain-HTTP upstream":                    func(p *policy.Policy) { p.Routes[0].Upstream = "http://api.test" },
+		"a * inside an allowlist name":             func(p *policy.Policy) { p.Allow = append(p.Allow, "api.*.test") },
+		"a * glued to an allowlist name":           func(p *policy.Policy) { p.Allow = append(p.Allow, "*cdn.test") },
+		"Authorization named as a bare header":     func(p *policy.Policy) { p.Routes[0].Header = "authorization" },
+		"unmatched that is neither refuse nor ask": func(p *policy.Policy) { p.Routes[0].Unmatched = "admit" },
+		"a rule with a path and a prefix":          func(p *policy.Policy) { p.Routes[0].Paths[0].Path = "/v1/x" },
+		"a * inside a template segment":            func(p *policy.Policy) { p.Routes[0].Paths[0].Prefix = "/v1/x*" },
+		"a verb with no name":                      func(p *policy.Policy) { p.Routes[0].Paths[0].Prefix = "/v1/*:" },
+		"encoded slashes with no *":                func(p *policy.Policy) { p.Routes[0].Paths[0].EncodedSlashes = true },
+		"a refusal with no message in it": func(p *policy.Policy) {
+			p.Routes[0].Refusal = &policy.Refusal{ContentType: "application/json", Body: `{"error":"no"}`}
 		},
-		"an operation with no summary": func(p *Policy) {
-			p.Routes[0].Paths[0].Operation = &Operation{ID: "op"}
+		"an operation with no summary": func(p *policy.Policy) {
+			p.Routes[0].Paths[0].Operation = &policy.Operation{ID: "op"}
 		},
-		"graphql with no path":      func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{}} },
-		"graphql at a path not /":   func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{Path: "graphql"}} },
-		"graphql unmatched admit":   func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Unmatched: "admit"}} },
-		"graphql at one path twice": func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql"}, {Path: "/graphql"}} },
-		"a graphql query by its field": func(p *Policy) {
-			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Query: &GraphQLField{Field: "viewer"}}}
+		"graphql with no path":    func(p *policy.Policy) { p.Routes[0].GraphQL = []policy.GraphQLRule{{}} },
+		"graphql at a path not /": func(p *policy.Policy) { p.Routes[0].GraphQL = []policy.GraphQLRule{{Path: "graphql"}} },
+		"graphql unmatched admit": func(p *policy.Policy) {
+			p.Routes[0].GraphQL = []policy.GraphQLRule{{Path: "/graphql", Unmatched: "admit"}}
 		},
-		"a graphql mutation with no field": func(p *Policy) {
-			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Mutations: []GraphQLField{{Ask: true}}}}
+		"graphql at one path twice": func(p *policy.Policy) {
+			p.Routes[0].GraphQL = []policy.GraphQLRule{{Path: "/graphql"}, {Path: "/graphql"}}
 		},
-		"a graphql field twice": func(p *Policy) {
-			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Mutations: []GraphQLField{{Field: "a"}, {Field: "a", Ask: true}}}}
+		"a graphql query by its field": func(p *policy.Policy) {
+			p.Routes[0].GraphQL = []policy.GraphQLRule{{Path: "/graphql", Query: &policy.GraphQLField{Field: "viewer"}}}
 		},
-		"a graphql field asking and refusing": func(p *Policy) {
-			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Mutations: []GraphQLField{{Field: "a", Ask: true, Refuse: true}}}}
+		"a graphql mutation with no field": func(p *policy.Policy) {
+			p.Routes[0].GraphQL = []policy.GraphQLRule{{Path: "/graphql", Mutations: []policy.GraphQLField{{Ask: true}}}}
 		},
-		"a graphql operation of no class": func(p *Policy) {
-			p.Routes[0].GraphQL = []GraphQLRule{{Path: "/graphql", Mutations: []GraphQLField{{Field: "a", Operation: &Operation{ID: "a", Summary: "A", Class: "delete"}}}}}
+		"a graphql field twice": func(p *policy.Policy) {
+			p.Routes[0].GraphQL = []policy.GraphQLRule{{Path: "/graphql", Mutations: []policy.GraphQLField{{Field: "a"}, {Field: "a", Ask: true}}}}
+		},
+		"a graphql field asking and refusing": func(p *policy.Policy) {
+			p.Routes[0].GraphQL = []policy.GraphQLRule{{Path: "/graphql", Mutations: []policy.GraphQLField{{Field: "a", Ask: true, Refuse: true}}}}
+		},
+		"a graphql operation of no class": func(p *policy.Policy) {
+			p.Routes[0].GraphQL = []policy.GraphQLRule{{Path: "/graphql", Mutations: []policy.GraphQLField{{Field: "a", Operation: &policy.Operation{ID: "a", Summary: "A", Class: "delete"}}}}}
 		},
 	} {
 		p := valid(t)
@@ -179,15 +184,15 @@ func TestGitRoutesBuild(t *testing.T) {
 	p := valid(t)
 	p.Allow = append(p.Allow, "git.test", "anon.test")
 	p.Routes = append(p.Routes,
-		Route{
+		policy.Route{
 			Name: "git", Host: "git.test", Upstream: "https://git.test",
 			CredentialFile: p.Routes[0].CredentialFile, Placeholder: "proxy-injected", BasicUser: "x-access-token",
-			Git: &GitRule{Repos: []string{"owner/repo", "Owner/Other.js"}, Push: "allow"},
+			Git: &policy.GitRule{Repos: []string{"owner/repo", "Owner/Other.js"}, Push: "allow"},
 		},
-		Route{
+		policy.Route{
 			Name: "anon", Host: "anon.test", Upstream: "https://anon.test",
-			Paths: []PathRule{{Methods: []string{"GET", "HEAD"}, Prefix: "/"}},
-			Git:   &GitRule{Repos: []string{"*"}},
+			Paths: []policy.PathRule{{Methods: []string{"GET", "HEAD"}, Prefix: "/"}},
+			Git:   &policy.GitRule{Repos: []string{"*"}},
 		},
 	)
 	if err := check(t, "p", p); err != nil {
@@ -200,17 +205,17 @@ func TestGitRoutesBuild(t *testing.T) {
 func TestGraphQLRoutesBuild(t *testing.T) {
 	p := valid(t)
 	p.Routes[0].Paths = nil
-	p.Routes[0].GraphQL = []GraphQLRule{
+	p.Routes[0].GraphQL = []policy.GraphQLRule{
 		{
 			Path:  "/graphql",
-			Query: &GraphQLField{Operation: &Operation{ID: "graphql-query", Summary: "A GraphQL query", Class: "read"}},
-			Mutations: []GraphQLField{
-				{Field: "closePullRequest", Ask: true, Operation: &Operation{ID: "closePullRequest", Summary: "Close a pull request.", Class: "write", Category: "pulls"}},
+			Query: &policy.GraphQLField{Operation: &policy.Operation{ID: "graphql-query", Summary: "A GraphQL query", Class: "read"}},
+			Mutations: []policy.GraphQLField{
+				{Field: "closePullRequest", Ask: true, Operation: &policy.Operation{ID: "closePullRequest", Summary: "Close a pull request.", Class: "write", Category: "pulls"}},
 				{Field: "deleteIssue", Refuse: true},
 			},
 			Unmatched: "allow",
 		},
-		{Path: "/accounts/*/graphql", Query: &GraphQLField{}, Unmatched: "ask"},
+		{Path: "/accounts/*/graphql", Query: &policy.GraphQLField{}, Unmatched: "ask"},
 	}
 	if err := check(t, "p", p); err != nil {
 		t.Fatal(err)
@@ -221,19 +226,19 @@ func TestGraphQLRoutesBuild(t *testing.T) {
 // class is one of the three a consumer judges by.
 func TestGitPushAndOperationClassAreOneOfTheirWords(t *testing.T) {
 	for _, push := range []string{"", "refuse", "ask", "allow"} {
-		if _, err := gitScope(GitRule{Repos: []string{"*"}, Push: push}); err != nil {
+		if _, err := gitScope(policy.GitRule{Repos: []string{"*"}, Push: push}); err != nil {
 			t.Errorf("push %q: %v", push, err)
 		}
 	}
 	for _, push := range []string{"true", "Allow", "admit"} {
-		if _, err := gitScope(GitRule{Repos: []string{"*"}, Push: push}); err == nil {
+		if _, err := gitScope(policy.GitRule{Repos: []string{"*"}, Push: push}); err == nil {
 			t.Errorf("push %q was accepted", push)
 		}
 	}
 	for class, ok := range map[string]bool{"": true, "read": true, "write": true, "guarded": true, "delete": false} {
 		p := valid(t)
-		p.Routes[0].Paths = []PathRule{{Methods: []string{"DELETE"}, Path: "/x", Ask: true,
-			Operation: &Operation{ID: "x", Summary: "X", Class: class, Category: "things"}}}
+		p.Routes[0].Paths = []policy.PathRule{{Methods: []string{"DELETE"}, Path: "/x", Ask: true,
+			Operation: &policy.Operation{ID: "x", Summary: "X", Class: class, Category: "things"}}}
 		if err := check(t, "p", p); (err == nil) != ok {
 			t.Errorf("class %q: %v", class, err)
 		}
@@ -244,11 +249,11 @@ func TestGitPushAndOperationClassAreOneOfTheirWords(t *testing.T) {
 // never for a pattern the allowlist would refuse.
 func TestARouteIsForANameOrTheNamesBelowOne(t *testing.T) {
 	for _, bad := range []string{"*", "a.*.test", "*a.test", "**.test"} {
-		if _, err := interceptHosts(Policy{Routes: []Route{{Name: "r", Host: bad}}}); err == nil {
+		if _, err := interceptHosts(policy.Policy{Routes: []policy.Route{{Name: "r", Host: bad}}}); err == nil {
 			t.Errorf("a route for %q was accepted", bad)
 		}
 	}
-	hosts, err := interceptHosts(Policy{Routes: []Route{{Name: "a", Host: "*.GAPI.test."}, {Name: "b", Host: "api.test"}}})
+	hosts, err := interceptHosts(policy.Policy{Routes: []policy.Route{{Name: "a", Host: "*.GAPI.test."}, {Name: "b", Host: "api.test"}}})
 	if err != nil || !slices.Equal(hosts, []string{"*.gapi.test", "api.test"}) {
 		t.Fatalf("interceptHosts = %v, %v", hosts, err)
 	}
@@ -277,22 +282,22 @@ func TestAWildcardRouteWithASessionKeyBuilds(t *testing.T) {
 	if err := os.WriteFile(token, []byte(`{"access_token":"ya29.x","expiry":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p := Policy{
+	p := policy.Policy{
 		Allow: []string{"*.gapi.test", "gapi.test"},
-		Routes: []Route{
+		Routes: []policy.Route{
 			{
 				Name: "gapi", Host: "*.gapi.test", Upstream: "https://*.gapi.test",
-				CredentialFile: token, CredentialJSON: &CredentialJSON{Token: "access_token", ExpiresMillis: "expiry"},
+				CredentialFile: token, CredentialJSON: &policy.CredentialJSON{Token: "access_token", ExpiresMillis: "expiry"},
 				Placeholder: "proxy-injected",
-				SessionKey: &SessionKey{
+				SessionKey: &policy.SessionKey{
 					PublicKey: sessionKeyPEM(t), Issuer: "sa@project.iam.gserviceaccount.test",
 					Grants: []string{"oauth2.gapi.test/token", "www.gapi.test/oauth2/v4/token"},
 				},
-				Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}},
+				Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/"}},
 			},
 			{
 				Name: "mtls", Host: "*.mtls.gapi.test", Upstream: "https://*.mtls.gapi.test",
-				Paths: []PathRule{{Methods: []string{"GET", "POST"}, Prefix: "/", Refuse: true}},
+				Paths: []policy.PathRule{{Methods: []string{"GET", "POST"}, Prefix: "/", Refuse: true}},
 			},
 		},
 	}
@@ -360,8 +365,8 @@ func TestARouteReadsItsCredentialFromJSON(t *testing.T) {
 	if err := os.WriteFile(creds, []byte(`{"claudeAiOauth":{"accessToken":"tok","expiresAt":1789766901894}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var doc Document
-	if err := decode([]byte(`{"name":"p","allow":["api.test"],"routes":[{
+	var doc policy.Document
+	if err := policy.Decode([]byte(`{"name":"p","allow":["api.test"],"routes":[{
 		"name":"claude","host":"api.test","upstream":"https://api.test","credentialFile":`+strconv.Quote(creds)+`,"placeholder":"p",
 		"credentialJSON":{"token":"claudeAiOauth.accessToken","expiresMillis":"claudeAiOauth.expiresAt"},
 		"paths":[{"methods":["POST"],"prefix":"/v1"}]}]}`), &doc); err != nil {
@@ -382,8 +387,8 @@ func TestARouteReadsItsCredentialFromJSON(t *testing.T) {
 }
 
 func TestARuleCarriesEncodedSlashesToItsScope(t *testing.T) {
-	var doc Document
-	if err := decode([]byte(`{"name":"p","allow":["storage.test"],"routes":[{
+	var doc policy.Document
+	if err := policy.Decode([]byte(`{"name":"p","allow":["storage.test"],"routes":[{
 		"name":"gcs","host":"storage.test","upstream":"https://storage.test","unmatched":"ask",
 		"paths":[{"methods":["GET"],"path":"/storage/v1/b/*/o/*","encodedSlashes":true},{"methods":["GET"],"path":"/storage/v1/b/*"}]}]}`), &doc); err != nil {
 		t.Fatal(err)
@@ -553,9 +558,9 @@ func TestARouteOfOperationsLoadsAndBuilds(t *testing.T) {
 }
 
 // writeDocument writes a policy document, as the NixOS module does.
-func writeDocument(t *testing.T, name string, p Policy) string {
+func writeDocument(t *testing.T, name string, p policy.Policy) string {
 	t.Helper()
-	b, err := json.Marshal(Document{Name: name, Policy: p})
+	b, err := json.Marshal(policy.Document{Name: name, Policy: p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,13 +572,13 @@ func writeDocument(t *testing.T, name string, p Policy) string {
 }
 
 // check is whether a policy holds together, as a session opening it finds.
-func check(t *testing.T, name string, p Policy) error {
+func check(t *testing.T, name string, p policy.Policy) error {
 	t.Helper()
 	return Check(writeDocument(t, name, p), deps(t, &counting{}))
 }
 
 // open opens a policy from its document, for as long as the test runs.
-func open(t *testing.T, up dns.Exchanger, name string, p Policy) serve.Policy {
+func open(t *testing.T, up dns.Exchanger, name string, p policy.Policy) serve.Policy {
 	t.Helper()
 	s, err := NewStore(&Config{}, deps(t, up))
 	if err != nil {
@@ -615,7 +620,7 @@ func TestTheSameDocumentIsBuiltOnceAndClosedByItsLastSession(t *testing.T) {
 	}
 	changed := valid(t)
 	changed.Allow = append(changed.Allow, "more.test")
-	if err := os.WriteFile(path, mustJSON(t, Document{Name: "p", Policy: changed}), 0o600); err != nil {
+	if err := os.WriteFile(path, mustJSON(t, policy.Document{Name: "p", Policy: changed}), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, releaseC, err := s.Open(path)

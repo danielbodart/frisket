@@ -16,7 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danielbodart/frisket/internal/docker"
+	"github.com/danielbodart/frisket/docker"
+	"github.com/danielbodart/frisket/internal/dockerapi"
 )
 
 // DockerRoute makes a route a Docker Engine's: its upstream is the daemon's
@@ -45,7 +46,7 @@ type DockerRoute struct {
 	// MaxBody bounds a JSON body.
 	MaxBody int64
 	// Bodies are the tables a rule's body is judged by, by their operation.
-	Bodies map[string]*docker.Table
+	Bodies map[string]*dockerapi.Table
 }
 
 // APIVersions are "1.NN", Min to Max; Unversioned are paths, exactly, that
@@ -116,7 +117,6 @@ var creates = map[string]string{
 var queryChecks = []string{"any", "bool", "int", "containerName", "filters", "imageName", "imageTag", "enum"}
 
 var (
-	projectRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}$`)
 	versionRE  = regexp.MustCompile(`^1\.(0|[1-9][0-9]*)$`)
 	versionish = regexp.MustCompile(`^v[0-9.]*$`)
 	versionSeg = regexp.MustCompile(`^v1\.(0|[1-9][0-9]*)$`)
@@ -156,7 +156,7 @@ func (r *Route) validateDocker(u *url.URL, wild bool) error {
 	if s.Unmatched != UnmatchedRefuse || s.Git != nil || len(s.GraphQL) > 0 || s.GitHubAPI != nil {
 		return fmt.Errorf("route %s: a Docker route has path rules only, and refuses what they do not match", r.Name)
 	}
-	if !projectRE.MatchString(d.Project) || strings.HasSuffix(d.Project, "/.") || strings.HasSuffix(d.Project, "/..") {
+	if !docker.ValidProject(d.Project) {
 		return fmt.Errorf("route %s: project %q is not owner/repo", r.Name, d.Project)
 	}
 	lo, err := apiMinor(d.APIVersions.Min)
@@ -466,11 +466,11 @@ func (d *dockerRule) refuse(reason, account string) Verdict {
 // refused is a refusal from the docker package: the client reads its reason
 // and the table's words, the log what the request held.
 func (d *dockerRule) refused(err error) Verdict {
-	var ref *docker.Refusal
+	var ref *dockerapi.Refusal
 	if errors.As(err, &ref) {
 		return d.refuse(ref.Error(), ref.Log)
 	}
-	return d.refuse(docker.ReasonUnreadable, "")
+	return d.refuse(dockerapi.ReasonUnreadable, "")
 }
 
 // decide runs the rule's checks, in order, and makes the
@@ -511,8 +511,8 @@ func (d *dockerRule) decide(r *http.Request) Verdict {
 	}
 
 	bodied := false
-	var checked docker.Checked
-	var lookups []docker.Lookup
+	var checked dockerapi.Checked
+	var lookups []dockerapi.Lookup
 	if d.Body == "" {
 		if reason := noBody(r); reason != "" {
 			return d.refuse(reason, "")
@@ -623,25 +623,25 @@ func (d *dockerRule) upgrade(h http.Header) (reason, account string) {
 func (d *dockerRule) query(raw string) (string, []string, error) {
 	vals, err := url.ParseQuery(raw)
 	if err != nil {
-		return "", nil, &docker.Refusal{Reason: docker.ReasonQuery, Detail: "a query that does not parse", Log: "query unparsed"}
+		return "", nil, &dockerapi.Refusal{Reason: dockerapi.ReasonQuery, Detail: "a query that does not parse", Log: "query unparsed"}
 	}
 	for _, key := range sortedKeys(vals) {
 		c, ok := d.Query[key]
 		if !ok {
-			return "", nil, &docker.Refusal{Reason: docker.ReasonQuery, Detail: "a key this operation does not take", Log: "query=" + quoted(key) + " not allowed"}
+			return "", nil, &dockerapi.Refusal{Reason: dockerapi.ReasonQuery, Detail: "a key this operation does not take", Log: "query=" + quoted(key) + " not allowed"}
 		}
 		vs := vals[key]
 		if len(vs) != 1 {
-			return "", nil, &docker.Refusal{Reason: docker.ReasonQuery, Detail: key + " more than once", Log: "query=" + key + " twice"}
+			return "", nil, &dockerapi.Refusal{Reason: dockerapi.ReasonQuery, Detail: key + " more than once", Log: "query=" + key + " twice"}
 		}
 		if !c.judge(vs[0]) {
-			return "", nil, &docker.Refusal{Reason: docker.ReasonQuery, Detail: key + " is not " + c.Check, Log: "query=" + key + " not " + c.Check}
+			return "", nil, &dockerapi.Refusal{Reason: dockerapi.ReasonQuery, Detail: key + " is not " + c.Check, Log: "query=" + key + " not " + c.Check}
 		}
 	}
 	var account []string
 	switch d.Owned {
 	case "list":
-		merged, err := docker.MergeFilter(vals.Get("filters"), d.Query["filters"].Filters, d.route.Project)
+		merged, err := dockerapi.MergeFilter(vals.Get("filters"), d.Query["filters"].Filters, d.route.Project)
 		if err != nil {
 			return "", nil, err
 		}
@@ -682,7 +682,7 @@ func (c QueryCheck) judge(v string) bool {
 // an untagged fromImage pulls every tag.
 func (d *dockerRule) pulled(vals url.Values) (string, error) {
 	refuse := func(detail, log string) error {
-		return &docker.Refusal{Reason: ReasonImage, Detail: detail, Log: log}
+		return &dockerapi.Refusal{Reason: ReasonImage, Detail: detail, Log: log}
 	}
 	from, tag := vals.Get("fromImage"), vals.Get("tag")
 	switch {
@@ -752,35 +752,35 @@ func noBody(r *http.Request) string {
 // body reads a JSON body, bounded by the route's maxBody, and judges it by
 // the rule's table. What goes upstream is the tree that was judged,
 // re-encoded.
-func (d *dockerRule) body(r *http.Request) (docker.Checked, error) {
+func (d *dockerRule) body(r *http.Request) (dockerapi.Checked, error) {
 	refuse := func(reason, detail, log string) error {
-		return &docker.Refusal{Reason: reason, Detail: detail, Log: log}
+		return &dockerapi.Refusal{Reason: reason, Detail: detail, Log: log}
 	}
 	for _, v := range r.Header.Values("Content-Encoding") {
 		if !asciiEqualFold(strings.TrimSpace(v), "identity") {
-			return docker.Checked{}, refuse(docker.ReasonBody, "an encoded body", "content-encoding="+quoted(v))
+			return dockerapi.Checked{}, refuse(dockerapi.ReasonBody, "an encoded body", "content-encoding="+quoted(v))
 		}
 	}
 	if !isJSON(r.Header.Values("Content-Type")) {
-		return docker.Checked{}, refuse(docker.ReasonBody, "a body that is not application/json", "content-type not json")
+		return dockerapi.Checked{}, refuse(dockerapi.ReasonBody, "a body that is not application/json", "content-type not json")
 	}
 	body, whole, err := readUpTo(r, int(d.route.MaxBody))
 	switch {
 	case err != nil:
-		return docker.Checked{}, refuse(ReasonStoppedWaiting, "", "")
+		return dockerapi.Checked{}, refuse(ReasonStoppedWaiting, "", "")
 	case !whole:
-		return docker.Checked{}, refuse(docker.ReasonBody, fmt.Sprintf("a body over %d bytes", d.route.MaxBody), "body over maxBody")
+		return dockerapi.Checked{}, refuse(dockerapi.ReasonBody, fmt.Sprintf("a body over %d bytes", d.route.MaxBody), "body over maxBody")
 	case len(body) == 0:
-		return docker.Checked{}, refuse(docker.ReasonUnreadable, "an empty body", "body empty")
+		return dockerapi.Checked{}, refuse(dockerapi.ReasonUnreadable, "an empty body", "body empty")
 	}
-	checked, err := d.route.Bodies[d.Body].Check(body, docker.Route{
+	checked, err := d.route.Bodies[d.Body].Check(body, dockerapi.Route{
 		Project: d.route.Project,
 		Address: d.route.Address,
 		Ports:   d.route.Ports,
 		Images:  d.route.Images,
 	})
 	if err != nil {
-		return docker.Checked{}, err
+		return dockerapi.Checked{}, err
 	}
 	setBody(r, checked.Body)
 	r.TransferEncoding = nil

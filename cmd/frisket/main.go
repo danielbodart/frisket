@@ -32,10 +32,10 @@ import (
 	"github.com/danielbodart/frisket/internal/dns"
 	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/nsnet"
-	"github.com/danielbodart/frisket/internal/policy"
 	"github.com/danielbodart/frisket/internal/sdnotify"
 	"github.com/danielbodart/frisket/internal/serve"
 	"github.com/danielbodart/frisket/internal/steering"
+	"github.com/danielbodart/frisket/internal/store"
 )
 
 // version is stamped at build time. scripts/version.sh derives the real one
@@ -169,15 +169,15 @@ func runServe(argv []string) error {
 	// start. The policies themselves are each session's to name, and are
 	// read when it opens: `frisket check` is how a document is refused
 	// before any session is.
-	cfg, err := policy.Load(*configPath)
+	cfg, err := store.Load(*configPath)
 	if err != nil {
 		return err
 	}
-	classifier, dialer, err := policy.Dialer()
+	classifier, dialer, err := store.Dialer()
 	if err != nil {
 		return err
 	}
-	deps := policy.Deps{Classifier: classifier, Dialer: dialer, Log: log, Roots: roots}
+	deps := store.Deps{Classifier: classifier, Dialer: dialer, Log: log, Roots: roots}
 	if *askerPath != "" {
 		// Only when there is one: a nil *ask.Command in the interface would
 		// be an asker that panics rather than no asker at all.
@@ -187,7 +187,7 @@ func runServe(argv []string) error {
 		}
 		deps.Asker = asker
 	}
-	policies, err := policy.NewStore(cfg, deps)
+	policies, err := store.NewStore(cfg, deps)
 	if err != nil {
 		return err
 	}
@@ -311,7 +311,7 @@ func runCheck(argv []string) error {
 	if err != nil {
 		return err
 	}
-	deps := policy.Deps{
+	deps := store.Deps{
 		Classifier: classifier,
 		Dialer:     &egress.Dialer{Classifier: classifier},
 		Upstream:   &dns.Upstream{},
@@ -320,7 +320,7 @@ func runCheck(argv []string) error {
 		Log: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
 	for _, path := range argv {
-		if err := policy.Check(path, deps); err != nil {
+		if err := store.Check(path, deps); err != nil {
 			return err
 		}
 	}

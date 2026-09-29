@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/danielbodart/frisket/internal/docker"
+	"github.com/danielbodart/frisket/internal/dockerapi"
 )
 
 // Refusals of what a request names, as the log and the client read them.
@@ -225,7 +225,7 @@ func (c *claim) get(p, account string) ([]byte, *answer, error) {
 
 // owns is whether labels carry this project's.
 func (c *claim) owns(labels map[string]string) bool {
-	v, ok := labels[docker.LabelKey]
+	v, ok := labels[dockerapi.LabelKey]
 	return ok && v == c.route.Project
 }
 
@@ -305,7 +305,7 @@ func (c *claim) container(ref, account string) (string, error) {
 // body answers for each name a body holds, by what the body does with it,
 // and gives the full ID of each network it attaches to, by its name, for
 // the body to name it by upstream.
-func (c *claim) body(lookups []docker.Lookup) (account []string, networks map[string]string, err error) {
+func (c *claim) body(lookups []dockerapi.Lookup) (account []string, networks map[string]string, err error) {
 	networks = map[string]string{}
 	for _, l := range lookups {
 		acct, id, err := c.named(l)
@@ -322,13 +322,13 @@ func (c *claim) body(lookups []docker.Lookup) (account []string, networks map[st
 
 // named answers for one name a body holds, and gives, for a network it
 // attaches to, that network's full ID.
-func (c *claim) named(l docker.Lookup) (account, id string, err error) {
+func (c *claim) named(l dockerapi.Lookup) (account, id string, err error) {
 	switch {
-	case l.Kind == "network" && l.Use == docker.Create:
+	case l.Kind == "network" && l.Use == dockerapi.Create:
 		// Held, and nothing to ask: the daemon refuses a network's name
 		// twice, and what it makes is stamped.
 		return "network=" + l.Name + " held", "", nil
-	case l.Kind == "network" && l.Use == docker.Attach:
+	case l.Kind == "network" && l.Use == dockerapi.Attach:
 		name := "network " + l.Name
 		f, a, err := c.ask("/networks/"+url.PathEscape(l.Name), name)
 		switch {
@@ -350,13 +350,13 @@ func (c *claim) named(l docker.Lookup) (account, id string, err error) {
 }
 
 // volume answers for a volume a body names.
-func (c *claim) volume(l docker.Lookup) (string, error) {
-	name := map[docker.Use]string{docker.Bind: "bind ", docker.Mount: "mount ", docker.Create: "volume="}[l.Use] + l.Name
+func (c *claim) volume(l dockerapi.Lookup) (string, error) {
+	name := map[dockerapi.Use]string{dockerapi.Bind: "bind ", dockerapi.Mount: "mount ", dockerapi.Create: "volume="}[l.Use] + l.Name
 	f, a, err := c.ask("/volumes/"+url.PathEscape(l.Name), name)
 	switch {
 	case err != nil:
 		return "", err
-	case a != nil && l.Use == docker.Create:
+	case a != nil && l.Use == dockerapi.Create:
 		// Made by this request, and stamped.
 		return name + " absent", nil
 	case a != nil:
@@ -364,7 +364,7 @@ func (c *claim) volume(l docker.Lookup) (string, error) {
 		return "", absent(name, nil)
 	case c.owns(f.Labels):
 		return name + " owned", nil
-	case l.Use != docker.Mount:
+	case l.Use != dockerapi.Mount:
 		return "", notOwned(name)
 	}
 	// A volume the daemon named itself, which Compose carries over when it
@@ -388,7 +388,7 @@ func (c *claim) volume(l docker.Lookup) (string, error) {
 // apply, and each container it returns is checked again here.
 func (c *claim) mountedByOwn(volume, account string) (bool, error) {
 	filters, err := json.Marshal(map[string][]string{
-		"label":  {docker.LabelKey + "=" + c.route.Project},
+		"label":  {dockerapi.LabelKey + "=" + c.route.Project},
 		"volume": {volume},
 	})
 	if err != nil {

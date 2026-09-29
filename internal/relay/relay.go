@@ -31,7 +31,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/danielbodart/frisket/internal/docker"
+	"github.com/danielbodart/frisket/internal/dockerapi"
 	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/steer"
 )
@@ -188,7 +188,7 @@ type container struct {
 // answered, so the relay does not rest on the daemon honouring them.
 func (h *Handler) published(ctx context.Context, port uint16) error {
 	filters, err := json.Marshal(map[string][]string{
-		"label":   {docker.LabelKey + "=" + h.Project},
+		"label":   {dockerapi.LabelKey + "=" + h.Project},
 		"publish": {strconv.Itoa(int(port)) + "/tcp"},
 		"status":  {"running"},
 	})
@@ -236,7 +236,7 @@ func (h *Handler) published(ctx context.Context, port uint16) error {
 		if !idRE.MatchString(c.ID) {
 			return &lookupError{"no ID"}
 		}
-		if c.Labels[docker.LabelKey] != h.Project || c.State != "running" {
+		if c.Labels[dockerapi.LabelKey] != h.Project || c.State != "running" {
 			continue
 		}
 		for _, p := range c.Ports {

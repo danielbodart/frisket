@@ -179,7 +179,7 @@ let
           ports = [ 64320 ];
           names = [ "data-lab.internal" "data-lab.triptease.internal" ];
           maxBody = 262144;
-          bodies = lib.importJSON ../internal/docker/testdata/fields.json;
+          bodies = lib.importJSON ../internal/dockerapi/testdata/fields.json;
         };
       }
       {

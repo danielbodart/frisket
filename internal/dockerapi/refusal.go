@@ -1,4 +1,4 @@
-package docker
+package dockerapi
 
 import (
 	"strconv"

@@ -1,9 +1,8 @@
-package docker
+package dockerapi
 
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"maps"
 	"net/netip"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/danielbodart/frisket/docker"
 )
 
 const project = "triptease/data-lab"
@@ -289,7 +290,7 @@ func binding(ip any, port string) map[string]any {
 // really sent, so that each case differs from an admitted body in one thing.
 func TestWhatReachesTheHostIsRefused(t *testing.T) {
 	tabs := tables(t)
-	other := Address("triptease/finance-api").String()
+	other := docker.Address("triptease/finance-api").String()
 	containerCases := []struct {
 		name   string
 		change func(map[string]any)
@@ -964,83 +965,6 @@ func TestAMalformedTableFailsToCompile(t *testing.T) {
 	if _, err := Compile("ContainerCreate", []byte(`{"Image":"image","HostConfig":"struct","HostConfig.NetworkMode":"network"}`)); err != nil {
 		t.Errorf("the smallest ContainerCreate: %v", err)
 	}
-}
-
-func TestTheDerivationGivesTheContractsVectors(t *testing.T) {
-	a63, a64 := strings.Repeat("a", 63), strings.Repeat("a", 64)
-	for _, v := range []struct {
-		project, address string
-		names            []string
-	}{
-		{"triptease/data-lab", "127.1.191.78", []string{"data-lab.internal", "data-lab.triptease.internal"}},
-		{"triptease/finance-api", "127.6.18.253", []string{"finance-api.internal", "finance-api.triptease.internal"}},
-		// frisket.internal is the reserved apex.
-		{"danielbodart/frisket", "127.103.202.234", []string{"frisket.danielbodart.internal"}},
-		{"test/repo-66", "127.211.18.75", []string{"repo-66.internal", "repo-66.test.internal"}},
-		{"TripTease/Data-Lab", "127.1.191.78", []string{"data-lab.internal", "data-lab.triptease.internal"}},
-		{"bodar/bodar.ts", "127.100.84.99", []string{"bodar-ts.internal", "bodar-ts.bodar.internal"}},
-		{"bodar/bodar-ts", "127.113.253.232", []string{"bodar-ts.internal", "bodar-ts.bodar.internal"}},
-		{"test/" + a63, "127.9.96.222", []string{a63 + ".internal", a63 + ".test.internal"}},
-		{"test/" + a64, "127.60.34.62", nil},
-		{"frisket/docker", "", []string{"docker.internal"}},
-		{"google/metadata", "", []string{"metadata.internal"}},
-		{"google/data-lab", "", []string{"data-lab.internal"}},
-		{"frisket/frisket", "", nil},
-		{"google/google", "", nil},
-		{"test/_.._", "", nil},
-	} {
-		if v.address != "" {
-			if got := Address(v.project).String(); got != v.address {
-				t.Errorf("%s: %s, want %s", v.project, got, v.address)
-			}
-		}
-		if got := Names(v.project); !slices.Equal(got, v.names) {
-			t.Errorf("%s: %q, want %q", v.project, got, v.names)
-		}
-	}
-}
-
-func TestTheEmbeddedReservedListIsExactlyFrisketsAndGooglesInternalApexes(t *testing.T) {
-	// The flake's docker-reserved check pins lib.docker.reserved to the same
-	// literal, so neither side of the one file can change without a test failing.
-	if want := []string{"frisket.internal", "google.internal"}; !slices.Equal(reserved, want) {
-		t.Fatalf("reserved.json gives %q, want %q", reserved, want)
-	}
-	for _, n := range []string{"frisket.internal", "google.internal", "docker.frisket.internal", "metadata.google.internal"} {
-		if !Reserved(n) {
-			t.Errorf("%s is not reserved", n)
-		}
-	}
-	for _, n := range []string{"data-lab.internal", "frisket.danielbodart.internal"} {
-		if Reserved(n) {
-			t.Errorf("%s is reserved", n)
-		}
-	}
-}
-
-func TestAReservedListThatWouldReserveLessThanItSaysDoesNotParse(t *testing.T) {
-	for _, b := range []string{
-		``, `{}`, `"frisket.internal"`, `[]`, `null`, `[""]`, `["Frisket.internal"]`,
-		`["frisket..internal"]`, `["frisket.internal."]`, `["frisket internal"]`,
-		`["internal"]`, `["frisket.local"]`, `["frisket.internal", 1]`,
-	} {
-		if names, err := parseReserved([]byte(b)); err == nil {
-			t.Errorf("%s parsed as %q", b, names)
-		}
-	}
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Error("a list that does not parse did not panic")
-			}
-		}()
-		mustParseReserved([]byte(`[]`))
-	}()
-}
-
-func Example() {
-	fmt.Println(Address("triptease/data-lab"), Names("triptease/data-lab"))
-	// Output: 127.1.191.78 [data-lab.internal data-lab.triptease.internal]
 }
 
 // A create goes upstream naming every network it attaches to by the ID the

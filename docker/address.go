@@ -56,7 +56,7 @@ var reserved = mustParseReserved(reservedJSON)
 func mustParseReserved(b []byte) []string {
 	names, err := parseReserved(b)
 	if err != nil {
-		panic("internal/docker/reserved.json: " + err.Error())
+		panic("docker/reserved.json: " + err.Error())
 	}
 	return names
 }
@@ -78,6 +78,19 @@ func parseReserved(b []byte) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// projectRE is owner/repo as a route may name it: a GitHub owner, lower-case,
+// and a repository name.
+var projectRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}$`)
+
+// ValidProject is whether a route may name a project: owner/repo, already
+// lower-cased, and a repository that is a name rather than . or .., which no
+// repository can be. frisket refuses a route whose project is not, and chase
+// refuses to approve one, so a checkout that would name one is refused when
+// it is approved rather than when its session fails to start.
+func ValidProject(project string) bool {
+	return projectRE.MatchString(project) && !strings.HasSuffix(project, "/.") && !strings.HasSuffix(project, "/..")
 }
 
 var ownerRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}$`)

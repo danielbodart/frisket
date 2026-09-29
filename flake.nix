@@ -75,7 +75,7 @@
       # file the Go code embeds, and so the list Names() uses. Pure data, for
       # chase and nix-config to read rather than copy. frisket exports only the
       # list; the address and the names are chase's lib.docker to derive.
-      lib.docker.reserved = builtins.fromJSON (builtins.readFile ./internal/docker/reserved.json);
+      lib.docker.reserved = builtins.fromJSON (builtins.readFile ./docker/reserved.json);
 
       # The daemon, and the adapter that maps its sessions onto flong's hooks.
       # Keyed, so the module system can tell it is one module however many

@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielbodart/frisket/internal/docker"
+	"github.com/danielbodart/frisket/docker"
+	"github.com/danielbodart/frisket/internal/dockerapi"
 )
 
 const (
@@ -333,7 +334,7 @@ func TestAnAnonymousVolumeCarriesOverARecreateOnlyFromThisProjectsContainer(t *t
 	var filters map[string][]string
 	if err := json.Unmarshal([]byte(q.Get("filters")), &filters); err != nil || q.Get("all") != "1" ||
 		len(filters["volume"]) != 1 || filters["volume"][0] != anonVolume ||
-		len(filters["label"]) != 1 || filters["label"][0] != docker.LabelKey+"="+dockerProject {
+		len(filters["label"]) != 1 || filters["label"][0] != dockerapi.LabelKey+"="+dockerProject {
 		t.Errorf("asked %s", asked[1].query)
 	}
 	for name, src := range map[string]string{
@@ -351,7 +352,7 @@ func TestAnAnonymousVolumeCarriesOverARecreateOnlyFromThisProjectsContainer(t *t
 			return false
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `[{"Id":"`+strings.Repeat("ab", 32)+`","Labels":{"`+docker.LabelKey+`":"`+otherProject+`"},`+
+		_, _ = io.WriteString(w, `[{"Id":"`+strings.Repeat("ab", 32)+`","Labels":{"`+dockerapi.LabelKey+`":"`+otherProject+`"},`+
 			`"Mounts":[{"Type":"volume","Name":"`+anonVolume+`"}]}]`)
 		return true
 	})
@@ -375,7 +376,7 @@ func TestEveryCreateIsStampedWithThisProject(t *testing.T) {
 		status(t, c.target, res, body, http.StatusCreated, "")
 		seen := d.requests()
 		var sent struct{ Labels map[string]string }
-		if err := json.Unmarshal([]byte(seen[len(seen)-1].body), &sent); err != nil || sent.Labels[docker.LabelKey] != dockerProject {
+		if err := json.Unmarshal([]byte(seen[len(seen)-1].body), &sent); err != nil || sent.Labels[dockerapi.LabelKey] != dockerProject {
 			t.Errorf("%s sent %s", c.target, seen[len(seen)-1].body)
 		}
 		res, body = f.do(t, dockerRequest(t, "GET", c.then, nil))
@@ -631,7 +632,7 @@ func TestTheCaptureIsAdmittedInOrder(t *testing.T) {
 		if err := json.Unmarshal([]byte(s.body), &sent); err != nil {
 			t.Fatal(err)
 		}
-		if sent.Labels[docker.LabelKey] != dockerProject {
+		if sent.Labels[dockerapi.LabelKey] != dockerProject {
 			t.Errorf("created unstamped: %s", s.body)
 		}
 		for port, bindings := range sent.HostConfig.PortBindings {

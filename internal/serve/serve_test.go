@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielbodart/frisket/docker"
 	"github.com/danielbodart/frisket/internal/control"
-	"github.com/danielbodart/frisket/internal/docker"
 	"github.com/danielbodart/frisket/internal/sdnotify"
 	"github.com/danielbodart/frisket/internal/steer"
 	"golang.org/x/sys/unix"

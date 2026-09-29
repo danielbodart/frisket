@@ -15,7 +15,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/danielbodart/frisket/internal/docker"
+	"github.com/danielbodart/frisket/internal/dockerapi"
 )
 
 // daemon is a fake Engine on a unix socket. It keeps containers, volumes,
@@ -91,7 +91,7 @@ func labelled(project string) map[string]string {
 	if project == "" {
 		return nil
 	}
-	return map[string]string{docker.LabelKey: project}
+	return map[string]string{dockerapi.LabelKey: project}
 }
 
 func (d *daemon) container(id, name, project string, volumes ...string) {

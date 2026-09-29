@@ -1,8 +1,9 @@
-package policy
+package store
 
 import (
 	"context"
 	"encoding/json"
+	"github.com/danielbodart/frisket/policy"
 	"io"
 	"log/slog"
 	"net"
@@ -28,28 +29,28 @@ import (
 
 // dockerPolicy is a session's document with data-lab's Docker route, as
 // chase writes it: every Engine operation, and the body tables.
-func dockerPolicy(t *testing.T) Policy {
+func dockerPolicy(t *testing.T) policy.Policy {
 	t.Helper()
-	var paths []PathRule
+	var paths []policy.PathRule
 	if err := json.Unmarshal(readFile(t, "../intercept/testdata/engine-operations.json"), &paths); err != nil {
 		t.Fatal(err)
 	}
 	var bodies map[string]json.RawMessage
-	if err := json.Unmarshal(readFile(t, "../docker/testdata/fields.json"), &bodies); err != nil {
+	if err := json.Unmarshal(readFile(t, "../dockerapi/testdata/fields.json"), &bodies); err != nil {
 		t.Fatal(err)
 	}
-	return Policy{
+	return policy.Policy{
 		Allow: []string{"docker.frisket.internal"},
-		Routes: []Route{{
+		Routes: []policy.Route{{
 			Name:      "docker",
 			Host:      "docker.frisket.internal",
 			Upstream:  "unix:///run/user/1000/docker.sock",
 			Unmatched: "refuse",
-			Refusal:   &Refusal{ContentType: "application/json", Body: `{"message":"{{message}}"}`},
+			Refusal:   &policy.Refusal{ContentType: "application/json", Body: `{"message":"{{message}}"}`},
 			Paths:     paths,
-			Docker: &DockerRoute{
+			Docker: &policy.DockerRoute{
 				Project:     "triptease/data-lab",
-				APIVersions: APIVersions{Min: "1.55", Max: "1.56", Unversioned: []string{"/_ping"}},
+				APIVersions: policy.APIVersions{Min: "1.55", Max: "1.56", Unversioned: []string{"/_ping"}},
 				Images:      []string{"postgres:18", "docker.io/library/postgres:18"},
 				Address:     "127.1.191.78",
 				Ports:       []int{64320, 64321, 64322},
@@ -80,13 +81,13 @@ func TestADockerRouteLoads(t *testing.T) {
 	p := dockerPolicy(t)
 	p.Allow = append(p.Allow, "metadata.google.internal", "*.frisket.internal", "docker.internal")
 	p.Routes = append(p.Routes,
-		Route{Name: "gce", Host: "metadata.google.internal", Upstream: "https://metadata.google.internal",
-			Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
-		Route{Name: "frisket", Host: "*.frisket.internal", Upstream: "https://*.frisket.internal",
-			Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
+		policy.Route{Name: "gce", Host: "metadata.google.internal", Upstream: "https://metadata.google.internal",
+			Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
+		policy.Route{Name: "frisket", Host: "*.frisket.internal", Upstream: "https://*.frisket.internal",
+			Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
 		// frisket/docker's name, not data-lab's.
-		Route{Name: "other", Host: "docker.internal", Upstream: "https://docker.internal",
-			Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
+		policy.Route{Name: "other", Host: "docker.internal", Upstream: "https://docker.internal",
+			Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/"}}},
 	)
 	if err := check(t, "p", p); err != nil {
 		t.Fatal(err)
@@ -103,49 +104,51 @@ func TestBuildRefusesABadDockerRoute(t *testing.T) {
 	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	wildcard := func(p *Policy, host string) {
+	wildcard := func(p *policy.Policy, host string) {
 		p.Allow = append(p.Allow, host)
-		p.Routes = append(p.Routes, Route{Name: "w", Host: host, Upstream: "https://" + host,
-			Paths: []PathRule{{Methods: []string{"GET"}, Prefix: "/"}}})
+		p.Routes = append(p.Routes, policy.Route{Name: "w", Host: host, Upstream: "https://" + host,
+			Paths: []policy.PathRule{{Methods: []string{"GET"}, Prefix: "/"}}})
 	}
-	for name, mutate := range map[string]func(*Policy){
-		"a credential file": func(p *Policy) { p.Routes[0].CredentialFile = token },
-		"a placeholder":     func(p *Policy) { p.Routes[0].Placeholder = "x" },
-		"a header":          func(p *Policy) { p.Routes[0].Header = "X-Registry-Auth" },
-		"a basic user":      func(p *Policy) { p.Routes[0].BasicUser = "u" },
-		"a JSON credential": func(p *Policy) { p.Routes[0].CredentialJSON = &CredentialJSON{Token: "t"} },
-		"a session key":     func(p *Policy) { p.Routes[0].SessionKey = &SessionKey{PublicKey: sessionKeyPEM(t), Issuer: "i"} },
-		"an upstream CA":    func(p *Policy) { p.Routes[0].UpstreamCA = token },
-		"no docker block":   func(p *Policy) { p.Routes[0].Docker = nil },
-		"unmatched ask":     func(p *Policy) { p.Routes[0].Unmatched = "ask" },
-		"a graphql scope":   func(p *Policy) { p.Routes[0].GraphQL = []GraphQLRule{{}} },
-		"a git scope":       func(p *Policy) { p.Routes[0].Git = &GitRule{} },
-		"a docker on https": func(p *Policy) { p.Routes[0].Upstream = "https://docker.frisket.internal" },
-		"an IPv6 address":   func(p *Policy) { p.Routes[0].Docker.Address = "::1" },
-		"a padded address":  func(p *Policy) { p.Routes[0].Docker.Address = "127.001.191.78" },
-		"another's address": func(p *Policy) { p.Routes[0].Docker.Address = "127.6.18.253" },
-		"a port past 65535": func(p *Policy) { p.Routes[0].Docker.Ports = []int{65536 + 64320} },
-		"a port of 80":      func(p *Policy) { p.Routes[0].Docker.Ports = []int{80} },
-		"names under .docker": func(p *Policy) {
+	for name, mutate := range map[string]func(*policy.Policy){
+		"a credential file": func(p *policy.Policy) { p.Routes[0].CredentialFile = token },
+		"a placeholder":     func(p *policy.Policy) { p.Routes[0].Placeholder = "x" },
+		"a header":          func(p *policy.Policy) { p.Routes[0].Header = "X-Registry-Auth" },
+		"a basic user":      func(p *policy.Policy) { p.Routes[0].BasicUser = "u" },
+		"a JSON credential": func(p *policy.Policy) { p.Routes[0].CredentialJSON = &policy.CredentialJSON{Token: "t"} },
+		"a session key": func(p *policy.Policy) {
+			p.Routes[0].SessionKey = &policy.SessionKey{PublicKey: sessionKeyPEM(t), Issuer: "i"}
+		},
+		"an upstream CA":    func(p *policy.Policy) { p.Routes[0].UpstreamCA = token },
+		"no docker block":   func(p *policy.Policy) { p.Routes[0].Docker = nil },
+		"unmatched ask":     func(p *policy.Policy) { p.Routes[0].Unmatched = "ask" },
+		"a graphql scope":   func(p *policy.Policy) { p.Routes[0].GraphQL = []policy.GraphQLRule{{}} },
+		"a git scope":       func(p *policy.Policy) { p.Routes[0].Git = &policy.GitRule{} },
+		"a docker on https": func(p *policy.Policy) { p.Routes[0].Upstream = "https://docker.frisket.internal" },
+		"an IPv6 address":   func(p *policy.Policy) { p.Routes[0].Docker.Address = "::1" },
+		"a padded address":  func(p *policy.Policy) { p.Routes[0].Docker.Address = "127.001.191.78" },
+		"another's address": func(p *policy.Policy) { p.Routes[0].Docker.Address = "127.6.18.253" },
+		"a port past 65535": func(p *policy.Policy) { p.Routes[0].Docker.Ports = []int{65536 + 64320} },
+		"a port of 80":      func(p *policy.Policy) { p.Routes[0].Docker.Ports = []int{80} },
+		"names under .docker": func(p *policy.Policy) {
 			p.Routes[0].Docker.Names = []string{"data-lab.docker", "data-lab.triptease.docker"}
 		},
-		"a table weaker than the floor": func(p *Policy) {
+		"a table weaker than the floor": func(p *policy.Policy) {
 			p.Routes[0].Docker.Bodies["ExecCreate"] = json.RawMessage(`{"Privileged": "any"}`)
 		},
-		"a table frisket has no floor for": func(p *Policy) {
+		"a table frisket has no floor for": func(p *policy.Policy) {
 			p.Routes[0].Docker.Bodies["ContainerUpdate"] = json.RawMessage(`{}`)
 		},
-		"two Docker routes": func(p *Policy) {
+		"two Docker routes": func(p *policy.Policy) {
 			other := dockerPolicy(t).Routes[0]
 			other.Name, other.Host = "docker2", "docker2.frisket.internal"
 			p.Allow = append(p.Allow, other.Host)
 			p.Routes = append(p.Routes, other)
 		},
-		"a name under a wildcard route":       func(p *Policy) { wildcard(p, "*.internal") },
-		"a long name under a wildcard route":  func(p *Policy) { wildcard(p, "*.triptease.internal") },
-		"a name that is a route's host":       func(p *Policy) { wildcard(p, "data-lab.internal") },
-		"a long name that is a route's host":  func(p *Policy) { wildcard(p, "data-lab.triptease.internal") },
-		"a name that is a route's, spelt big": func(p *Policy) { wildcard(p, "Data-Lab.Internal.") },
+		"a name under a wildcard route":       func(p *policy.Policy) { wildcard(p, "*.internal") },
+		"a long name under a wildcard route":  func(p *policy.Policy) { wildcard(p, "*.triptease.internal") },
+		"a name that is a route's host":       func(p *policy.Policy) { wildcard(p, "data-lab.internal") },
+		"a long name that is a route's host":  func(p *policy.Policy) { wildcard(p, "data-lab.triptease.internal") },
+		"a name that is a route's, spelt big": func(p *policy.Policy) { wildcard(p, "Data-Lab.Internal.") },
 	} {
 		p := dockerPolicy(t)
 		mutate(&p)
@@ -159,13 +162,13 @@ func TestBuildRefusesABadDockerRoute(t *testing.T) {
 // else; and it is written back as it was read.
 func TestAQueryCheckIsANameOrAList(t *testing.T) {
 	for _, bad := range []string{`"filters"`, `"enum"`, `{}`, `{"filters":["a"],"enum":["b"]}`, `{"filters":["a"],"x":1}`, `1`, `["a"]`} {
-		var q QueryCheck
+		var q policy.QueryCheck
 		if err := json.Unmarshal([]byte(bad), &q); err == nil {
 			t.Errorf("%s was read as %+v", bad, q)
 		}
 	}
 	for _, good := range []string{`"bool"`, `{"filters":["label","name"]}`, `{"enum":["not-running","removed"]}`} {
-		var q QueryCheck
+		var q policy.QueryCheck
 		if err := json.Unmarshal([]byte(good), &q); err != nil {
 			t.Fatalf("%s: %v", good, err)
 		}

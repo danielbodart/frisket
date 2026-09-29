@@ -18,8 +18,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/danielbodart/frisket/docker"
 	"github.com/danielbodart/frisket/internal/credential"
-	"github.com/danielbodart/frisket/internal/docker"
+	"github.com/danielbodart/frisket/internal/dockerapi"
 )
 
 const (
@@ -85,9 +86,9 @@ func engineRules(t testing.TB) []PathRule {
 }
 
 // engineTables are chase's body tables, compiled against frisket's floor.
-func engineTables(t testing.TB) map[string]*docker.Table {
+func engineTables(t testing.TB) map[string]*dockerapi.Table {
 	t.Helper()
-	b, err := os.ReadFile("../docker/testdata/fields.json")
+	b, err := os.ReadFile("../dockerapi/testdata/fields.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +96,9 @@ func engineTables(t testing.TB) map[string]*docker.Table {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatal(err)
 	}
-	out := map[string]*docker.Table{}
+	out := map[string]*dockerapi.Table{}
 	for name, r := range raw {
-		tb, err := docker.Compile(name, r)
+		tb, err := dockerapi.Compile(name, r)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -286,7 +287,7 @@ func TestAQueryIsTheRulesKeysOnceEach(t *testing.T) {
 		"/v1.55/version?x=1",
 	} {
 		res, body := f.do(t, dockerRequest(t, "GET", target, nil))
-		refusedFor(t, res, body, docker.ReasonQuery)
+		refusedFor(t, res, body, dockerapi.ReasonQuery)
 	}
 	if n := len(d.requests()); n != 0 {
 		t.Fatalf("%d refused requests reached the daemon", n)
@@ -443,9 +444,9 @@ func TestAPullIsOfOneListedImage(t *testing.T) {
 		"fromImage=postgres&tag=17":                    ReasonImage,
 		"fromImage=postgres":                           ReasonImage,
 		"fromImage=postgres%3A18&tag=18":               ReasonImage,
-		"fromImage=postgres&tag=18&tag=18":             docker.ReasonQuery,
-		"fromImage=postgres&tag=18&fromSrc=-":          docker.ReasonQuery,
-		"fromSrc=-&repo=postgres&tag=18":               docker.ReasonQuery,
+		"fromImage=postgres&tag=18&tag=18":             dockerapi.ReasonQuery,
+		"fromImage=postgres&tag=18&fromSrc=-":          dockerapi.ReasonQuery,
+		"fromSrc=-&repo=postgres&tag=18":               dockerapi.ReasonQuery,
 		"tag=18":                                       ReasonImage,
 		"fromImage=localhost%3A5000%2Fpostgres&tag=18": ReasonImage,
 		"fromImage=Postgres&tag=18":                    ReasonImage,
@@ -564,13 +565,13 @@ func TestABodyIsJSONFramedAsJSON(t *testing.T) {
 	for name, c := range map[string]struct {
 		body, contentType, encoding, reason string
 	}{
-		"gzip":         {`{}`, "application/json", "gzip", docker.ReasonBody},
-		"text":         {`{}`, "text/plain", "", docker.ReasonBody},
-		"no type":      {`{}`, "", "", docker.ReasonBody},
-		"empty":        {``, "application/json", "", docker.ReasonUnreadable},
-		"twice":        {`{"Name":"a","Name":"b"}`, "application/json", "", docker.ReasonUnreadable},
-		"over maxBody": {`{"Labels":{"a":"` + strings.Repeat("x", 256<<10) + `"}}`, "application/json", "", docker.ReasonBody},
-		"privileged":   {`{"Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/"}}`, "application/json", "", docker.ReasonBody},
+		"gzip":         {`{}`, "application/json", "gzip", dockerapi.ReasonBody},
+		"text":         {`{}`, "text/plain", "", dockerapi.ReasonBody},
+		"no type":      {`{}`, "", "", dockerapi.ReasonBody},
+		"empty":        {``, "application/json", "", dockerapi.ReasonUnreadable},
+		"twice":        {`{"Name":"a","Name":"b"}`, "application/json", "", dockerapi.ReasonUnreadable},
+		"over maxBody": {`{"Labels":{"a":"` + strings.Repeat("x", 256<<10) + `"}}`, "application/json", "", dockerapi.ReasonBody},
+		"privileged":   {`{"Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/"}}`, "application/json", "", dockerapi.ReasonBody},
 	} {
 		req := dockerRequest(t, "POST", "/v1.55/volumes/create", strings.NewReader(c.body))
 		if c.contentType != "" {

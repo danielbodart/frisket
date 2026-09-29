@@ -1,9 +1,12 @@
-// Package docker judges what a client asks of a Docker Engine: the JSON body
-// of a create, against a table of the fields a route allows and a floor of
-// fields frisket itself pins; the label filter of a list; and the loopback
-// address and names a project's published ports are reached by. It does no
-// I/O. What it finds a body names -- the volumes and networks the daemon must
-// be asked about -- it hands back as data, for the route to look up.
+// Package dockerapi judges what a client asks of a Docker Engine: the JSON
+// body of a create, against a table of the fields a route allows and a floor
+// of fields frisket itself pins; and the label filter of a list. The loopback
+// address and names a project's published ports are reached by, and which
+// images a route may name, are the public package docker's.
+//
+// It does no I/O. What it finds a body names -- the volumes and networks the
+// daemon must be asked about -- it hands back as data, for the route to look
+// up.
 //
 // It is strict where the daemon is lax. moby decodes a body with Go's
 // encoding/json, which matches a key to a field in any case, keeps the last of
@@ -11,7 +14,7 @@
 // with every key exact-case, none twice and none unknown, and what goes
 // upstream is re-encoded from the tree that was judged, never the bytes the
 // client sent.
-package docker
+package dockerapi
 
 import (
 	"bytes"
