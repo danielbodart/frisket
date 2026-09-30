@@ -145,12 +145,15 @@ $ frisket connect -userns $userns -nsenter /path/to/nsenter \
 $ frisket close   -name $session
 ```
 
-`-policy` takes the same `{machine}` a `policyFile` does. A launcher that
-runs hooks as argument lists with no shell, as flong does, gives each step
-`-flong` instead of the flags its environment answers -- `$machine`, `$netns`,
-`$userns`, `$leader` and `$workspace` -- and ends it with `--`, after which
-the launcher's own arguments are ignored. A variable that is missing fails the
-step, naming it.
+`-policy` takes the same `{machine}` a `policyFile` does. A launcher whose
+hooks are argument lists never parsed as shell, as flong's are, gives each
+step `-flong` instead of the flags its environment answers -- `$machine`,
+`$netns`, `$userns`, `$leader` and `$workspace` -- and ends it with `--`,
+after which the launcher's own arguments are ignored. A variable that is
+missing fails the step, naming it, and so does a word before the `--`.
+
+The adapter names frisket, nsenter and nft by store path and puts nothing on
+its hooks' PATH, so a rules hook of your own names its tools the same way.
 
 `$file` is `(frisket.lib.steering { set = "all"; }).json`: the ruleset and the
 listener specification from one attrset. `frisket steering $file` prints what

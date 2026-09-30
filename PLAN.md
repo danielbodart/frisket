@@ -228,11 +228,13 @@ loudly; it never proceeds uncredentialed.
   `frisket.nixosModules.flong`, tested in frisket's own CI against
   a pinned flong, because it is the layer where the security properties actually
   meet and nothing else tests it.
-  flong's hooks are argument lists, run with no shell and no PATH search,
-  so the adapter's are too: frisket by store path, each step's `-flong`
-  reading the session from the variables flong sets, and a policy document's
-  path given as data, a template whose one special word `{machine}` frisket
-  fills with the session's name. Nothing in the adapter is a shell word.
+  flong's hooks are argument lists, which flong never parses as shell: a
+  hook program in the store execs their words as they are. So the adapter's
+  are argument lists with nothing to expand: frisket by store path, so PATH
+  never decides what runs; each step's `-flong` reading the session from the
+  variables flong sets; and a policy document's path given as data, a
+  template whose one special word `{machine}` frisket fills with the
+  session's name. Nothing in the adapter is a shell word.
 
 Agent policy — tiers, trusted checkouts, workspace groups, the agent wrappers —
 is a fourth thing and stays in nix-config. The printing name for it, if it is

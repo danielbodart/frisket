@@ -19,6 +19,11 @@
 # Each frisket step refuses to run out of turn, so a snippet that gets this
 # wrong fails the launch rather than leaving a session unsteered.
 #
+# The adapter puts nothing on the hooks' PATH: its own steps name frisket,
+# nsenter and nft by store path, so no PATH decides what runs, and a rules
+# hook of your own must name its tools the same way (or add them to the
+# launcher's `path` itself). A bare `nft` in it is not found.
+#
 # The declarations are rootless: the launcher runs as whoever calls it, and
 # its hooks with it, so frisket's steps do too. The control socket answers
 # only `services.frisket.user`, so that is who runs these launchers -- the
@@ -42,19 +47,21 @@ let
   # steer and connect each enter the session once, under this nsenter, in
   # the user namespace that owns the session's, which -flong reads from
   # $userns: the hooks run as the caller, who is root only there. By store
-  # path, as nft is, so no PATH decides which runs.
+  # path, as nft is, so PATH never decides which runs.
   nsenter = [ "-nsenter" (lib.getExe' pkgs.util-linux "nsenter") ];
   nft = [ "-nft" (lib.getExe pkgs.nftables) ];
 
   steeringFile = name: s: pkgs.writeText "frisket-steering-${name}.json"
     (self.lib.steering ({ inherit (s) set; } // s.steering)).json;
 
-  # A flong hook is an argument list, never shell: flong runs it as it is,
-  # with no PATH search, and says which session it is for in the hook's
-  # environment -- $machine, $netns, $userns, $leader, $workspace -- which
-  # -flong has frisket read itself. flong appends the launcher's own
-  # arguments to every hook, which the trailing "--" keeps from ever being
-  # read as flags, and -flong ignores.
+  # A flong hook is an argument list, which flong never parses as shell: a
+  # hook program of flong's in the store execs its words as they are, with
+  # what flong knows of the session in the environment -- $machine, $netns,
+  # $userns, $leader, $workspace in postStart, $machine alone in postStop --
+  # which -flong has frisket read itself. postStart gets the launcher's own
+  # arguments after its words, which the trailing "--" keeps from ever being
+  # read as flags, and -flong ignores; postStop gets none, and ends in "--"
+  # only because every step is built the same way.
   hook = step: flags: [ frisket step "-flong" ] ++ control ++ flags ++ [ "--" ];
 
   paramFlags = s: lib.concatMap (k: [ "-param" "${k}=${s.params.${k}}" ]) (lib.attrNames s.params);

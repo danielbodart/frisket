@@ -111,6 +111,78 @@ func TestFlongReachesTheSteeringFile(t *testing.T) {
 	wantErr(t, runConnect(append(append([]string{}, common...), launcher...)), missing)
 }
 
+// What each step does with flong's environment: every variable where it
+// belongs, so two swapped would fail here rather than only in a VM.
+func TestFlongPutsTheEnvironmentWhereItBelongs(t *testing.T) {
+	flongEnv := env(map[string]string{
+		"machine": "agent-strict-0a1b", "netns": "/proc/self/fd/5", "userns": "/proc/self/fd/6",
+		"leader": "1234", "workspace": "/srv/work",
+	})
+	launcher := []string{"--", "agent-strict", "-x"}
+
+	st, err := parseSteer(append([]string{"-flong", "-control", "/c", "-nsenter", "/bin/nsenter", "-nft", "/bin/nft",
+		"-roots", "/r", "-steering", "/s", "-policy", "/run/user/1000/chase/{machine}/policy.json", "-param", "k=v"}, launcher...), flongEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range [][2]string{
+		{st.session.Name, "agent-strict-0a1b"},
+		{st.session.Policy, "/run/user/1000/chase/agent-strict-0a1b/policy.json"},
+		{st.netns, "/proc/self/fd/5"},
+		{st.s.Helper.Userns, "/proc/self/fd/6"},
+		{st.session.Mntns, "/proc/1234/ns/mnt"},
+		{st.session.Params["workspace"], "/srv/work"},
+		{st.session.Params["k"], "v"},
+		{st.session.Roots, "/r"},
+		{st.file, "/s"},
+		{st.s.Control, "/c"},
+		{st.s.Nft, "/bin/nft"},
+		{st.s.Helper.Nsenter, "/bin/nsenter"},
+	} {
+		if c[0] != c[1] {
+			t.Errorf("steer: got %q; want %q", c[0], c[1])
+		}
+	}
+	if len(st.session.Params) != 2 {
+		t.Errorf("steer: params %v; want workspace and k alone", st.session.Params)
+	}
+
+	co, err := parseConnect(append([]string{"-flong", "-nsenter", "/bin/nsenter", "-steering", "/s"}, launcher...), flongEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if co.name != "agent-strict-0a1b" || co.netns != "/proc/self/fd/5" || co.s.Helper.Userns != "/proc/self/fd/6" || co.file != "/s" {
+		t.Errorf("connect: got name %q, netns %q, userns %q, steering %q", co.name, co.netns, co.s.Helper.Userns, co.file)
+	}
+
+	cl, name, err := parseClose([]string{"-flong", "-control", "/c", "--"}, flongEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "agent-strict-0a1b" || cl.Control != "/c" {
+		t.Errorf("close: got name %q, control %q", name, cl.Control)
+	}
+}
+
+// $leader names a /proc entry, so it must be a pid and nothing else.
+func TestFlongLeaderMustBeAPid(t *testing.T) {
+	for _, leader := range []string{"self", "1/../self", "0", "-1", "+5", "01234", "12 ", "thread-self"} {
+		e := env(map[string]string{"machine": "m1", "netns": "/n", "userns": "/u", "leader": leader, "workspace": "/w"})
+		_, err := parseSteer([]string{"-flong", "-nsenter", "/bin/nsenter", "-roots", "/r", "-steering", "/s", "-policy", "/p"}, e)
+		wantErr(t, err, "is not a pid")
+	}
+}
+
+// A word before the "--" ends the flags there, and would drop every flag
+// after it: with -flong as without, it is refused.
+func TestFlongRefusesAStrayWordBeforeTheLaunchersArguments(t *testing.T) {
+	setFlong(t)
+	wantErr(t, runSteer([]string{"-flong", "-nsenter", "/bin/nsenter", "-policy", "/p", "stray", "-roots", "/r", "-steering", "/s", "--", "x"}),
+		`unexpected argument "stray"`)
+	wantErr(t, runConnect([]string{"-flong", "-nsenter", "/bin/nsenter", "stray", "-steering", "/s"}), `unexpected argument "stray"`)
+	wantErr(t, runClose([]string{"-flong", "stray"}), `unexpected argument "stray"`)
+}
+
 func TestFlongMissingVariablesFail(t *testing.T) {
 	setFlong(t)
 	t.Setenv("leader", "")
