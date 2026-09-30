@@ -1021,11 +1021,20 @@ func TestHandshakeRefusesNoSNIAndUnknownNames(t *testing.T) {
 
 	// Three connections, three lines: two refusals, and the one that shook
 	// hands and asked nothing -- which has no request line to be its line.
+	//
+	// In no order: each connection is logged by its own goroutine, and a
+	// refusal can be written after the client has given up on it and dialled
+	// the next, so the lines are matched to the refusals, not read in turn.
 	lines := f.journal.waitLines(t, "tls", 3)
-	want := []struct{ sni, reason string }{{"", ReasonNoSNI}, {"evil.example.test", ReasonUnknownName}}
-	for i, l := range lines[:2] {
-		if l["decision"] != DecisionRefused || l["reason"] != want[i].reason || l["sni"] != want[i].sni {
-			t.Errorf("tls line %d: %v", i, l)
+	for _, want := range []struct{ sni, reason string }{{"", ReasonNoSNI}, {"evil.example.test", ReasonUnknownName}} {
+		found := 0
+		for _, l := range lines {
+			if l["decision"] == DecisionRefused && l["reason"] == want.reason && l["sni"] == want.sni {
+				found++
+			}
+		}
+		if found != 1 {
+			t.Errorf("%d tls lines refuse sni %q as %q, not one: %v", found, want.sni, want.reason, lines)
 		}
 	}
 	for _, l := range lines {
@@ -1268,6 +1277,12 @@ func TestDebugDescribesTheWireWithoutItsCredentials(t *testing.T) {
 			out = append(out, s.(string))
 		}
 		return out
+	}
+	// Each request is logged as it ends, by its own connection, so the two
+	// lines can come in either order: the one showing frisket's own
+	// credential is the second request's.
+	if strings.Contains(strings.Join(strs(lines[0]["req_headers"]), "\n"), "Authorization: Bearer <frisket's credential>") {
+		lines[0], lines[1] = lines[1], lines[0]
 	}
 	req := strings.Join(strs(lines[0]["req_headers"]), "\n")
 	for _, want := range []string{
