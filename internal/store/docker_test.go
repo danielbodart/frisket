@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/danielbodart/frisket/policy"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -262,8 +264,24 @@ func TestADockerSessionAnswersItsOwnNames(t *testing.T) {
 
 // steerOne sends one connection through a real steer.Session to the
 // session's Dispatch, as if the ruleset had steered it to orig, and returns
-// the lines logged under msg once there is one.
-func steerOne(t *testing.T, h serve.Handlers, svc []netip.Addr, orig netip.AddrPort, j *journal, msg string) map[string]any {
+// the line logged under msg once there is one, with what the client saw of
+// the connection's end: nil for a close, or the error that ended it.
+//
+// A reset can end the connection before the dial has returned. Go's connect
+// is non-blocking: connect(2) sends the SYN and says EINPROGRESS, and the
+// dialling goroutine then waits for the socket to be writable and reads
+// SO_ERROR. On loopback the kernel finishes the handshake at once, and
+// Accept does not wait for the dialler, so when the dialler is slow to be
+// scheduled (a loaded CI runner, -cpu 1) the session can accept, the relay
+// ask the route's socket and refuse with its reset, all before the dialler
+// looks; SO_ERROR is then ECONNRESET and Dial fails with "connection reset
+// by peer". That is the refusal the relay means, a closed port's answer,
+// seen early, not a connection that never reached the session: an
+// unaccepted connection is never reset here, since a listening port answers
+// a SYN with a SYN-ACK and an overflowing backlog drops it. So a reset at
+// the dial is the connection's end like a reset at the read, and the line
+// is waited for either way.
+func steerOne(t *testing.T, h serve.Handlers, svc []netip.Addr, orig netip.AddrPort, j *journal, msg string) (map[string]any, error) {
 	t.Helper()
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -279,16 +297,19 @@ func steerOne(t *testing.T, h serve.Handlers, svc []netip.Addr, orig netip.AddrP
 	}()
 	defer func() { cancel(); <-done }()
 	c, err := net.Dial("tcp4", ln.Addr().String())
-	if err != nil {
+	switch {
+	case errors.Is(err, syscall.ECONNRESET):
+	case err != nil:
 		t.Fatal(err)
+	default:
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+		_, err = io.ReadAll(c)
 	}
-	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-	_, _ = io.ReadAll(c)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if lines := linesOf(t, j, msg); len(lines) == 1 {
-			return lines[0]
+			return lines[0], err
 		} else if len(lines) > 1 || time.Now().After(deadline) {
 			t.Fatalf("%d %s lines for one connection", len(lines), msg)
 		}
@@ -361,9 +382,12 @@ func TestADockerSessionRelaysThroughItsRoutesSocket(t *testing.T) {
 		!slices.Equal(rl.Ports, []uint16{64320, 64321, 64322}) || rl.APIVersion != "1.56" || rl.Idle != 0 {
 		t.Errorf("relay = %+v", *rl)
 	}
-	line := steerOne(t, h, svc, netip.MustParseAddrPort("127.0.0.1:64320"), &j, "relay")
+	line, end := steerOne(t, h, svc, netip.MustParseAddrPort("127.0.0.1:64320"), &j, "relay")
 	if line["decision"] != relay.DecisionRefused || line["reason"] != relay.ReasonNotPublished {
 		t.Errorf("relay line %v", line)
+	}
+	if !errors.Is(end, syscall.ECONNRESET) {
+		t.Errorf("the refused client saw %v, want a reset", end)
 	}
 	if asked.Load() != 1 {
 		t.Errorf("the route's socket was asked %d times, want once", asked.Load())
@@ -377,7 +401,7 @@ func TestADockerSessionRelaysThroughItsRoutesSocket(t *testing.T) {
 	if h.Relay != nil {
 		t.Fatalf("a session with no Docker route has relay %v", h.Relay)
 	}
-	line = steerOne(t, h, svc, netip.MustParseAddrPort("127.0.0.1:64320"), &j2, "egress")
+	line, _ = steerOne(t, h, svc, netip.MustParseAddrPort("127.0.0.1:64320"), &j2, "egress")
 	if line["decision"] != egress.DecisionRefused || !strings.Contains(line["reason"].(string), "loopback") {
 		t.Errorf("loopback with no relay: %v", line)
 	}
