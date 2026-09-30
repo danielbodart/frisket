@@ -99,9 +99,11 @@ it. Sessions whose documents are the same, byte for byte, share one
 interceptor and its credential watchers.
 
 A launcher can name a document of its own instead, written for the session --
-`services.frisket.flong.<launcher>.policyFile`, a shell word expanded at
-launch. It is served the same way; only root, through the control socket, ever
-names one.
+`services.frisket.flong.<launcher>.policyFile`, a path in which `{machine}` is
+the session's name, `/run/user/1000/chase/{machine}/policy.json` say. frisket
+substitutes the name itself; nothing else in the path is special, and the
+module refuses any other brace. It is served the same way; only the daemon's
+user, through the control socket, ever names one.
 
 A route added to a policy is intercepted in sessions started after the change;
 one already running fails on that host until it is relaunched, because its CA
@@ -143,6 +145,13 @@ $ frisket connect -userns $userns -nsenter /path/to/nsenter \
 $ frisket close   -name $session
 ```
 
+`-policy` takes the same `{machine}` a `policyFile` does. A launcher that
+runs hooks as argument lists with no shell, as flong does, gives each step
+`-flong` instead of the flags its environment answers -- `$machine`, `$netns`,
+`$userns`, `$leader` and `$workspace` -- and ends it with `--`, after which
+the launcher's own arguments are ignored. A variable that is missing fails the
+step, naming it.
+
 `$file` is `(frisket.lib.steering { set = "all"; }).json`: the ruleset and the
 listener specification from one attrset. `frisket steering $file` prints what
 it will do. `steer` creates the listeners inside the namespace, installs the
@@ -164,7 +173,7 @@ Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
 | `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
 | `services.frisket.maxConnections` | built in | concurrent connections per session |
 | `services.frisket.flong.<launcher>.policy` | *required* | the policy for the launcher's sessions |
-| `services.frisket.flong.<launcher>.policyFile` | `null` | a shell word for a document's path, expanded at launch, instead of `policy`'s |
+| `services.frisket.flong.<launcher>.policyFile` | `null` | a document's absolute path, instead of `policy`'s, where `{machine}` is the session's name |
 | `services.frisket.flong.<launcher>.set` | `all` | `all` or `service` |
 | `services.frisket.flong.<launcher>.params` | `{ }` | recorded with each session, for a policy that reads them; `workspace` always is |
 

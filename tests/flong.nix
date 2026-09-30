@@ -363,6 +363,9 @@ in
       "d /srv/work 0777 root root -"
       "d /srv/secrets 0700 alice users -"
       "d /srv/policies 0755 root root -"
+      # Where gapi's per-session documents go, written by the launcher's
+      # user as chase writes its own.
+      "d /srv/policies/sessions 0755 alice users -"
       "d /srv/engine 0755 root root -"
     ];
 
@@ -542,15 +545,27 @@ in
     services.frisket.flong.trusted = { policy = "trusted"; set = "service"; };
 
     # A session under a document written for it, as a launcher writes one
-    # holding the public half of a key made for the session.
+    # holding the public half of a key made for the session: at a path of
+    # the session's own, which the adapter names by template and frisket
+    # fills in with the session's name. The launcher's part here is a hook
+    # ahead of frisket's that copies the test's document there.
     flong.gapi = {
       container = "strict";
       user = "alice";
       inherit workspace;
       command = [ "bash" "-c" ];
-      postStart = mark;
+      postStart = lib.mkMerge [
+        mark
+        (lib.mkOrder 101 (hook "gapi-document" ''
+          mkdir -p "/srv/policies/sessions/$machine"
+          install -m 0644 /srv/policies/gapi.json "/srv/policies/sessions/$machine/policy.json"
+        ''))
+      ];
+      postStop = lib.mkAfter (hook "gapi-document-gone" ''
+        rm -rf "/srv/policies/sessions/$machine"
+      '');
     };
-    services.frisket.flong.gapi = { policy = "test"; policyFile = "/srv/policies/gapi.json"; };
+    services.frisket.flong.gapi = { policy = "test"; policyFile = "/srv/policies/sessions/{machine}/policy.json"; };
     services.frisket.policyRoots = [ "/srv/policies" ];
 
     # A session with a Docker route, on the `service` set with a network of
@@ -759,6 +774,16 @@ in
           assert [s for s in sessions() if s["name"] == name] == []
           [closed] = wait_log("session closed", name, lambda m: True, "close")
           assert closed["descriptors"] == 5, closed
+
+      with subtest("the launcher's arguments reach every hook after its own, and frisket reads none of them as a flag"):
+          # bash -c takes the first as its script and the rest as $0 and $@.
+          # Were steer, connect or close to read them, -name would be another
+          # session's name and --help a usage error, and the launch would fail.
+          out = machine.succeed(as_user("${strict} 'echo \"$0 $1\"; curl -sS -m 5 http://allowed.test/' -name --help"))
+          assert out.startswith("-name --help\n") and "upstream-body" in out, out
+          name = last_session()
+          assert name != "--help" and [s for s in sessions() if s["name"] == name] == []
+          wait_log("session closed", name, lambda m: True, "close")
 
       with subtest("nothing is reachable before the rules land, and everything after is steered"):
           machine.succeed(as_user("${probed} 'sleep 4'"))
@@ -1140,6 +1165,10 @@ in
                         {"methods": ["GET"], "path": "/storage/v1/b/*/o/*", "encodedSlashes": True}]}]}
           machine.succeed(f"printf '%s' {shlex.quote(json.dumps(doc))} > /srv/policies/gapi.json && chmod 0644 /srv/policies/gapi.json")
           name, leader = hold("${gapi}", "ip link show frisket0")
+          # Served from the path the template names for this session, which
+          # nothing but frisket filled in.
+          [served] = [x for x in sessions() if x["name"] == name]
+          assert served["policy"] == f"/srv/policies/sessions/{name}/policy.json", served
           text = machine.succeed(f"openssl x509 -noout -text -in /proc/{leader}/root/etc/frisket/ca.crt")
           assert re.search(r"Permitted:\n\s+DNS:wild\.test\n", text), text
           for n in ["storage.wild.test", "eu.rep.wild.test"]:

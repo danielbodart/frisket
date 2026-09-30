@@ -137,6 +137,40 @@
             pkgs.writeText "frisket-modules"
               (builtins.toJSON { inherit (eval.config.services.frisket) enable; });
 
+          # A launcher's policyFile is a path template, not a shell word: an
+          # absolute path with at most one {machine} and no other brace. Each
+          # is read on its own, in one evaluation, since the refusal is the
+          # option's type and only reading the value checks it.
+          policy-template =
+            let
+              good = {
+                none = "/etc/frisket/policies/strict.json";
+                machine = "/run/user/1000/chase/{machine}/policy.json";
+                suffix = "/srv/policies/{machine}.json";
+              };
+              bad = {
+                relative = "policies/{machine}.json";
+                twice = "/p/{machine}/{machine}.json";
+                other = "/p/{workspace}.json";
+                stray = "/p/{machine}}.json";
+                shell = "$(my-launcher-policy \"$workspace\")";
+              };
+              eval = nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  flong.nixosModules.default
+                  self.nixosModules.flong
+                  { boot.isContainer = true; system.stateVersion = "26.05"; }
+                  { services.frisket.flong = builtins.mapAttrs (_: policyFile: { policy = "p"; inherit policyFile; }) (good // bad); }
+                ];
+              };
+              takes = name: (builtins.tryEval (builtins.deepSeq eval.config.services.frisket.flong.${name}.policyFile true)).success;
+              wrong = builtins.filter (n: ! takes n) (builtins.attrNames good)
+                ++ builtins.filter takes (builtins.attrNames bad);
+            in
+            assert nixpkgs.lib.assertMsg (wrong == [ ]) "policyFile judged wrongly: ${toString wrong}";
+            pkgs.writeText "frisket-policy-template" "ok";
+
           # Formatting as a gate rather than a habit: this is one repository
           # with one formatter and no argument to have about it.
           gofmt = pkgs.runCommand "gofmt"

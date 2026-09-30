@@ -228,6 +228,11 @@ loudly; it never proceeds uncredentialed.
   `frisket.nixosModules.flong`, tested in frisket's own CI against
   a pinned flong, because it is the layer where the security properties actually
   meet and nothing else tests it.
+  flong's hooks are argument lists, run with no shell and no PATH search,
+  so the adapter's are too: frisket by store path, each step's `-flong`
+  reading the session from the variables flong sets, and a policy document's
+  path given as data, a template whose one special word `{machine}` frisket
+  fills with the session's name. Nothing in the adapter is a shell word.
 
 Agent policy — tiers, trusted checkouts, workspace groups, the agent wrappers —
 is a fourth thing and stays in nix-config. The printing name for it, if it is
@@ -561,7 +566,10 @@ creates the listeners, hands them to `serve`, installs the policy routing and
 the ruleset, and returns. It does not provision egress: `connect` does, and
 refuses unless everything before it is in place. One attrset produces both the
 rules and the listener specification, so the ports and the mark cannot drift
-apart.
+apart. From a flong hook each takes `-flong`, and reads the
+session's name, namespaces and workspace from flong's environment rather than
+from flags a shell would have filled in; `close` does the same from
+`postStop`.
 
 **`frisket mint <service>`** — a client for the one-shot handout, over the
 session's own service address, so the sandbox needs no curl and no socket. Not
@@ -1174,8 +1182,9 @@ repository. What frisket uses from it: `postStart`, a root hook that runs
 after the namespace exists with the ordering contract above; `postStop`, called
 from both the clean and the killed path; `$leader`, whose mount namespace the
 CA is mounted into; the container's `environment.variables`, which the
-payload inherits, for the variables that point at the bundle; `path`, for the
-tools the hooks run; the capability flags as defence in depth; and `network` —
+payload inherits, for the variables that point at the bundle; hooks that are
+argument lists, with the session's name and namespaces in their environment;
+the capability flags as defence in depth; and `network` —
 pasta for a private session.
 
 Three properties frisket depends on that are flong's to keep: the namespace is

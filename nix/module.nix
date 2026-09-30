@@ -5,7 +5,7 @@
 # DynamicUser can do neither that nor anything else that user can. It holds
 # nothing that user does not already have, and systemd takes the rest away.
 self:
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, utils, ... }:
 
 let
   cfg = config.services.frisket;
@@ -707,11 +707,21 @@ in
       restartTriggers = [ policies ];
 
       serviceConfig = {
-        ExecStart = "${lib.getExe cfg.package} serve -log-level ${cfg.logLevel} -control ${cfg.controlSocket}"
-          + " -config ${configFile}"
-          + lib.optionalString (cfg.asker != null) " -asker ${cfg.asker}"
-          + lib.concatMapStrings (r: " -policy-root ${lib.escapeShellArg r}") ([ "/etc/frisket/policies" ] ++ cfg.policyRoots)
-          + lib.optionalString (cfg.maxConnections > 0) " -max-conns ${toString cfg.maxConnections}";
+        # An argument list, quoted for systemd by systemd's own rules rather
+        # than a shell's, which are not the same.
+        ExecStart = utils.escapeSystemdExecArgs ([
+          (lib.getExe cfg.package)
+          "serve"
+          "-log-level"
+          cfg.logLevel
+          "-control"
+          cfg.controlSocket
+          "-config"
+          "${configFile}"
+        ]
+        ++ lib.optionals (cfg.asker != null) [ "-asker" cfg.asker ]
+        ++ lib.concatMap (r: [ "-policy-root" r ]) ([ "/etc/frisket/policies" ] ++ cfg.policyRoots)
+        ++ lib.optionals (cfg.maxConnections > 0) [ "-max-conns" (toString cfg.maxConnections) ]);
         User = cfg.user;
         Group = cfg.group;
         Restart = "on-failure";

@@ -61,7 +61,8 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         install the policy routing and load the ruleset that steers to them.
         Then mount the session's CA read-only at /etc/frisket in the mount
         namespace: ca.crt, and ca-bundle.crt, BUNDLE with the CA after it.
-        Provisions NO egress.
+        {machine} in DOCUMENT is the session's name, and no other brace may
+        appear. Provisions NO egress.
 
   frisket connect -netns PATH -steering FILE -name NAME
         The launcher's second step: the service address on lo, and for the
@@ -78,6 +79,14 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
   frisket close -name NAME
         End a session: the daemon closes every descriptor it holds and drops it
         from the fd store. Closing one that is not open succeeds.
+
+        From a flong hook, all three take -flong in place of the flags flong's
+        environment answers: steer reads -name, -netns, -mntns, -userns and
+        the workspace parameter from $machine, $netns, /proc/$leader/ns/mnt,
+        $userns and $workspace; connect reads -name, -netns and -userns; close
+        reads -name. Each fails naming any variable that is missing, refuses
+        those flags beside it, and ignores what follows a -- (the launcher's
+        own arguments).
 
   frisket check DOCUMENT...
         Check policy documents as a session opening one would: everything but
@@ -330,7 +339,8 @@ func runCheck(argv []string) error {
 func runSteer(argv []string) error {
 	fs := flag.NewFlagSet("steer", flag.ContinueOnError)
 	s, netns, file, name := rootFlags(fs)
-	policy := fs.String("policy", "", "the policy document the daemon serves the session under, by its absolute path")
+	flong := fs.Bool("flong", false, "a flong postStart hook: the session's name, network, mount and user namespaces and workspace from flong's environment, and the launcher's arguments after -- ignored")
+	policy := fs.String("policy", "", "the policy document the daemon serves the session under, by its absolute path; {machine} in it is the session's name")
 	mntns := fs.String("mntns", "", "the sandbox's mount namespace, where the session's CA is put: /proc/<pid>/ns/mnt")
 	roots := fs.String("roots", "", "the host's CA bundle, which the session's bundle is made from")
 	ps := params{}
@@ -338,10 +348,32 @@ func runSteer(argv []string) error {
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
+	if err := refuseArgs(fs, *flong); err != nil {
+		return err
+	}
+	if *flong {
+		if err := refuseWithFlong(fs, "name", "netns", "mntns", "userns"); err != nil {
+			return err
+		}
+		if _, given := ps["workspace"]; given {
+			return errors.New("-flong passes the workspace parameter from flong's environment; do not give -param workspace as well")
+		}
+		env, err := flongEnv(os.Getenv, flongSteer)
+		if err != nil {
+			return err
+		}
+		*name, *netns, s.Helper.Userns = env["machine"], env["netns"], env["userns"]
+		*mntns = "/proc/" + env["leader"] + "/ns/mnt"
+		ps["workspace"] = env["workspace"]
+	}
 	if *netns == "" || *mntns == "" || *roots == "" || *file == "" || *name == "" || *policy == "" {
 		return errors.New("-netns, -mntns, -roots, -steering, -name and -policy are all required")
 	}
 	if err := checkEnter(s); err != nil {
+		return err
+	}
+	path, err := expandPolicy(*policy, *name)
+	if err != nil {
 		return err
 	}
 	plan, err := steering.Load(*file)
@@ -350,14 +382,28 @@ func runSteer(argv []string) error {
 	}
 	ctx, cancel := root(context.Background())
 	defer cancel()
-	return s.Steer(ctx, *netns, plan, steering.Session{Name: *name, Policy: *policy, Params: ps, Mntns: *mntns, Roots: *roots})
+	return s.Steer(ctx, *netns, plan, steering.Session{Name: *name, Policy: path, Params: ps, Mntns: *mntns, Roots: *roots})
 }
 
 func runConnect(argv []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	s, netns, file, name := rootFlags(fs)
+	flong := fs.Bool("flong", false, "a flong postStart hook: the session's name and network and user namespaces from flong's environment, and the launcher's arguments after -- ignored")
 	if err := fs.Parse(argv); err != nil {
 		return err
+	}
+	if err := refuseArgs(fs, *flong); err != nil {
+		return err
+	}
+	if *flong {
+		if err := refuseWithFlong(fs, "name", "netns", "userns"); err != nil {
+			return err
+		}
+		env, err := flongEnv(os.Getenv, flongConnect)
+		if err != nil {
+			return err
+		}
+		*name, *netns, s.Helper.Userns = env["machine"], env["netns"], env["userns"]
 	}
 	if *netns == "" || *file == "" || *name == "" {
 		return errors.New("-netns, -steering and -name are all required")
@@ -379,8 +425,25 @@ func runClose(argv []string) error {
 	s := &steering.Steerer{}
 	fs.StringVar(&s.Control, "control", control.DefaultPath, "the daemon's control socket")
 	name := fs.String("name", "", "the session's name")
+	flong := fs.Bool("flong", false, "a flong postStop hook: the session's name from flong's environment, and anything after -- ignored")
 	if err := fs.Parse(argv); err != nil {
 		return err
+	}
+	if err := refuseArgs(fs, *flong); err != nil {
+		return err
+	}
+	if *flong {
+		if err := refuseWithFlong(fs, "name"); err != nil {
+			return err
+		}
+		env, err := flongEnv(os.Getenv, flongClose)
+		if err != nil {
+			return err
+		}
+		*name = env["machine"]
+	}
+	if *name == "" {
+		return errors.New("-name is required")
 	}
 	ctx, cancel := root(context.Background())
 	defer cancel()

@@ -37,28 +37,31 @@ self:
 let
   cfg = config.services.frisket;
   inherit (lib) mkOption types;
-  control = "-control ${cfg.controlSocket}";
+  frisket = lib.getExe cfg.package;
+  control = [ "-control" cfg.controlSocket ];
   # steer and connect each enter the session once, under this nsenter, in
-  # $userns, the user namespace that owns the session's: the hooks run as the
-  # caller, who is root only there. By store path, so no PATH decides which
-  # runs.
-  enter = "-userns \"$userns\" -nsenter ${lib.getExe' pkgs.util-linux "nsenter"}";
+  # the user namespace that owns the session's, which -flong reads from
+  # $userns: the hooks run as the caller, who is root only there. By store
+  # path, as nft is, so no PATH decides which runs.
+  nsenter = [ "-nsenter" (lib.getExe' pkgs.util-linux "nsenter") ];
+  nft = [ "-nft" (lib.getExe pkgs.nftables) ];
 
   steeringFile = name: s: pkgs.writeText "frisket-steering-${name}.json"
     (self.lib.steering ({ inherit (s) set; } // s.steering)).json;
 
-  # A flong hook is a command, never shell: each step here is a script of
-  # its own, under the options flong's snippets once ran with. It finds
-  # frisket and nft on the PATH flong gives it, from `path`, and reads
-  # $machine, $workspace, $leader, $userns and $netns from its environment.
-  hookScript = name: text: "${pkgs.writeShellScript "frisket-${name}" ''
-    set -euo pipefail
-    ${text}
-  ''}";
+  # A flong hook is an argument list, never shell: flong runs it as it is,
+  # with no PATH search, and says which session it is for in the hook's
+  # environment -- $machine, $netns, $userns, $leader, $workspace -- which
+  # -flong has frisket read itself. flong appends the launcher's own
+  # arguments to every hook, which the trailing "--" keeps from ever being
+  # read as flags, and -flong ignores.
+  hook = step: flags: [ frisket step "-flong" ] ++ control ++ flags ++ [ "--" ];
 
-  paramFlags = s: lib.concatMapStringsSep " "
-    (k: "-param ${lib.escapeShellArg "${k}=${s.params.${k}}"}")
-    (lib.attrNames s.params);
+  paramFlags = s: lib.concatMap (k: [ "-param" "${k}=${s.params.${k}}" ]) (lib.attrNames s.params);
+
+  # A path with at most one {machine}, the session's name, which frisket
+  # substitutes itself, and no other brace.
+  policyTemplate = types.strMatching "/[^{}]*([{]machine[}][^{}]*)?";
 in
 {
   imports = [ self.nixosModules.default ];
@@ -81,15 +84,18 @@ in
           '';
         };
         policyFile = mkOption {
-          type = types.nullOr types.str;
+          type = types.nullOr policyTemplate;
           default = null;
-          example = "$(my-launcher-policy \"$workspace\")";
+          example = "/run/user/1000/chase/{machine}/policy.json";
           description = ''
-            A shell word, expanded in the launch hook, for the path of the
-            policy document the session is served under instead of `policy`'s:
-            a document the launcher wrote for this session, say. `$workspace`
-            and `$machine` are set. It must name an absolute path; one that
-            does not read, or does not hold together, fails the launch.
+            The path of the policy document the session is served under
+            instead of `policy`'s: a document the launcher wrote for this
+            session, say. `{machine}` in it is the session's name, which
+            frisket substitutes when it steers the session; nothing else is
+            special, and a path holding any other brace, or `{machine}` more
+            than once, is refused here. It must be absolute, and what it names
+            must be under `services.frisket.policyRoots`; one that does not
+            read, or does not hold together, fails the launch.
           '';
         };
         set = mkOption {
@@ -130,31 +136,28 @@ in
           # outside, and no bind may reach it: a workload that could open the
           # socket would steer sessions, its own included.
           protect = [ (dirOf cfg.controlSocket) ];
-          # frisket itself, and the nft it runs inside the namespace,
-          # resolved on the host before it enters.
-          path = [ cfg.package pkgs.nftables ];
           # Listeners, handed over, the rules, and the session's CA in its
           # mount namespace. A failure here ends the session: flong ends a
           # session whose hook exits non-zero.
           postStart = lib.mkMerge [
-            (lib.mkBefore [ [ (hookScript "${name}-steer" ''
-              frisket steer ${control} ${enter} -netns "$netns" -mntns "/proc/$leader/ns/mnt" \
-                -roots ${config.security.pki.caBundle} -steering ${file} \
-                -name "$machine" -policy ${if s.policyFile != null then ''"${s.policyFile}"'' else "/etc/frisket/policies/${s.policy}.json"} \
-                -param workspace="$workspace" ${paramFlags s}
-            '') ] ])
+            (lib.mkBefore [
+              (hook "steer" (nsenter ++ nft ++ [
+                "-roots"
+                config.security.pki.caBundle
+                "-steering"
+                "${file}"
+                "-policy"
+                (if s.policyFile != null then s.policyFile else "/etc/frisket/policies/${s.policy}.json")
+              ] ++ paramFlags s))
+            ])
             # Connectivity, last. It checks the daemon holds this
             # namespace's session and its table is loaded before touching
             # anything.
-            (lib.mkAfter [ [ (hookScript "${name}-connect" ''
-              frisket connect ${control} ${enter} -netns "$netns" -steering ${file} -name "$machine"
-            '') ] ])
+            (lib.mkAfter [ (hook "connect" (nsenter ++ [ "-steering" "${file}" ])) ])
           ];
           # Keyed on $machine alone, because on the sweep's path that is all
           # there is; and safe for a session that is already gone.
-          postStop = [ [ (hookScript "${name}-close" ''
-            frisket close ${control} -name "$machine"
-          '') ] ];
+          postStop = [ (hook "close" [ ]) ];
         })
       cfg.flong;
 
