@@ -10,8 +10,9 @@
 # packet back onto lo; and prerouting's `tproxy` hands it to frisket's
 # transparent socket without touching its destination. So the kernel keeps the
 # address the client dialled -- getsockname for TCP, IP_ORIGDSTADDR for a
-# datagram -- there is no NAT and no conntrack entry in the sandbox, and a
-# datagram's reply can be sent from where the client sent it.
+# datagram -- nothing steered is NATed, and a datagram's reply can be sent
+# from where the client sent it. The one NAT is the `service` set's inbound
+# chain, for connections pasta forwards IN, which steering never sees.
 #
 # The ORDER of the mark chain was arrived at by measurement (PLAN.md,
 # "Steering sets"):
@@ -149,6 +150,39 @@ let
         meta mark ${m} oifname != "lo" drop
       }'';
 
+  # INBOUND TO LOOPBACK, the `service` set's only: a connection pasta
+  # forwards in from the host reaches the sandbox at its own address, not its
+  # loopback, unless it came by the host's 127.0.0.1 with --host-lo-to-ns-lo,
+  # which pasta does for no other host address. So a server that listens on
+  # 127.0.0.1 alone -- most dev servers' default -- never sees it. A new TCP
+  # connection that pasta brings in is sent to 127.0.0.1 at the same port,
+  # by whichever of two ways it came (measured, pasta 2026_07):
+  #
+  #   - spliced: from a host LOOPBACK address, pasta dials the sandbox's own
+  #     address from a socket of its own inside the sandbox, so the
+  #     connection is local and only the output hook sees its first packet.
+  #     What is marked there is steering's, and 127/8 is loopback already.
+  #   - by its tap: from any other host address, the packet arrives by the
+  #     sandbox's interface, and the kernel takes 127/8 from there only with
+  #     route_localnet, which connect sets in this namespace alone.
+  #
+  # `dnat`, not `redirect`: redirect goes to the interface's own address,
+  # where such a server is not. IPv4 only: IPv6 has no route_localnet, so
+  # ::1 cannot be a destination from outside, and a server on ::1 alone is
+  # not reached by a forward. Not frisket's own TCP listener's port, which
+  # takes only what was steered to it. A workload dialling its own address
+  # is sent to its loopback the same way, which is where a server for it
+  # usually is anyway.
+  inbound = ''
+    chain inbound {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname != "lo" meta nfproto ipv4 tcp dport != ${tcp} ct state new dnat ip to 127.0.0.1
+      }
+      chain spliced {
+        type nat hook output priority dstnat; policy accept;
+        meta mark != ${m} meta nfproto ipv4 ip daddr != 127.0.0.0/8 fib daddr type local tcp dport != ${tcp} ct state new dnat ip to 127.0.0.1
+      }'';
+
   # The relay's destinations, address and port, one set per family. Only
   # TCP: a published Docker port is relayed as a stream, and a datagram to one
   # is left to the sandbox's own loopback, where nothing answers it.
@@ -187,6 +221,7 @@ let
           ${steer}
         }
         ${prerouting}
+        ${inbound}
         ${guard}
       }
     '';

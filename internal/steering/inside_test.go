@@ -183,5 +183,17 @@ func stepsInside() error {
 	if err == nil || !strings.Contains(err.Error(), "address add 192.0.2.2/32 dev lo") {
 		return fmt.Errorf("connect twice: %v, want the step that failed named", err)
 	}
+
+	// route_localnet, the `service` set's: this namespace's, written from
+	// in here, and not the host's.
+	if b, err := os.ReadFile(routeLocalnet); err != nil || strings.TrimSpace(string(b)) != "0" {
+		return fmt.Errorf("a fresh namespace's route_localnet: %q %v", b, err)
+	}
+	if err := serveJSON(request{Op: opApply, Steps: []Step{{Kind: kindLocalnet}}}, nil); err != nil {
+		return fmt.Errorf("route_localnet: %w", err)
+	}
+	if b, err := os.ReadFile(routeLocalnet); err != nil || strings.TrimSpace(string(b)) != "1" {
+		return fmt.Errorf("route_localnet after its step: %q %v", b, err)
+	}
 	return nil
 }

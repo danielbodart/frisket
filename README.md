@@ -127,7 +127,11 @@ In the `agent` container:
   go to frisket, other UDP is refused, and frisket is the only way out.
 - **`service`**: the sandbox has its own network (flong's `network`). Only DNS
   and route hosts go through frisket; everything else goes direct. A policy
-  that should resolve everything allows `*`.
+  that should resolve everything allows `*`. A TCP connection pasta forwards
+  in from the host is sent to the sandbox's 127.0.0.1 at the same port, so a
+  dev server listening on `localhost` alone is reached at whatever host
+  address flong's `forwardAddress` binds (IPv4 only; see
+  [nix/steering.nix](nix/steering.nix)).
 
 ## Routes
 

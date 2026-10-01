@@ -286,13 +286,22 @@ func (p *Plan) RoutingSteps(v6 bool) []Step {
 // The service address goes on lo so that a missing rule fails closed: a
 // connection to it that nothing steered is refused by the sandbox's own
 // loopback, rather than routed out through whatever egress exists (measured).
+//
+// The `service` set's sandbox has pasta's network, and route_localnet, so
+// that a connection pasta forwards in by its interface, which the ruleset's
+// inbound chain sends to 127.0.0.1, is delivered there and answered: the
+// kernel otherwise drops a packet for 127/8 that came by any interface but
+// lo. One pasta splices from the host's loopback needs none: it is local. `all` -- set by the
+// sysctl's own rule, OR'd with each interface's -- covers pasta's, which is
+// not there yet. In this namespace alone: the host's is untouched, and
+// the only way in is what pasta forwards.
 func (p *Plan) ConnectSteps() []Step {
 	var steps []Step
 	for _, a := range p.Service {
 		steps = append(steps, Step{Kind: kindAddress, Prefix: netip.PrefixFrom(a, a.BitLen()), Dev: "lo"})
 	}
 	if p.Set != control.SetAll {
-		return steps
+		return append(steps, Step{Kind: kindLocalnet})
 	}
 	steps = append(steps, Step{Kind: kindDummy, Dev: p.Interface})
 	for _, a := range p.Addresses {

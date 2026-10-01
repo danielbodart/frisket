@@ -29,12 +29,17 @@ import (
 
 // The kinds of Step.
 const (
-	kindRule    = "rule"    // a rule sending Mark to Table, in V6's family
-	kindRoute   = "route"   // a route to Prefix by Dev, in Table (0: main); Local makes it `local`
-	kindAddress = "address" // Prefix on Dev
-	kindDummy   = "dummy"   // a dummy interface called Dev
-	kindUp      = "up"      // Dev set up
+	kindRule     = "rule"     // a rule sending Mark to Table, in V6's family
+	kindRoute    = "route"    // a route to Prefix by Dev, in Table (0: main); Local makes it `local`
+	kindAddress  = "address"  // Prefix on Dev
+	kindDummy    = "dummy"    // a dummy interface called Dev
+	kindUp       = "up"       // Dev set up
+	kindLocalnet = "localnet" // net.ipv4.conf.all.route_localnet=1, in this namespace
 )
+
+// routeLocalnet is the namespace's own: /proc/sys/net is the opening
+// thread's network namespace's, and the helper's thread is the session's.
+const routeLocalnet = "/proc/sys/net/ipv4/conf/all/route_localnet"
 
 // Step is one change connect or steer makes to the namespace's links,
 // addresses, rules or routes. String spells it as `ip` would.
@@ -73,6 +78,8 @@ func (st Step) String() string {
 		return fmt.Sprintf("link add %s type dummy", st.Dev)
 	case kindUp:
 		return fmt.Sprintf("link set %s up", st.Dev)
+	case kindLocalnet:
+		return "sysctl net.ipv4.conf.all.route_localnet=1"
 	}
 	return st.Kind
 }
@@ -88,6 +95,8 @@ func (st Step) apply() error {
 		r.Mark = st.Mark
 		r.Table = st.Table
 		return netlink.RuleAdd(r)
+	case kindLocalnet:
+		return os.WriteFile(routeLocalnet, []byte("1\n"), 0)
 	case kindDummy:
 		attrs := netlink.NewLinkAttrs()
 		attrs.Name = st.Dev

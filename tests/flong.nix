@@ -572,8 +572,8 @@ in
     # its own whose every listener pasta republishes on the host, as a dev
     # tier's is: what shows the relay's ports are no listener pasta could
     # see, though frisket's own TCP listener, which the relay runs through,
-    # is one. The pasta is this test's nixpkgs' (2025_09_19), not a
-    # consumer's, and its `auto` takes no exclusions.
+    # is one. The pasta is flong's own (its module pins it), and this test
+    # gives its `auto` no exclusions.
     flong.docker = {
       container = "strict";
       user = "alice";
@@ -586,6 +586,22 @@ in
       postStart = mark;
     };
     services.frisket.flong.docker = { policy = "test"; set = "service"; policyFile = "/srv/policies/docker.json"; };
+
+    # A session whose listeners pasta publishes on one host loopback address
+    # of its own, as a launcher giving each workspace one does: what pasta
+    # forwards then arrives at the session's own address, not its loopback,
+    # and the ruleset's inbound chain is what lets a server on 127.0.0.1
+    # alone answer it.
+    flong.forwarded = {
+      container = "strict";
+      user = "alice";
+      inherit workspace;
+      command = [ "bash" "-c" ];
+      network.forwardPorts = "auto";
+      network.forwardAddress = "127.9.9.9";
+      postStart = mark;
+    };
+    services.frisket.flong.forwarded = { policy = "test"; set = "service"; };
   };
 
   testScript = { nodes, ... }:
@@ -597,6 +613,7 @@ in
       trusted = lib.getExe nodes.machine.flong.trusted.launcher;
       gapi = lib.getExe nodes.machine.flong.gapi.launcher;
       docker = lib.getExe nodes.machine.flong.docker.launcher;
+      forwarded = lib.getExe nodes.machine.flong.forwarded.launcher;
       frisket = lib.getExe nodes.machine.services.frisket.package;
       roots = nodes.machine.security.pki.caBundle;
     in
@@ -1277,7 +1294,7 @@ in
           # `auto` never publishes.
           assert "passt" not in machine.succeed("ss -Htlnp 'sport = :53'"), machine.succeed("ss -Htlnp")
           # frisket's TCP listener is a real socket above that floor, and
-          # this pasta's `auto` cannot exclude a port, so the host gets it
+          # this test's `auto` excludes no port, so the host gets it
           # on every address: an accepted residual,
           # which pasta's exclusions are to remove. What pins it harmless is
           # that anything through it arrives, by the host's loopback,
@@ -1496,6 +1513,30 @@ in
           assert daemon_fds(pid) <= held - 5, (held, daemon_fds(pid))
           [closed] = wait_log("session closed", name, lambda m: True, "close")
           assert closed["descriptors"] == 5, closed
+
+      with subtest("a forward to a session's own host address reaches a server on its 127.0.0.1 alone, and steering is as it was"):
+          py = "${pkgs.python3}/bin/python3 -m http.server"
+          name, leader = hold("${forwarded}", "ip route show default | grep -q .",
+                              f"{{ {py} --bind 127.0.0.1 3000 >/dev/null 2>&1 & {py} --bind 0.0.0.0 3001 >/dev/null 2>&1 & }}")
+          for port in [3000, 3001]:
+              machine.wait_until_succeeds(f"ss -Htln 'src 127.9.9.9 and sport = :{port}' | grep -q .")
+          # Published at that address alone: nothing of the session's on the
+          # host's 127.0.0.1, or on every address.
+          assert machine.succeed("ss -Htln 'sport = :3000'").split()[3] == "127.9.9.9:3000", machine.succeed("ss -Htlnp")
+          machine.fail("curl -sS -m 3 http://127.0.0.1:3000/")
+          # Loopback alone, and every address, both answer at the session's.
+          for port in [3000, 3001]:
+              machine.succeed(f"curl -sSf -m 5 -o /dev/null http://127.9.9.9:{port}/")
+          # route_localnet is the session's, and the host's is untouched.
+          assert machine.succeed(as_root(leader, "cat /proc/sys/net/ipv4/conf/all/route_localnet")).strip() == "1"
+          assert machine.succeed("cat /proc/sys/net/ipv4/conf/all/route_localnet").strip() == "0"
+          # And steering is unchanged: a name is still frisket's to answer,
+          # and the upstream still reached through it.
+          out = machine.succeed(as_workload(leader, "dig +short +time=2 +tries=1 A allowed.test @127.0.0.1"))
+          assert out.strip() == "${upstream4}", out
+          out = machine.succeed(as_workload(leader, "curl -sS -m 5 http://allowed.test/"))
+          assert "upstream-body" in out, out
+          release(name)
 
       with subtest("a session restored after a switch is served under the policy as now configured"):
           name, leader = hold("${strict}", "ip link show frisket0")

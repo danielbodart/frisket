@@ -100,8 +100,16 @@ func TestConnectStepsPutTheRoutesLast(t *testing.T) {
 	f := allFile()
 	f.Set, f.Dummy = "service", nil
 	sp, _ := f.Plan()
-	if got := spell(sp.ConnectSteps()); strings.Contains(got, "route") || strings.Contains(got, "dummy") {
+	if got := spell(sp.ConnectSteps()); strings.Contains(got, "route add") || strings.Contains(got, "dummy") {
 		t.Errorf("the `service` set provisions egress of its own:\n%s", got)
+	}
+	// route_localnet, for what pasta forwards in, in `service` alone: `all`
+	// has no network for anything to come in by.
+	if got := spell(sp.ConnectSteps()); !strings.HasSuffix(got, "\nsysctl net.ipv4.conf.all.route_localnet=1") {
+		t.Errorf("the `service` set does not set route_localnet last:\n%s", got)
+	}
+	if got := spell(p.ConnectSteps()); strings.Contains(got, "route_localnet") {
+		t.Errorf("the `all` set sets route_localnet:\n%s", got)
 	}
 }
 
