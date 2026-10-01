@@ -48,6 +48,7 @@ registry, nothing to keep in step with the projects a machine has, and a
 project cloned a minute ago resolves. It forwards nothing: anything else
 under `.internal` is NXDOMAIN and anything outside it REFUSED. systemd binds
 its socket, 127.0.0.153:53 by default, and it runs as a DynamicUser that can
-open no socket of its own. Point the host's resolver at it for `.internal`
-alone -- with systemd-resolved, a drop-in of `DNS=127.0.0.153` and
-`Domains=~internal`.
+open no socket of its own. `hostDNS.resolved`, on by default, has
+systemd-resolved send it `.internal` alone, by a dummy link, `frisket-dns`,
+with `~internal` as its routing domain and DefaultRoute off: resolved's
+global `DNS=` would be a default route, asked every name the host looks up.

@@ -626,10 +626,9 @@ in
         `<repo>.<owner>.internal`, on the host with the project's loopback
         address, worked out from the name alone: no registry, no state,
         nothing forwarded. Anything else under .internal is NXDOMAIN, and
-        anything outside it REFUSED, so point the host's resolver at it for
-        .internal only -- systemd-resolved's `DNS=` with `Domains=~internal`.
-        Its own unit, under a DynamicUser with nothing to read, independent
-        of `enable`
+        anything outside it REFUSED, so the host's resolver sends it
+        .internal only (`resolved`). Its own unit, under a DynamicUser with
+        nothing to read, independent of `enable`
       '';
       address = mkOption {
         type = types.str;
@@ -646,6 +645,21 @@ in
         description = ''
           The port. 53, as systemd binds it and passes the socket on: the
           daemon holds no privilege.
+        '';
+      };
+      resolved = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Turn on systemd-resolved and send it .internal, and nothing else,
+          by a dummy link of its own, `frisket-dns`, with `~internal` as its
+          routing domain and DefaultRoute off. Not resolved's global `DNS=`:
+          a global server is always a default route, so it would be asked
+          every name the host looks up and refuse all but .internal. The link
+          has 192.0.2.153/32, from TEST-NET-1, which is routed nowhere,
+          because resolved asks no link without a routable address.
+          NetworkManager, if on, is told to leave the link alone. False:
+          point a resolver at `address` yourself.
         '';
       };
     };
@@ -720,6 +734,40 @@ in
             IPAddressDeny = "any";
             IPAddressAllow = "localhost";
           };
+        };
+      }
+    ))
+    (lib.mkIf (cfg.hostDNS.enable && cfg.hostDNS.resolved) (
+      let
+        link = "frisket-dns";
+        server = "${cfg.hostDNS.address}${lib.optionalString (cfg.hostDNS.port != 53) ":${toString cfg.hostDNS.port}"}";
+      in
+      {
+        services.resolved.enable = true;
+        networking.networkmanager.unmanaged = [ "interface-name:${link}" ];
+        # resolved forgets what resolvectl told it when it restarts, so this
+        # is part of it, and runs again whenever it starts.
+        systemd.services.frisket-dns-link = {
+          description = "Send .internal, and nothing else, to frisket dns";
+          wantedBy = [ "multi-user.target" "systemd-resolved.service" ];
+          after = [ "systemd-resolved.service" "frisket-dns.socket" ];
+          partOf = [ "systemd-resolved.service" ];
+          path = [ pkgs.iproute2 config.systemd.package ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+          };
+          script = ''
+            ip link show ${link} >/dev/null 2>&1 || ip link add ${link} type dummy
+            ip addr replace 192.0.2.153/32 dev ${link}
+            ip link set ${link} up
+            resolvectl dns ${link} ${server}
+            resolvectl domain ${link} '~internal'
+            resolvectl default-route ${link} false
+            resolvectl llmnr ${link} false
+            resolvectl mdns ${link} false
+          '';
+          preStop = "ip link del ${link} 2>/dev/null || true";
         };
       }
     ))

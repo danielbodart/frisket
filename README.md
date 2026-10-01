@@ -165,6 +165,7 @@ A route can do more than add a bearer token. Each is in
 | `services.frisket.maxConnections` | built in | Concurrent connections per session. |
 | `services.frisket.hostDNS.enable` | `false` | Answer `<repo>.<owner>.internal` on the host, from the name alone. See [docs/docker.md](docs/docker.md#on-the-host). |
 | `services.frisket.hostDNS.address` / `port` | `127.0.0.153` / `53` | Where it answers, UDP and TCP; systemd binds it. |
+| `services.frisket.hostDNS.resolved` | `true` | Turn on systemd-resolved and send it `.internal` alone, by a dummy link with no default route. |
 | `services.frisket.flong.<launcher>.policy` | *required* | The launcher's policy. |
 | `services.frisket.flong.<launcher>.policyFile` | `null` | A policy file of the launcher's own instead; `{machine}` in the path is the session's name. |
 | `services.frisket.flong.<launcher>.set` | `all` | `all` or `service`. See [Modes](#modes). |
