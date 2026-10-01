@@ -92,6 +92,14 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         Check policy documents as a session opening one would: everything but
         whether its credential files exist yet.
 
+  frisket dns [-listen ADDR:PORT]
+        Answer a Docker project's name, <repo>.<owner>.internal, on the host
+        with its loopback address, from the name alone: no registry, no
+        state, nothing forwarded. Anything else under .internal is NXDOMAIN,
+        anything outside it REFUSED. Under systemd it answers on the sockets
+        passed to it; otherwise on -listen (default 127.0.0.153:53), UDP and
+        TCP.
+
   frisket sessions        What the daemon holds, one JSON object per line.
   frisket steering FILE   Check a steering file and print what it will do.
 
@@ -121,6 +129,8 @@ func main() {
 		err = runSteering(args)
 	case "check":
 		err = runCheck(args)
+	case "dns":
+		err = runDNS(args)
 	case "helper":
 		err = nsnet.RunHelper(args, os.Stderr, steering.Serve)
 	case "version":

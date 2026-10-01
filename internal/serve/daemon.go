@@ -289,16 +289,8 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, re
 	if err != nil {
 		return nil, nil, err
 	}
-	// Refused before anything is stored, as everything above is; serve
-	// asks again under the lock that makes a session live, so two opens of
-	// different projects racing for one address cannot both get in.
+	// Refused before anything is stored, as everything above is.
 	if err := relayPorts(info.Name, specs, h.Docker); err != nil {
-		return nil, nil, err
-	}
-	d.mu.Lock()
-	err = d.addressHeld(info.Name, h.Docker)
-	d.mu.Unlock()
-	if err != nil {
 		return nil, nil, err
 	}
 	meta, err := newRecord(info, h.Authority)
@@ -323,7 +315,7 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, re
 		}
 		return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
 	}
-	s := &session{info: info, log: d.Log, docker: h.Docker, socks: socks, meta: meta, release: release}
+	s := &session{info: info, log: d.Log, socks: socks, meta: meta, release: release}
 	held = true
 	if err := d.serve(s, h); err != nil {
 		s.closeAll(closeWait)
@@ -389,35 +381,12 @@ func relayPorts(name string, specs []nsnet.Spec, dk *Docker) error {
 	return nil
 }
 
-// addressHeld refuses a Docker project whose address a live or restored
-// session of another project holds: a relay reaches
-// what is published on its own project's address, and two projects on one
-// address would reach each other's. Sessions of one project share it, as
-// they share its objects. d.mu is held.
-func (d *Daemon) addressHeld(name string, dk *Docker) error {
-	if dk == nil {
-		return nil
-	}
-	for other, s := range d.sessions {
-		if s == nil || other == name || s.docker == nil {
-			continue
-		}
-		if s.docker.Address == dk.Address && s.docker.Project != dk.Project {
-			return fmt.Errorf("session %s: docker project %s is at %s: address held by another project, %s, whose session %s is open", name, dk.Project, dk.Address, s.docker.Project, other)
-		}
-	}
-	return nil
-}
-
 // serve starts the session with its handlers.
 func (d *Daemon) serve(s *session, h Handlers) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.sessions == nil {
 		return errors.New("frisket is stopping")
-	}
-	if err := d.addressHeld(s.info.Name, h.Docker); err != nil {
-		return err
 	}
 	s.start(d.ctx, Dispatch{Service: s.info.Service, Handlers: h}, d.MaxConns, d.dst)
 	d.sessions[s.info.Name] = s
@@ -610,7 +579,7 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 		meta.Close()
 		return err
 	}
-	s := &session{info: info, restored: true, log: d.Log, docker: h.Docker, socks: socksHeld, meta: meta, release: release}
+	s := &session{info: info, restored: true, log: d.Log, socks: socksHeld, meta: meta, release: release}
 	held = true
 	d.mu.Lock()
 	d.sessions[name] = nil

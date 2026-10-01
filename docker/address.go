@@ -95,40 +95,68 @@ func ValidProject(project string) bool {
 
 var ownerRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}$`)
 
-// Names are the names the project's address is known by: the short
-// `<label>.internal` and the long `<label>.<owner>.internal`, in that order.
-// The label is the repo, lower-cased, with everything outside [a-z0-9-] made
-// a '-' and the '-'s at either end trimmed; a label that is empty or longer
-// than a DNS label's 63 bytes gives no names. A name that is, or is under, a
-// reserved name is left out, so frisket/docker is known only as
-// docker.internal. Neither name is unique -- two owners can share a repo's
-// name, and bodar.ts and bodar-ts one label -- which is why a session answers
-// only its own, and the host only those one project gives.
+// labelRE is one label of a project's name: what glibc's resolver takes in
+// an answer (res_hnok, which nss_dns holds every answer's owner name to),
+// measured with glibc 2.42 -- letters, digits, '-' and '_' anywhere in a
+// label, but for a '-' that starts the name, which is the repo's first byte
+// here and checked in Names. RFC 1123's rule, with no '_' and no '-' at a
+// label's ends, would refuse repos whose names resolve wherever they are
+// used.
+var labelRE = regexp.MustCompile(`^[a-z0-9_-]{1,63}$`)
+
+// Names are the names the project's address is known by: one,
+// `<repo>.<owner>.internal`, lower-cased and otherwise as the slug spells it,
+// so bodar/bodar.ts is bodar.ts.bodar.internal and has four labels. Nothing
+// is folded, so no two projects share a name, and Project reads one back:
+// an owner has no dots, so the label before .internal is the owner and
+// everything before that the repo. A repo that does not make labels glibc
+// resolves -- an empty one, as .github's first is, a label over 63 bytes, a
+// '-' first -- gives no name, and neither does an owner whose name would
+// be, or be under, a reserved one (frisket, google): nil, and the address
+// is still the project's.
 func Names(project string) []string {
 	owner, repo, ok := strings.Cut(lowerASCII(project), "/")
+	if !ok || !ownerRE.MatchString(owner) {
+		return nil
+	}
+	if strings.HasPrefix(repo, "-") {
+		return nil
+	}
+	for _, l := range strings.Split(repo, ".") {
+		if !labelRE.MatchString(l) {
+			return nil
+		}
+	}
+	name := repo + "." + owner + ".internal"
+	if Reserved(name) || !dns.ValidQueryName(name) {
+		return nil
+	}
+	return []string{name}
+}
+
+// Project is the project a name is, as Names gives it: the slug, and
+// whether the name is one at all. A name is read normalised, lower-case and
+// without a trailing dot, and is one only if it is exactly the name Names
+// gives the slug it reads as -- so a reserved name, or a label no repo's
+// name could give, is none, and frisket answers for no name it would not
+// give a project.
+func Project(name string) (string, bool) {
+	rest, ok := strings.CutSuffix(dns.Normalize(name), ".internal")
 	if !ok {
-		return nil
+		return "", false
 	}
-	label := strings.Trim(strings.Map(func(r rune) rune {
-		if 'a' <= r && r <= 'z' || '0' <= r && r <= '9' || r == '-' {
-			return r
-		}
-		return '-'
-	}, repo), "-")
-	if label == "" || len(label) > 63 {
-		return nil
+	i := strings.LastIndexByte(rest, '.')
+	if i < 0 {
+		return "", false
 	}
-	candidates := []string{label + ".internal"}
-	if ownerRE.MatchString(owner) {
-		candidates = append(candidates, label+"."+owner+".internal")
+	p := rest[i+1:] + "/" + rest[:i]
+	if !ValidProject(p) {
+		return "", false
 	}
-	var names []string
-	for _, n := range candidates {
-		if !Reserved(n) {
-			names = append(names, n)
-		}
+	if n := Names(p); len(n) != 1 || n[0] != dns.Normalize(name) {
+		return "", false
 	}
-	return names
+	return p, true
 }
 
 // Reserved is whether a name is, or is under, one no project may be named by.

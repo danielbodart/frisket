@@ -116,99 +116,27 @@ func TestOpenRefusesARelayPortThatIsAListenersOrDNSs(t *testing.T) {
 // slugs searched to hash alike would be.
 func collide(string) netip.Addr { return netip.MustParseAddr("127.101.170.171") }
 
-// Two projects never share an address: a session whose project's address a
-// session of another project holds is refused, before systemd is told of it.
-// Two sessions of one project share theirs, as they share its objects.
-func TestOpenRefusesAnAddressAnotherProjectHolds(t *testing.T) {
-	sd := newFakeSystemd()
-	f := startDaemon(t, sd, &recorder{derive: collide}, nil, nil)
-	if _, err := openAs(t, f, "shop-1", "example/shop", "64320"); err != nil {
-		t.Fatal(err)
-	}
-	stored := sd.told()
-
-	_, err := openAs(t, f, "evil-1", "evil/x", "64320")
-	if err == nil || !strings.Contains(err.Error(), "address held by another project") {
-		t.Errorf("another project at a held address: err = %v", err)
-	}
-	if told := sd.told(); !slices.Equal(told, stored) {
-		t.Errorf("systemd was told %v about the refused session", told[len(stored):])
-	}
-
-	if _, err := openAs(t, f, "shop-2", "example/shop", "64320"); err != nil {
-		t.Errorf("a second session of the same project: %v", err)
-	}
-	// One with no Docker route holds no address, and is held off none.
-	if _, err := openAs(t, f, "plain-2", "", ""); err != nil {
-		t.Errorf("a session with no Docker route: %v", err)
-	}
-	if got, want := held(f), []string{"plain-2", "shop-1", "shop-2"}; !slices.Equal(got, want) {
-		t.Errorf("held %v, want %v", got, want)
-	}
-
-	// Once every session of the project is closed, its address is free.
-	for _, name := range []string{"shop-1", "shop-2"} {
-		if _, err := f.d.Close(name); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := openAs(t, f, "evil-2", "evil/x", "64320"); err != nil {
-		t.Errorf("another project, once the address is free: %v", err)
-	}
-}
-
-// A session restored across a restart holds its project's address as one
-// opened by this process does.
-func TestAnAdoptedSessionHoldsItsAddressToo(t *testing.T) {
+// Two projects at one address both run, opened or adopted: in the trusted
+// tier that is rarer than it is worth refusing, and each session's relay
+// still reaches only what a container with its own project's label
+// publishes there (internal/relay).
+func TestTwoProjectsAtOneAddressBothRun(t *testing.T) {
 	sd := newFakeSystemd()
 	rec := &recorder{derive: collide}
 	first := startDaemon(t, sd, rec, nil, nil)
-	if _, err := openAs(t, first, "shop-1", "example/shop", "64320"); err != nil {
-		t.Fatal(err)
+	for _, s := range []struct{ name, project string }{{"shop-1", "example/shop"}, {"other-1", "other/x"}, {"shop-2", "example/shop"}} {
+		if _, err := openAs(t, first, s.name, s.project, "64320"); err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
 	}
 	first.stop()
 
 	second := startDaemon(t, sd, rec, nil, sd.passed(t))
-	if st := second.d.List(); len(st) != 1 || !st[0].Restored {
-		t.Fatalf("after a restart: %+v", st)
+	if got, want := held(second), []string{"other-1", "shop-1", "shop-2"}; !slices.Equal(got, want) {
+		t.Errorf("after a restart, held %v, want %v", got, want)
 	}
-	if _, err := openAs(t, second, "evil-1", "evil/x", "64320"); err == nil || !strings.Contains(err.Error(), "address held by another project") {
-		t.Errorf("another project at an adopted session's address: err = %v", err)
-	}
-	if _, err := openAs(t, second, "shop-2", "example/shop", "64320"); err != nil {
-		t.Errorf("a second session of the adopted one's project: %v", err)
-	}
-}
-
-// Of two stored sessions of different projects at one address, the second
-// adopted is dropped rather than served beside the first: the documents
-// changed while the daemon was down, and I10 holds whatever order they come
-// back in.
-func TestAdoptionRefusesAnAddressAnotherAdoptedProjectHolds(t *testing.T) {
-	sd := newFakeSystemd()
-	first := startDaemon(t, sd, &recorder{}, nil, nil)
-	for _, s := range []struct{ name, project string }{{"shop-1", "example/shop"}, {"evil-1", "evil/x"}} {
-		if _, err := openAs(t, first, s.name, s.project, "64320"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	first.stop()
-
-	second := startDaemon(t, sd, &recorder{derive: collide}, nil, sd.passed(t))
-	if got := held(second); len(got) != 1 {
-		t.Fatalf("after a restart at one address, held %v, want one of them", got)
-	}
-	if n := len(second.journal.lines(t, "session not restored")); n != 1 {
-		t.Errorf("%d 'session not restored' lines, want 1", n)
-	}
-	var stored int
-	for _, name := range []string{"shop-1", "evil-1"} {
-		if sd.held(name) > 0 {
-			stored++
-		}
-	}
-	if stored != 1 {
-		t.Errorf("systemd still holds %d of the two sessions, want only the one restored", stored)
+	if _, err := openAs(t, second, "other-2", "other/x", "64320"); err != nil {
+		t.Errorf("another session at the shared address: %v", err)
 	}
 }
 

@@ -44,8 +44,7 @@ type Handlers struct {
 // Docker is what the daemon must know of a session's Docker route: whose
 // project it is, the address the project's ports are published on, and the
 // destinations the session's ruleset steers to frisket for the relay. The
-// daemon holds sessions of different projects off one address, and hands
-// Relay to steer, which puts it in the ruleset's sets.
+// daemon hands Relay to steer, which puts it in the ruleset's sets.
 type Docker struct {
 	Project string
 	Address netip.Addr

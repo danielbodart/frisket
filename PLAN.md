@@ -372,12 +372,14 @@ existing steering listener on 15001, as it steers DNS. frisket relays each
 connection only to the project's address on a port the project names, and
 only while one of the project's own running containers publishes it there;
 anything else is reset. The session never chooses the address it is relayed
-to, and another project's address is not steered at all. Its names are
-`<label>.internal` and `<label>.<owner>.internal`, from the repo and owner of
-the project: frisket's DNS answers exactly the session's own names, with the
-address, before the allowlist, and leaves the rest of `.internal` alone, so
+to, and another project's address is not steered at all. Its name is
+`<repo>.<owner>.internal`, the slug lower-cased and otherwise as spelt, which
+reads back as the project and so needs nothing to look it up: frisket's DNS
+answers exactly the session's own name, with the address, before the
+allowlist, and leaves the rest of `.internal` alone, so
 `metadata.google.internal` and `docker.frisket.internal` resolve as they do
-now. A name equal to or under a reserved suffix (`frisket.internal`,
+now; `frisket dns` answers every project's on the host, from the name alone.
+A name equal to or under a reserved suffix (`frisket.internal`,
 `google.internal`) is never generated. The suffixes live in
 `docker/reserved.json`, which the Go code embeds and the flake exports
 as `lib.docker.reserved`, for chase and nix-config to read rather than copy. A
@@ -645,7 +647,7 @@ frisket answers every query it is given. A name on the session's allowlist that
 is intercepted resolves to the service address; a name that is allowed but not
 intercepted is resolved upstream and returned; a name that is not allowed is
 answered NXDOMAIN without an upstream lookup, so it cannot leak through DNS.
-A session's own Docker names, and nothing else under `.internal`, are answered
+A session's own Docker name, and nothing else under `.internal`, is answered
 first, before the allowlist, with the project's address: logged
 `decision=local`, never asked upstream and never recorded for egress.
 
@@ -1037,8 +1039,9 @@ the changes it makes to a request are decision 13's one other carve-out.
   `127.b1.b2.b3`, from the project's SHA-256; a session reaches them at
   `127.0.0.1:P`, `[::1]:P` and that address through frisket's relay, only
   while a running container of the project publishes them there, and by the
-  names `<label>.internal` and `<label>.<owner>.internal`. Two projects
-  holding one address are refused at open.
+  name `<repo>.<owner>.internal`, which `frisket dns` answers on the host
+  from the name alone. Two projects at one address both run; each relay
+  reaches only its own project's containers.
 
 ---
 

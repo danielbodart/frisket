@@ -266,6 +266,9 @@
           # frisket in flong's real shape, end to end, in two VMs.
           flong = pkgs.testers.runNixOSTest (import ./tests/flong.nix { inherit self flong; });
 
+          # `frisket dns` on a host, behind systemd-resolved, in a VM.
+          host-dns = pkgs.testers.runNixOSTest (import ./tests/host-dns.nix { inherit self; });
+
           # lib.docker.reserved is exactly the list the Go test pins, so the
           # file cannot change under a consumer without a test failing here and
           # one failing there.

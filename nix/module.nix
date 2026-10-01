@@ -620,6 +620,36 @@ in
       '';
     };
 
+    hostDNS = {
+      enable = lib.mkEnableOption ''
+        `frisket dns`, which answers a Docker project's name,
+        `<repo>.<owner>.internal`, on the host with the project's loopback
+        address, worked out from the name alone: no registry, no state,
+        nothing forwarded. Anything else under .internal is NXDOMAIN, and
+        anything outside it REFUSED, so point the host's resolver at it for
+        .internal only -- systemd-resolved's `DNS=` with `Domains=~internal`.
+        Its own unit, under a DynamicUser with nothing to read, independent
+        of `enable`
+      '';
+      address = mkOption {
+        type = types.str;
+        default = "127.0.0.153";
+        description = ''
+          The loopback address it answers on, UDP and TCP: in 127.0.0.0/16,
+          where no project's address ever is, and clear of systemd-resolved's
+          own 127.0.0.53 and 127.0.0.54.
+        '';
+      };
+      port = mkOption {
+        type = types.port;
+        default = 53;
+        description = ''
+          The port. 53, as systemd binds it and passes the socket on: the
+          daemon holds no privilege.
+        '';
+      };
+    };
+
     maxConnections = mkOption {
       type = types.ints.unsigned;
       default = 0;
@@ -630,148 +660,212 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    assertions = [
+  config = lib.mkMerge [
+    (lib.mkIf cfg.hostDNS.enable (
+      let
+        listen = "${cfg.hostDNS.address}:${toString cfg.hostDNS.port}";
+      in
       {
-        assertion = cfg.group == config.users.users.${cfg.user}.group;
-        message = "services.frisket.group is ${cfg.group}, not ${cfg.user}'s primary group: the control socket could read no launcher's user namespace, and would refuse every one.";
+        # systemd binds the sockets, so port 53 needs nothing of the daemon, and
+        # holds them across a restart.
+        systemd.sockets.frisket-dns = {
+          description = "frisket .internal names on the host";
+          wantedBy = [ "sockets.target" ];
+          socketConfig = {
+            ListenDatagram = listen;
+            ListenStream = listen;
+            FreeBind = true;
+          };
+        };
+        systemd.services.frisket-dns = {
+          description = "frisket: a Docker project's .internal name, from the name alone";
+          requires = [ "frisket-dns.socket" ];
+          after = [ "frisket-dns.socket" ];
+          serviceConfig = {
+            ExecStart = utils.escapeSystemdExecArgs [ (lib.getExe cfg.package) "dns" ];
+            Type = "notify";
+            NotifyAccess = "main";
+            DynamicUser = true;
+            Restart = "on-failure";
+            UMask = "0077";
+            ProtectSystem = "strict";
+            ProtectHome = true;
+            PrivateTmp = true;
+            PrivateDevices = true;
+            PrivateIPC = true;
+            PrivateUsers = true;
+            DevicePolicy = "closed";
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectKernelLogs = true;
+            ProtectControlGroups = true;
+            ProtectClock = true;
+            ProtectHostname = true;
+            ProtectProc = "invisible";
+            ProcSubset = "pid";
+            NoNewPrivileges = true;
+            RestrictNamespaces = true;
+            RestrictRealtime = true;
+            RestrictSUIDSGID = true;
+            LockPersonality = true;
+            MemoryDenyWriteExecute = true;
+            CapabilityBoundingSet = "";
+            AmbientCapabilities = "";
+            SystemCallArchitectures = "native";
+            SystemCallFilter = [ "@system-service" "~@privileged" ];
+            SystemCallErrorNumber = "EPERM";
+            # Its sockets are passed in, and it dials nothing, so it can make
+            # none: AF_UNIX stays for sd_notify alone.
+            RestrictAddressFamilies = [ "AF_UNIX" ];
+            IPAddressDeny = "any";
+            IPAddressAllow = "localhost";
+          };
+        };
       }
-    ] ++ lib.concatLists (lib.mapAttrsToList
-      (name: p:
-        map
-          (w: {
-            assertion = starPlaced w;
-            message = "services.frisket.policies.${name}.allow has ${w}: a `*` is allowed only alone, meaning every name, or as a leading `*.`.";
-          })
-          p.allow
-        ++ lib.mapAttrsToList
-          (rname: r: {
-            assertion = allowed p.allow r.host;
-            message = "services.frisket.policies.${name}.routes.${rname} is for ${r.host}, which is not on its allowlist: interception is how an allowed host gets its credential, not a way round the allowlist.";
-          })
-          p.routes
-        ++ lib.concatLists (lib.mapAttrsToList
-          (rname: r: map
-            (rule: {
-              assertion = (rule.prefix == null) != (rule.path == null);
-              message = "services.frisket.policies.${name}.routes.${rname} has a path rule with ${if rule.prefix == null then "neither a prefix nor a path" else "both a prefix and a path"}: a rule is one or the other.";
+    ))
+    (lib.mkIf cfg.enable {
+      assertions = [
+        {
+          assertion = cfg.group == config.users.users.${cfg.user}.group;
+          message = "services.frisket.group is ${cfg.group}, not ${cfg.user}'s primary group: the control socket could read no launcher's user namespace, and would refuse every one.";
+        }
+      ] ++ lib.concatLists (lib.mapAttrsToList
+        (name: p:
+          map
+            (w: {
+              assertion = starPlaced w;
+              message = "services.frisket.policies.${name}.allow has ${w}: a `*` is allowed only alone, meaning every name, or as a leading `*.`.";
             })
-            r.paths)
-          p.routes)
-        ++ lib.mapAttrsToList
-          (rname: r: {
-            assertion = r.credentialFile == null || ! lib.hasPrefix builtins.storeDir r.credentialFile;
-            message = "services.frisket.policies.${name}.routes.${rname}.credentialFile is in the Nix store, which every user can read.";
-          })
-          p.routes)
-      cfg.policies);
+            p.allow
+          ++ lib.mapAttrsToList
+            (rname: r: {
+              assertion = allowed p.allow r.host;
+              message = "services.frisket.policies.${name}.routes.${rname} is for ${r.host}, which is not on its allowlist: interception is how an allowed host gets its credential, not a way round the allowlist.";
+            })
+            p.routes
+          ++ lib.concatLists (lib.mapAttrsToList
+            (rname: r: map
+              (rule: {
+                assertion = (rule.prefix == null) != (rule.path == null);
+                message = "services.frisket.policies.${name}.routes.${rname} has a path rule with ${if rule.prefix == null then "neither a prefix nor a path" else "both a prefix and a path"}: a rule is one or the other.";
+              })
+              r.paths)
+            p.routes)
+          ++ lib.mapAttrsToList
+            (rname: r: {
+              assertion = r.credentialFile == null || ! lib.hasPrefix builtins.storeDir r.credentialFile;
+              message = "services.frisket.policies.${name}.routes.${rname}.credentialFile is in the Nix store, which every user can read.";
+            })
+            p.routes)
+        cfg.policies);
 
-    # A directory of the documents, so the path a session names stays the
-    # same across a switch while what it holds changes.
-    environment.etc."frisket/policies".source = policies;
+      # A directory of the documents, so the path a session names stays the
+      # same across a switch while what it holds changes.
+      environment.etc."frisket/policies".source = policies;
 
-    # THE USER'S SOCKET, MADE BY SYSTEMD. The launchers that steer sessions
-    # run as the user whose credentials the daemon holds -- the daemon's own
-    # user -- so the socket is theirs and 0600. systemd makes it rather than
-    # the daemon so that it exists, with that mode, before the daemon does,
-    # and outlives a restart; its directory stays root's.
-    systemd.sockets.frisket = {
-      description = "frisket control socket";
-      wantedBy = [ "sockets.target" ];
-      socketConfig = {
-        ListenSequentialPacket = cfg.controlSocket;
-        SocketUser = cfg.user;
-        SocketGroup = cfg.group;
-        SocketMode = "0600";
-        DirectoryMode = "0755";
-        FileDescriptorName = "control";
+      # THE USER'S SOCKET, MADE BY SYSTEMD. The launchers that steer sessions
+      # run as the user whose credentials the daemon holds -- the daemon's own
+      # user -- so the socket is theirs and 0600. systemd makes it rather than
+      # the daemon so that it exists, with that mode, before the daemon does,
+      # and outlives a restart; its directory stays root's.
+      systemd.sockets.frisket = {
+        description = "frisket control socket";
+        wantedBy = [ "sockets.target" ];
+        socketConfig = {
+          ListenSequentialPacket = cfg.controlSocket;
+          SocketUser = cfg.user;
+          SocketGroup = cfg.group;
+          SocketMode = "0600";
+          DirectoryMode = "0755";
+          FileDescriptorName = "control";
+        };
       };
-    };
 
-    systemd.services.frisket = {
-      description = "frisket: credentials on the wire, never in the sandbox";
-      wantedBy = [ "multi-user.target" ];
-      wants = [ "frisket.socket" ];
-      after = [ "frisket.socket" ];
+      systemd.services.frisket = {
+        description = "frisket: credentials on the wire, never in the sandbox";
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "frisket.socket" ];
+        after = [ "frisket.socket" ];
 
-      # RESTARTED, NOT STOPPED AND STARTED, by nixos-rebuild. The fd store is
-      # kept across a restart and released on a stop -- so the NixOS default,
-      # stop-then-start, would sever every running session on every switch
-      # that touches this unit, which is exactly what the store is for.
-      stopIfChanged = false;
+        # RESTARTED, NOT STOPPED AND STARTED, by nixos-rebuild. The fd store is
+        # kept across a restart and released on a stop -- so the NixOS default,
+        # stop-then-start, would sever every running session on every switch
+        # that touches this unit, which is exactly what the store is for.
+        stopIfChanged = false;
 
-      # A changed policy restarts the daemon, and every session comes back
-      # from the fd store served under its document as it reads now. The
-      # documents are not in the unit, so without this a switch would leave
-      # running sessions under what they were opened with.
-      restartTriggers = [ policies ];
+        # A changed policy restarts the daemon, and every session comes back
+        # from the fd store served under its document as it reads now. The
+        # documents are not in the unit, so without this a switch would leave
+        # running sessions under what they were opened with.
+        restartTriggers = [ policies ];
 
-      serviceConfig = {
-        # An argument list, quoted for systemd by systemd's own rules rather
-        # than a shell's, which are not the same.
-        ExecStart = utils.escapeSystemdExecArgs ([
-          (lib.getExe cfg.package)
-          "serve"
-          "-log-level"
-          cfg.logLevel
-          "-control"
-          cfg.controlSocket
-          "-config"
-          "${configFile}"
-        ]
-        ++ lib.optionals (cfg.asker != null) [ "-asker" cfg.asker ]
-        ++ lib.concatMap (r: [ "-policy-root" r ]) ([ "/etc/frisket/policies" ] ++ cfg.policyRoots)
-        ++ lib.optionals (cfg.maxConnections > 0) [ "-max-conns" (toString cfg.maxConnections) ]);
-        User = cfg.user;
-        Group = cfg.group;
-        Restart = "on-failure";
+        serviceConfig = {
+          # An argument list, quoted for systemd by systemd's own rules rather
+          # than a shell's, which are not the same.
+          ExecStart = utils.escapeSystemdExecArgs ([
+            (lib.getExe cfg.package)
+            "serve"
+            "-log-level"
+            cfg.logLevel
+            "-control"
+            cfg.controlSocket
+            "-config"
+            "${configFile}"
+          ]
+          ++ lib.optionals (cfg.asker != null) [ "-asker" cfg.asker ]
+          ++ lib.concatMap (r: [ "-policy-root" r ]) ([ "/etc/frisket/policies" ] ++ cfg.policyRoots)
+          ++ lib.optionals (cfg.maxConnections > 0) [ "-max-conns" (toString cfg.maxConnections) ]);
+          User = cfg.user;
+          Group = cfg.group;
+          Restart = "on-failure";
 
-        # SESSIONS SURVIVE A RESTART THROUGH THE FD STORE. A listener inside a
-        # sandbox's namespace cannot be reopened from a path, so PID 1 holds a
-        # copy of each from the moment the session is created -- a crash is
-        # covered as well as a restart -- and passes them back by name.
-        # NotifyAccess=main, because only the daemon itself may store.
-        Type = "notify";
-        NotifyAccess = "main";
-        FileDescriptorStoreMax = cfg.maxSessions * perSession;
-        FileDescriptorStorePreserve = "restart";
+          # SESSIONS SURVIVE A RESTART THROUGH THE FD STORE. A listener inside a
+          # sandbox's namespace cannot be reopened from a path, so PID 1 holds a
+          # copy of each from the moment the session is created -- a crash is
+          # covered as well as a restart -- and passes them back by name.
+          # NotifyAccess=main, because only the daemon itself may store.
+          Type = "notify";
+          NotifyAccess = "main";
+          FileDescriptorStoreMax = cfg.maxSessions * perSession;
+          FileDescriptorStorePreserve = "restart";
 
-        # Everything else it could reach, taken away. It dials out from the
-        # host's network namespace, so the network stays; it receives
-        # sockets from the launchers, so AF_UNIX stays.
-        UMask = "0077";
-        ProtectSystem = "strict";
-        ProtectHome = "read-only";
-        PrivateTmp = true;
-        PrivateDevices = true;
-        PrivateIPC = true;
-        DevicePolicy = "closed";
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectKernelLogs = true;
-        ProtectControlGroups = true;
-        ProtectClock = true;
-        ProtectHostname = true;
-        ProtectProc = "invisible";
-        ProcSubset = "pid";
-        NoNewPrivileges = true;
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        LockPersonality = true;
-        MemoryDenyWriteExecute = true;
-        KeyringMode = "private";
-        CapabilityBoundingSet = "";
-        AmbientCapabilities = "";
-        SystemCallArchitectures = "native";
-        # EPERM rather than death for anything outside the set: Go's runtime
-        # probes a few calls at start and copes with a refusal.
-        SystemCallFilter = [ "@system-service" "~@privileged" ];
-        SystemCallErrorNumber = "EPERM";
-        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
-        # Deliberately NOT RemoveIPC: the user is a person, and it would remove
-        # THEIR IPC objects whenever this unit stops.
+          # Everything else it could reach, taken away. It dials out from the
+          # host's network namespace, so the network stays; it receives
+          # sockets from the launchers, so AF_UNIX stays.
+          UMask = "0077";
+          ProtectSystem = "strict";
+          ProtectHome = "read-only";
+          PrivateTmp = true;
+          PrivateDevices = true;
+          PrivateIPC = true;
+          DevicePolicy = "closed";
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectClock = true;
+          ProtectHostname = true;
+          ProtectProc = "invisible";
+          ProcSubset = "pid";
+          NoNewPrivileges = true;
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          LockPersonality = true;
+          MemoryDenyWriteExecute = true;
+          KeyringMode = "private";
+          CapabilityBoundingSet = "";
+          AmbientCapabilities = "";
+          SystemCallArchitectures = "native";
+          # EPERM rather than death for anything outside the set: Go's runtime
+          # probes a few calls at start and copes with a refusal.
+          SystemCallFilter = [ "@system-service" "~@privileged" ];
+          SystemCallErrorNumber = "EPERM";
+          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+          # Deliberately NOT RemoveIPC: the user is a person, and it would remove
+          # THEIR IPC objects whenever this unit stops.
+        };
       };
-    };
-  };
+    })
+  ];
 }

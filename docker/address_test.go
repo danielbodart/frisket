@@ -13,22 +13,30 @@ func TestTheDerivationGivesTheContractsVectors(t *testing.T) {
 		project, address string
 		names            []string
 	}{
-		{"example/shop", "127.101.170.171", []string{"shop.internal", "shop.example.internal"}},
-		{"example/billing", "127.10.146.214", []string{"billing.internal", "billing.example.internal"}},
-		// frisket.internal is the reserved apex.
+		{"example/shop", "127.101.170.171", []string{"shop.example.internal"}},
+		{"example/billing", "127.10.146.214", []string{"billing.example.internal"}},
 		{"danielbodart/frisket", "127.103.202.234", []string{"frisket.danielbodart.internal"}},
-		{"test/repo-66", "127.211.18.75", []string{"repo-66.internal", "repo-66.test.internal"}},
-		{"Example/Shop", "127.101.170.171", []string{"shop.internal", "shop.example.internal"}},
-		{"bodar/bodar.ts", "127.100.84.99", []string{"bodar-ts.internal", "bodar-ts.bodar.internal"}},
-		{"bodar/bodar-ts", "127.113.253.232", []string{"bodar-ts.internal", "bodar-ts.bodar.internal"}},
-		{"test/" + a63, "127.9.96.222", []string{a63 + ".internal", a63 + ".test.internal"}},
+		{"test/repo-66", "127.211.18.75", []string{"repo-66.test.internal"}},
+		{"Example/Shop", "127.101.170.171", []string{"shop.example.internal"}},
+		// Nothing is folded, so these two no longer share a name.
+		{"bodar/bodar.ts", "127.100.84.99", []string{"bodar.ts.bodar.internal"}},
+		{"bodar/bodar-ts", "127.113.253.232", []string{"bodar-ts.bodar.internal"}},
+		{"test/" + a63, "127.9.96.222", []string{a63 + ".test.internal"}},
 		{"test/" + a64, "127.60.34.62", nil},
-		{"frisket/docker", "", []string{"docker.internal"}},
-		{"google/metadata", "", []string{"metadata.internal"}},
-		{"google/shop", "", []string{"shop.internal"}},
+		{"test/my_repo", "", []string{"my_repo.test.internal"}},
+		{"test/trail-", "", []string{"trail-.test.internal"}},
+		{"test/x.-y", "", []string{"x.-y.test.internal"}},
+		// A '-' first, which glibc refuses, and an empty label.
+		{"test/-lead", "", nil},
+		{"test/.github", "", nil},
+		{"test/a..b", "", nil},
+		{"test/a.", "", nil},
+		{"test/_.._", "", nil},
+		// An owner whose names are reserved names' has none.
+		{"frisket/docker", "", nil},
+		{"google/metadata", "", nil},
 		{"frisket/frisket", "", nil},
 		{"google/google", "", nil},
-		{"test/_.._", "", nil},
 	} {
 		if v.address != "" {
 			if got := Address(v.project).String(); got != v.address {
@@ -81,7 +89,7 @@ func TestAReservedListThatWouldReserveLessThanItSaysDoesNotParse(t *testing.T) {
 
 func Example() {
 	fmt.Println(Address("example/shop"), Names("example/shop"))
-	// Output: 127.101.170.171 [shop.internal shop.example.internal]
+	// Output: 127.101.170.171 [shop.example.internal]
 }
 
 func TestAProjectIsAnOwnerAndARepositoryAsARouteMayNameThem(t *testing.T) {
@@ -93,6 +101,31 @@ func TestAProjectIsAnOwnerAndARepositoryAsARouteMayNameThem(t *testing.T) {
 	for _, p := range []string{"", "o", "o/", "/r", "O/r", "o/R", "-o/r", "o/r/x", "o/.", "o/..", "o/r ", strings.Repeat("o", 40) + "/r", "o/" + strings.Repeat("r", 101), "o_x/r"} {
 		if ValidProject(p) {
 			t.Errorf("%q was accepted", p)
+		}
+	}
+}
+
+func TestANameIsReadBackAsTheProjectItNames(t *testing.T) {
+	for name, want := range map[string]string{
+		"shop.example.internal":   "example/shop",
+		"Shop.Example.Internal.":  "example/shop",
+		"bodar.ts.bodar.internal": "bodar/bodar.ts",
+		"my_repo.test.internal":   "test/my_repo",
+		"a.b.c.owner-1.internal":  "owner-1/a.b.c",
+	} {
+		if got, ok := Project(name); !ok || got != want {
+			t.Errorf("%s: %q %v, want %q", name, got, ok, want)
+		}
+	}
+	for _, name := range []string{
+		"", "internal", "shop.internal", "example.internal", ".example.internal",
+		"shop.example.internal.x", "shop.example.local", "-lead.test.internal",
+		"docker.frisket.internal", "metadata.google.internal", "shop.ex_ample.internal",
+		"shop.-example.internal", "a..b.test.internal", strings.Repeat("a", 64) + ".test.internal",
+		"shop." + strings.Repeat("o", 40) + ".internal",
+	} {
+		if got, ok := Project(name); ok {
+			t.Errorf("%q read as %q", name, got)
 		}
 	}
 }

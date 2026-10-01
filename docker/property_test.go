@@ -44,8 +44,23 @@ func TestEveryDerivedNameIsAValidInternalNameOutsideTheReservedOnes(t *testing.T
 				}
 			}
 		}
-		if names := Names(owner + "/" + repo); slices.Contains(names, "frisket.internal") {
+		if names := Names(owner + "/" + repo); len(names) > 1 || slices.Contains(names, "frisket.internal") {
 			rt.Fatalf("%v", names)
+		}
+	})
+}
+
+// A project's name reads back as the project, lower-cased: Names and
+// Project are inverses wherever there is a name.
+func TestEveryNameReadsBackAsItsProject(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		owner := rapid.StringMatching(`[a-zA-Z0-9][a-zA-Z0-9-]{0,38}`).Draw(rt, "owner")
+		repo := rapid.StringMatching(`[a-zA-Z0-9._-]{1,100}`).Draw(rt, "repo")
+		p := lowerASCII(owner + "/" + repo)
+		for _, n := range Names(p) {
+			if got, ok := Project(n); !ok || got != p {
+				rt.Fatalf("%s: %q read back as %q %v", p, n, got, ok)
+			}
 		}
 	})
 }

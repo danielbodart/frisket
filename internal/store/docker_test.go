@@ -56,7 +56,7 @@ func dockerPolicy(t *testing.T) policy.Policy {
 				Images:      []string{"postgres:18", "docker.io/library/postgres:18"},
 				Address:     "127.101.170.171",
 				Ports:       []int{64320, 64321, 64322},
-				Names:       []string{"shop.internal", "shop.example.internal"},
+				Names:       []string{"shop.example.internal"},
 				MaxBody:     262144,
 				Bodies:      bodies,
 			},
@@ -147,10 +147,9 @@ func TestBuildRefusesABadDockerRoute(t *testing.T) {
 			p.Routes = append(p.Routes, other)
 		},
 		"a name under a wildcard route":       func(p *policy.Policy) { wildcard(p, "*.internal") },
-		"a long name under a wildcard route":  func(p *policy.Policy) { wildcard(p, "*.example.internal") },
-		"a name that is a route's host":       func(p *policy.Policy) { wildcard(p, "shop.internal") },
-		"a long name that is a route's host":  func(p *policy.Policy) { wildcard(p, "shop.example.internal") },
-		"a name that is a route's, spelt big": func(p *policy.Policy) { wildcard(p, "Shop.Internal.") },
+		"a name under a narrower wildcard":    func(p *policy.Policy) { wildcard(p, "*.example.internal") },
+		"a name that is a route's host":       func(p *policy.Policy) { wildcard(p, "shop.example.internal") },
+		"a name that is a route's, spelt big": func(p *policy.Policy) { wildcard(p, "Shop.Example.Internal.") },
 	} {
 		p := dockerPolicy(t)
 		mutate(&p)
@@ -246,13 +245,13 @@ func TestADockerSessionAnswersItsOwnNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"shop.internal.", "Shop.example.internal."} {
+	for _, name := range []string{"shop.example.internal.", "Shop.example.internal."} {
 		m := ask(t, h, name)
 		if len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{127, 101, 170, 171} {
 			t.Errorf("%s answered %+v, want 127.101.170.171", name, m.Answers)
 		}
 	}
-	if m := ask(t, h, "billing.internal."); m.RCode != dnsmessage.RCodeNameError {
+	if m := ask(t, h, "billing.example.internal."); m.RCode != dnsmessage.RCodeNameError {
 		t.Errorf("another project's name answered %v", m.RCode)
 	}
 	up.mu.Lock()

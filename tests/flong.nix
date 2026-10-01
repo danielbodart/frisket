@@ -177,7 +177,7 @@ let
           images = [ "postgres:18" "library/postgres:18" "docker.io/postgres:18" "docker.io/library/postgres:18" ];
           address = "127.101.170.171";
           ports = [ 64320 ];
-          names = [ "shop.internal" "shop.example.internal" ];
+          names = [ "shop.example.internal" ];
           maxBody = 262144;
           bodies = lib.importJSON ../internal/dockerapi/testdata/fields.json;
         };
@@ -1321,7 +1321,7 @@ in
               assert engine_saw(needle) == "", (needle, engine_saw(needle))
 
       with subtest("the project's published port is reached from the session at both loopbacks, its address and its name"):
-          for host in ["127.0.0.1", "::1", address, "shop.internal"]:
+          for host in ["127.0.0.1", "::1", address, "shop.example.internal"]:
               out = dial(leader, host, 64320)
               assert out == "project\nhello\n", (host, out)
           lines = relay_lines(name, 4)
@@ -1333,8 +1333,8 @@ in
           assert all('"label":["frisket.project=example/shop"],"publish":["64320/tcp"],"status":["running"]' in l
                      for l in lookups), lookups
 
-      with subtest("the session's own .internal names are its project's address, and every other .internal name is as it was"):
-          for n in ["shop.internal", "shop.example.internal", "Shop.Internal"]:
+      with subtest("the session's own .internal name is its project's address, and every other .internal name is as it was"):
+          for n in ["shop.example.internal", "Shop.Example.Internal"]:
               assert machine.succeed(as_workload(leader, f"dig +short A {n} @127.0.0.1")).strip() == address, n
               assert machine.succeed(as_workload(leader, f"dig +short AAAA {n} @127.0.0.1")).strip() == "", n
           # The route's own host and another route's under .internal: intercepted.
@@ -1342,16 +1342,16 @@ in
               out = machine.succeed(as_workload(leader, f"dig +short A {n} @127.0.0.1"))
               assert out.strip() == "192.0.2.2", (n, out)
           # Another project's name, and a name under the project's: on no allowlist.
-          for n in ["billing.internal", "x.shop.internal"]:
+          for n in ["billing.example.internal", "x.shop.example.internal", "shop.internal"]:
               out = machine.succeed(as_workload(leader, f"dig +time=2 +tries=1 {n} @127.0.0.1"))
               assert "status: NXDOMAIN" in out, (n, out)
           dns = lines_of("dns", name)
-          local = [m for m in dns if m.get("name") in ("shop.internal", "shop.example.internal")]
+          local = [m for m in dns if m.get("name") == "shop.example.internal"]
           assert local and all(m["decision"] == "local" and "upstream" not in m for m in local), local
           for n in ["docker.frisket.internal", "metadata.google.internal"]:
               d = [m for m in dns if m.get("name") == n]
               assert d and all(m["decision"] == "intercepted" for m in d), (n, d)
-          for n in ["billing.internal", "x.shop.internal"]:
+          for n in ["billing.example.internal", "x.shop.example.internal", "shop.internal"]:
               [d] = [m for m in dns if m.get("name") == n]
               assert d["decision"] == "refused" and d["reason"] == "not allowed" and "upstream" not in d, d
           upstream.fail("journalctl -u dnsmasq -o cat | grep -q internal")
