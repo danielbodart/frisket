@@ -19,6 +19,29 @@ you route, frisket terminates TLS with a CA made for that sandbox, replaces
 the placeholder with the real credential, and forwards the request only if
 its method and path are allowed.
 
+## Why frisket
+
+| | frisket | [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | [httpjail](https://github.com/coder/httpjail) | [tokenizer](https://github.com/superfly/tokenizer) | [smokescreen](https://github.com/stripe/smokescreen) |
+|---|---|---|---|---|---|---|
+| **Traffic reaches it** | Kernel steering, no proxy variables | Host proxy for a microVM | Proxy variables, enforced by the sandbox | Kernel steering on Linux, proxy variables on macOS | Proxy setting, plain HTTP | Proxy setting (CONNECT) |
+| **Name allowlist** | ✓, others NXDOMAIN | ✓ | ✓ | Through its rules | Per secret | ✓ |
+| **Credentials stay outside** | ✓ placeholder | ✓ sentinel | Claude Code's mask mode, Linux only | — | ✓ sent encrypted by the client | — |
+| **Method and path rules** | ✓, plus git and GraphQL | — | — | ✓ scripted | — | — |
+| **Ask a person per request** | ✓ | — | — | — | — | — |
+| **Works with** | Any network namespace; flong module | Its own microVM | Its own sandbox | Its own jail | Anything | Anything |
+| **Open source** | ✓ Go | — | ✓ TypeScript | ✓ Rust | ✓ Go | ✓ Go |
+| **Platforms** | Linux | macOS, Windows, Linux | Linux, macOS | Linux, macOS | Any | Any |
+
+— is not offered, or not documented as of 2026. GitHub Copilot's agent
+firewall and Codex cloud's internet access have name allowlists, and
+Codex's can limit methods; both are hosted only.
+
+The difference that matters most is steering. Behind a proxy variable, a tool
+that ignores it (a database driver, gRPC, a static Go binary) either gets out
+around the proxy or doesn't work. frisket needs no setting in the tool, so
+it works and is still filtered; the one thing a tool must trust is the CA, and
+a missing CA fails loudly.
+
 ## Terms
 
 - **sandbox**: a network namespace frisket serves, such as a flong container.
