@@ -25,9 +25,9 @@
     # Through glibc and resolved, as a browser on the host asks.
     out = machine.succeed("getent ahostsv4 bodar.ts.bodar.internal")
     assert out.startswith("127.100.84.99 "), out
-    out = machine.succeed("getent ahostsv4 Data-Lab.TripTease.internal")
-    assert out.startswith("127.1.191.78 "), out
-    machine.fail("getent ahostsv4 data-lab.internal")
+    out = machine.succeed("getent ahostsv4 Frisket.DanielBodart.internal")
+    assert out.startswith("127.103.202.234 "), out
+    machine.fail("getent ahostsv4 shop.internal")
     machine.fail("getent ahostsv4 docker.frisket.internal")
 
     # A name outside .internal is never sent to it: the link is no default
