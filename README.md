@@ -2,27 +2,37 @@
 
 # frisket
 
+An egress proxy that keeps credentials out of sandboxes. The sandbox holds a
+placeholder; frisket swaps in the real token on the wire, checks each request
+against your rules, and logs everything. Nothing in the sandbox is configured
+to use it.
+
 > A *frisket* is the mask on a printing press that covers the parts of the sheet
 > which must not take ink. [flong](https://github.com/danielbodart/flong) casts
 > the plate; frisket decides what the sheet is allowed to take.
 
-frisket keeps credentials out of sandboxes. It runs on the host, holds the
-tokens, and adds them to requests on the wire, where the sandbox cannot reach
-them. For a sandbox with no network of its own it is also the only way out,
-and every connection and DNS query it sees is logged, one JSON line each.
+frisket runs on the host, as the user whose credentials it holds. The kernel steers the sandbox's DNS and
+connections to it (TPROXY, inside the sandbox's own network namespace), so
+there are no proxy variables for a tool to ignore: a tool that skips frisket
+has nowhere else to go. Names off the allowlist don't resolve. For the hosts
+you route, frisket terminates TLS with a CA made for that sandbox, replaces
+the placeholder with the real credential, and forwards the request only if
+its method and path are allowed.
 
-Nothing in a sandbox is configured to use it. The kernel steers connections to
-it with TPROXY: no proxy variables, no hosts file, no per-tool proxy settings.
-A sandbox is told which CA to trust, and holds a placeholder wherever a client
-insists on a credential of its own.
+## Terms
 
-The design, what was measured and what was rejected are in
-[PLAN.md](PLAN.md).
+- **sandbox**: a network namespace frisket serves, such as a flong container.
+- **session**: one sandbox's time with frisket: its policy, its CA and its
+  listeners, from launch to exit.
+- **policy**: the names a sandbox may resolve, and its routes.
+- **route**: a host frisket intercepts: where to send it, which credential to
+  add, and which requests to allow, ask about or refuse.
+- **placeholder**: what the sandbox sends where a credential goes, such as
+  `proxy-injected`. Only an exact placeholder is replaced.
 
 ## Example
 
-With [flong](https://github.com/danielbodart/flong), a policy and one line per
-launcher:
+With [flong](https://github.com/danielbodart/flong):
 
 ```nix
 {
@@ -39,483 +49,111 @@ launcher:
         host = "api.example.com";
         upstream = "https://api.example.com";
         credentialFile = "/run/secrets/example-token";
-        placeholder = "proxy-injected";   # what the sandbox holds instead
+        placeholder = "proxy-injected";
         paths = [ { methods = [ "GET" "POST" ]; prefix = "/v1"; } ];
       };
     };
   };
 
-  containers.agent.privateNetwork = true;
+  containers.agent = {
+    privateNetwork = true;
+    config = {
+      system.stateVersion = "24.05";
+      users.users.alice = { isNormalUser = true; uid = 1000; };
+      environment.variables.SSL_CERT_FILE = "/etc/frisket/ca-bundle.crt";
+    };
+  };
   flong.agent = { user = "alice"; command = [ "codex" ]; };
 
-  services.frisket.flong.agent = {
-    policy = "research";
-    set = "all";                        # or "service", with flong's `network`
-  };
+  services.frisket.flong.agent.policy = "research";
 }
 ```
 
-A session `flong.agent` starts resolves `api.example.com` to frisket, which
-terminates its TLS with the session's own CA, checks each request against the
-route's paths, replaces the placeholder with `Bearer <token>` from the file,
-and forwards it upstream. Only the placeholder, exactly: a request carrying any
-other credential, or none, goes upstream as it was sent. `proxy-injected` is
-what Claude Code on the web uses, and Claude Code keeps a variable holding
-exactly that when it scrubs credentials from a subprocess's environment.
-`*.pkg.example.org`
-resolves as usual and is spliced through untouched. Every other name is
-answered NXDOMAIN, without an upstream lookup, and every address frisket did
-not resolve for the session is refused at connect — as are loopback, private ranges, link-local, CGNAT, ULA
-and the host's own addresses, whatever resolved to them.
+In the `agent` container:
 
-Every session gets a CA of its own, made when it starts and name-constrained to
-its policy's route hosts. It is mounted read-only at `/etc/frisket` in the
-session, on a tmpfs nothing else sees: `ca.crt`, and `ca-bundle.crt`, the
-host's `security.pki.caBundle` with the CA appended. The key never leaves the
-daemon and never touches disk; the CA survives a restart of the daemon and ends
-with the session. Pointing a runtime at the bundle is the consumer's: set whichever of
-`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`
-and the rest the tools in that sandbox actually read.
+- `api.example.com` resolves to frisket. A `GET` or `POST` under `/v1`
+  carrying `Bearer proxy-injected` goes upstream with `Bearer <token>` from
+  the file. Anything else on that host is refused.
+- `*.pkg.example.org` resolves normally and passes through untouched.
+- Every other name is NXDOMAIN, and every address frisket didn't resolve is
+  refused.
 
-```nix
-containers.agent.config.environment.variables.SSL_CERT_FILE =
-  "/etc/frisket/ca-bundle.crt";
-```
+## How it works
 
-frisket used to export a set of them itself. It no longer does: which variable
-a runtime reads is a fact about the runtime, the list drifts as tools come and
-go, and the thing that chose to run those tools is what knows. [chase](https://github.com/danielbodart/chase)
-carries the set its containers were getting from here.
+- **DNS.** frisket answers every query. A route's host resolves to frisket; an
+  allowed name resolves upstream; anything else is NXDOMAIN, never looked up.
+- **Egress.** A connection is allowed only to an address frisket resolved for
+  that sandbox. Loopback, private ranges, link-local, CGNAT, ULA and the
+  host's own addresses are always refused, checked at connect time so DNS
+  rebinding can't get round it.
+- **Interception.** Each session gets its own CA, name-constrained to its
+  routes' hosts, mounted read-only at `/etc/frisket` (`ca.crt`, and
+  `ca-bundle.crt`, the system bundle plus the CA). The key never leaves the
+  daemon. Point the sandbox's tools at the bundle with whichever of
+  `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`… they read.
+- **Logging.** One JSON line per connection, request and DNS query, refusals
+  included.
+- **Restarts.** Sessions survive a daemon restart. A changed policy restarts
+  the daemon, so tightening a policy tightens running sandboxes.
 
-## Policies are documents
+### Modes
 
-Each policy is a JSON document of its own, and a session names its document by
-path. The module writes one per `services.frisket.policies.<name>` to
-`/etc/frisket/policies/<name>.json`, checked with `frisket check` when the
-system is built. The daemon reads a session's document when the session opens
-and again when it is restored after a restart, and a changed policy restarts
-the daemon: a switch that tightens a policy tightens the sessions running under
-it. Sessions whose documents are the same, byte for byte, share one
-interceptor and its credential watchers.
+`services.frisket.flong.<launcher>.set`:
 
-A launcher can name a document of its own instead, written for the session --
-`services.frisket.flong.<launcher>.policyFile`, a path in which `{machine}` is
-the session's name, `/run/user/1000/chase/{machine}/policy.json` say. frisket
-substitutes the name itself; nothing else in the path is special, and the
-module refuses any other brace. It is served the same way; only the daemon's
-user, through the control socket, ever names one.
+- **`all`** (default): the sandbox has no network of its own. All TCP and DNS
+  go to frisket, other UDP is refused, and frisket is the only way out.
+- **`service`**: the sandbox has its own network (flong's `network`). Only DNS
+  and route hosts go through frisket; everything else goes direct. A policy
+  that should resolve everything allows `*`.
 
-A route added to a policy is intercepted in sessions started after the change;
-one already running fails on that host until it is relaunched, because its CA
-was made before the host was a route.
+## Routes
 
-## Sets
+A route can do more than add a bearer token. Each is in
+[docs/routes.md](docs/routes.md):
 
-- `all` — the sandbox has no network. All TCP and DNS go to frisket, other UDP
-  is rejected, and frisket is the only way out.
-- `service` — the sandbox has its own network (flong's `network`). Only DNS and
-  frisket's service address, `192.0.2.2` and `2001:db8::2`, are steered;
-  everything else goes direct. DNS is still held to the policy, so a policy
-  that should resolve everything allows `*`, and its routes are intercepted as
-  usual:
-
-  ```nix
-  services.frisket.policies.trusted = {
-    allow = [ "*" ];
-    routes.example = { /* as above */ };
-  };
-  ```
-
-## Other launchers
-
-Run as the daemon's user, in this order, from a hook that has the sandbox's
-network namespace before anything gives it egress. `$userns` is the user
-namespace that owns the sandbox's; each step enters it once, under that
-`nsenter`, since a Go program cannot join a user namespace itself. Root, with
-no user namespace to join, leaves out `-userns` and `-nsenter` -- but the
-control socket answers only the daemon's user.
-
-```console
-$ frisket steer   -userns $userns -nsenter /path/to/nsenter \
-                  -netns $netns -mntns /proc/$leader/ns/mnt \
-                  -roots /etc/ssl/certs/ca-certificates.crt \
-                  -steering $file -name $session -policy /etc/frisket/policies/research.json
-$ frisket connect -userns $userns -nsenter /path/to/nsenter \
-                  -netns $netns -steering $file -name $session
-$ frisket close   -name $session
-```
-
-`-policy` takes the same `{machine}` a `policyFile` does. A launcher whose
-hooks are argument lists never parsed as shell, as flong's are, gives each
-step `-flong` instead of the flags its environment answers -- `$machine`,
-`$netns`, `$userns`, `$leader` and `$workspace` -- and ends it with `--`,
-after which the launcher's own arguments are ignored. A variable that is
-missing fails the step, naming it, and so does a word before the `--`.
-
-The adapter names frisket, nsenter and nft by store path and puts nothing on
-its hooks' PATH, so a rules hook of your own names its tools the same way.
-
-`$file` is `(frisket.lib.steering { set = "all"; }).json`: the ruleset and the
-listener specification from one attrset. `frisket steering $file` prints what
-it will do. `steer` creates the listeners inside the namespace, installs the
-routing and the ruleset, and mounts the session's CA at `/etc/frisket`;
-`connect` gives the namespace its egress. Each refuses to run out of turn.
-Point the sandbox's runtimes at `/etc/frisket/ca-bundle.crt`.
+- **Credential files** as a bare token or a JSON field, with an expiry; re-read
+  when replaced. Claude Code's and codex's own logins work as they are.
+- **Rules** by method and path, with `allow`, `ask` or `refuse` for each.
+- **Asking**: hold a request while a program you choose asks a person.
+- **git**: fetch the repositories you list; push refused, asked or allowed.
+- **GraphQL**: rules per mutation field, read from the request body.
+- **Wildcard hosts**, such as `*.googleapis.com`.
+- **Session keys**: a signing key made per session, for clients such as
+  Google's that sign their own tokens.
+- **Docker**: hold a sandbox to its own project's containers on your daemon. See
+  [docs/docker.md](docs/docker.md).
 
 ## Options
 
 | option | default | |
 |---|---|---|
-| `services.frisket.user` / `group` | `frisket` | who the daemon runs as: the owner of the credential files, never a DynamicUser |
-| `services.frisket.policies.<name>.allow` | `[ ]` | names a session may resolve: `name`, `*.name` (any depth below it) or `*` (every name); a `*` anywhere else is refused |
-| `services.frisket.policies.<name>.routes.<route>` | `{ }` | an intercepted host, which must be allowed: `host` (a name, or `*.name` for every name below it), `upstream`, `upstreamCA`, `credentialFile` (null: no credential, scope only), `credentialJSON` (null: a bare token), `placeholder`, `header` (null: `Authorization: Bearer`), `basicUser` (Basic, the token as password), `sessionKey` (see [Session keys](#session-keys)), `paths`, `git`, `unmatched` (`refuse` or `ask`), `refusal` (the API's own error shape) |
-| `services.frisket.asker` | `null` | the program a request a route asks about is put to; null refuses them. See [Asking](#asking) |
-| `services.frisket.dns` | host's `resolv.conf` | where frisket resolves allowed names |
-| `services.frisket.controlSocket` | `/run/frisket/control.sock` | the daemon's user's, 0600, and only from the host's user namespace; never bound into a sandbox |
-| `services.frisket.logLevel` | `info` | `debug` adds each intercepted request's headers and error bodies; credentials are described, never shown |
-| `services.frisket.maxSessions` | `256` | sizes the fd store that keeps sessions across a restart |
-| `services.frisket.maxConnections` | built in | concurrent connections per session |
-| `services.frisket.flong.<launcher>.policy` | *required* | the policy for the launcher's sessions |
-| `services.frisket.flong.<launcher>.policyFile` | `null` | a document's absolute path, instead of `policy`'s, where `{machine}` is the session's name |
-| `services.frisket.flong.<launcher>.set` | `all` | `all` or `service` |
-| `services.frisket.flong.<launcher>.params` | `{ }` | recorded with each session, for a policy that reads them; `workspace` always is |
+| `services.frisket.user` / `group` | `frisket` | Who the daemon runs as: the owner of the credential files. |
+| `services.frisket.policies.<name>.allow` | `[ ]` | Names a sandbox may resolve: `name`, `*.name` (any depth below) or `*`. |
+| `services.frisket.policies.<name>.routes.<route>` | `{ }` | An intercepted host: `host`, `upstream`, `credentialFile`, `placeholder`, `paths`, … See [docs/routes.md](docs/routes.md). |
+| `services.frisket.asker` | `null` | The program a question goes to; `null` refuses every question. |
+| `services.frisket.dns` | host's `resolv.conf` | Where frisket resolves allowed names. |
+| `services.frisket.controlSocket` | `/run/frisket/control.sock` | The daemon's control socket; never bound into a sandbox. |
+| `services.frisket.logLevel` | `info` | `debug` adds request headers and error bodies; credentials are described, never shown. |
+| `services.frisket.maxSessions` | `256` | Sessions kept across a restart. |
+| `services.frisket.maxConnections` | built in | Concurrent connections per session. |
+| `services.frisket.flong.<launcher>.policy` | *required* | The launcher's policy. |
+| `services.frisket.flong.<launcher>.policyFile` | `null` | A policy file of the launcher's own instead; `{machine}` in the path is the session's name. |
+| `services.frisket.flong.<launcher>.set` | `all` | `all` or `service`. See [Modes](#modes). |
+| `services.frisket.flong.<launcher>.params` | `{ }` | Recorded with each session, for a policy that reads them. |
 
-A credential file is read by the daemon, as `user`, and re-read when replaced,
-by rename too. The option is a string, so the file is never copied into the
-store. Keep it out of `/tmp`, which the daemon cannot see.
-
-A file that is not a bare token is read as JSON, at dotted paths. Claude Code's
-own login, which the host's sessions keep refreshed:
-
-```nix
-credentialFile = "/home/alice/.claude/.credentials.json";
-credentialJSON = {
-  token = "claudeAiOauth.accessToken";
-  expiresMillis = "claudeAiOauth.expiresAt";  # past it, 503 rather than a stale token
-};
-```
-
-Where the expiry is inside the token rather than beside it, as codex's login
-keeps it, `expiresJWT` names the JWT to read `exp` from -- usually the token
-itself. The claim is read, not verified:
-
-```nix
-credentialFile = "/home/alice/.codex/auth.json";
-credentialJSON = {
-  token = "tokens.access_token";
-  expiresJWT = "tokens.access_token";
-};
-```
-
-Clients retry a 503 quietly, so a credential that stays expired is logged once,
-at error, when requests first find it so, and once more when it is fresh again.
-
-## git
-
-GitHub takes a token for git only as Basic auth's password. With the
-sandbox's git sending the placeholder there:
-
-```nix
-routes.github = {
-  host = "github.com";
-  upstream = "https://github.com";
-  credentialFile = "/run/secrets/gh-token";
-  placeholder = "proxy-injected";
-  basicUser = "x-access-token";
-  git = { repos = [ "*" ]; push = "ask"; };   # or [ "owner/repo" ... ]
-  paths = [ { methods = [ "GET" "HEAD" ]; prefix = "/"; } ];  # releases, archives
-};
-```
-
-```ini
-# the sandbox's /etc/gitconfig
-[url "https://github.com/"]
-	insteadOf = git@github.com:
-	insteadOf = ssh://git@github.com/
-[credential "https://github.com"]
-	helper = !gh auth git-credential   # GH_TOKEN=proxy-injected
-```
-
-`git` admits `info/refs` and `git-upload-pack` for the listed repositories,
-matched by segment, and decides `git-receive-pack` as `push` says: `refuse`,
-the default, `ask` or `allow`. It decides every git-shaped request, so a
-refused push is refused at its ref advertisement even where `paths` admits
-`GET`. One asked about admits the advertisement, which says no more than a
-fetch's, and asks once, at the push, as the operation `git-receive-pack`: the
-body the asker is shown opens with the refs it would update, and the pack
-streams after it. Without `credentialFile`, the same route is
-read-only GitHub with nothing of yours on it: what the sandbox sends goes on as
-it came, for what the scope admits.
-
-## Wildcard routes
-
-```nix
-allow = [ "*.googleapis.com" ];
-routes.google = {
-  host = "*.googleapis.com";
-  upstream = "https://*.googleapis.com";      # the name each request was made to
-  credentialFile = "/run/secrets/gcp-token.json";
-  credentialJSON = { token = "access_token"; expiresMillis = "expiry"; };
-  placeholder = "proxy-injected";
-  unmatched = "ask";
-};
-routes.google-mtls = {
-  host = "*.mtls.googleapis.com";
-  upstream = "https://*.mtls.googleapis.com";
-  paths = [ { methods = [ "GET" "HEAD" "POST" "PUT" "PATCH" "DELETE" ]; prefix = "/"; refuse = true; } ];
-};
-```
-
-`*.googleapis.com` is every name below it, at any depth, and not
-`googleapis.com` itself. A name's exact route serves it, and failing that the
-nearest wildcard above it, so `iam.mtls.googleapis.com` is refused. Each
-request goes to the name the client asked for, on the upstream's port if it
-names one, verified as that name; a request for another name on the same
-connection is 421. The allowlist must cover the wildcard whole, and the
-session's CA is constrained to `googleapis.com`.
-
-## Session keys
-
-A client that signs its own tokens -- Google's, with a service-account key
-file -- is given a key made for the session, and its route the public half:
-
-```json
-"sessionKey": {
-  "publicKey": "-----BEGIN PUBLIC KEY-----\n...",
-  "issuer": "agent@project.iam.gserviceaccount.com",
-  "grants": ["oauth2.googleapis.com/token", "www.googleapis.com/oauth2/v4/token"]
-}
-```
-
-- A JWT-bearer grant posted to one of `grants`, whose assertion the key signed
-  as `issuer`, for one of those URLs, at most an hour long, is answered by
-  frisket: `{"access_token": <placeholder>, "expires_in": 3599, "token_type":
-  "Bearer"}`, or an ID token signed by nobody when it asks for
-  `target_audience`. The log says `credential: answered`. Anything else sent
-  there is 400, and nothing sent to a grant URL, however it is spelt, ever
-  leaves.
-- A bearer JWT the key signed, RS256, as `issuer`, in date and at most an hour
-  long, whose audience is `https://<host>/` for a host the route serves or
-  which has a `scope` and no audience, is the placeholder, and replaced. One the key signed that fails
-  any of that is 403. Any other bearer goes upstream as it was sent.
-
-The key is made per session, so a document with one is a launcher's
-(`policyFile`), not the module's.
-
-## GraphQL
-
-A GraphQL endpoint is one path whose body says what each request does, so a
-route's `graphql` rules decide it by the body: a query by `query`, and a
-mutation or subscription by the rule for each field at its root, named as the
-schema names it. A request is decided by the strictest of everything its
-document holds -- every field of every operation -- so nothing sent beside a
-field loosens its rule. A field no rule names is the endpoint's `unmatched`
--- `refuse`, the default, `ask` or `allow`. frisket knows GraphQL and no API's schema: the fields come from the
-configuration, and chase generates them from the provider's published one.
-
-```nix
-graphql = [{
-  path = "/graphql";
-  query.operation = { id = "graphql-query"; summary = "A GraphQL query"; class = "read"; };
-  mutations = [
-    { field = "closePullRequest"; ask = true; operation = { id = "closePullRequest"; summary = "Close a pull request."; class = "write"; category = "pulls"; }; }
-    { field = "deleteRepository"; refuse = true; }
-  ];
-  unmatched = "ask";
-}];
-```
-
-The body is read (1 MiB at most) before anything is decided, and what goes
-upstream is exactly what was read. A field is found through fragment spreads
-and inline fragments at the root, by its name and never its alias, and a
-skipped one counts as run; a fragment is followed once however often it is
-spread. The rule decides at its path and at any spelling that may reach the
-same handler -- `/graphql/`, `/GraphQL`, `/graphql/v4`, `/graphql.json`.
-
-What frisket cannot see is never admitted: it is asked about, or refused
-where `unmatched` refuses. That is a request that may run something its
-document does not show -- a key other than `query`, `operationName` and
-`variables`, a persisted query's hash among them -- and one frisket cannot
-read at all: anything but a POST of `application/json` with no query string
-and no `Content-Encoding`, a batch, a key twice, a body over 1 MiB, a
-document it refuses, or one with more than 16384 selections to follow at its
-roots. Beside what the document does show, the strictest decides. The rule decides every request at its path, whatever the method,
-before any path rule.
-
-Documents are read strictly, to the October 2021 grammar, and anything two
-readers could disagree about is refused rather than resolved: outside a
-string, only printable ASCII, tab, LF and CRLF -- a CR alone ends a comment to
-the spec and not to graphql-ruby, GitHub's reader, which reads on past it into
-what the spec calls code; a comment is printable ASCII; a string holds no
-escaped surrogate. `internal/graphql`'s tests hold frisket to graphql-ruby on
-documents made to find where readers disagree (`scripts/graphql-oracle`):
-whatever frisket reads, graphql-ruby reads the same way.
-
-## Docker
-
-A route whose upstream is a Docker Engine (`docker`) holds a session to its
-own project's objects. It carries no credential (no placeholder, header or
-credential file), and it is the one place frisket changes a request, only to
-narrow it: it forwards the query and a JSON body
-as it re-encoded them from what it checked; replaces a container's or
-network's name or ID prefix in the path with the full ID it verified; adds
-`frisket.project=<project>` to the labels of what it lets be created and
-merges it into the label filter of what it lets be listed; and binds a
-published address that is empty, absent, `0.0.0.0` or `127.0.0.1` to the
-project's own loopback address, refusing any other; and, for a request with
-a body, sets `Content-Type: application/json` and removes `Content-Encoding`,
-so the daemon reads the body frisket wrote. In the response it caps
-`Api-Version` at the route's highest version. Each change is logged in
-`docker`.
-
-A session reaches its project's containers at `127.0.0.1:P`, `[::1]:P` and
-the project's address `:P`, for each port P the project names. Its ruleset
-steers those to frisket's existing listener on 15001, and frisket relays each
-connection only to the project's address on that port, and only while one of
-the project's own running containers publishes it there. The session's
-names, `<label>.internal` and `<label>.<owner>.internal`, resolve to that
-address in its DNS, before the allowlist; the rest of `.internal`, such as
-`metadata.google.internal` and `docker.frisket.internal`, resolves as before.
-Its own names are logged `decision=local`, never asked upstream and never
-recorded for egress. Under `allow = ["*"]`, another project's name may be
-answered by the host's resolver from `/etc/hosts`, but its address is not
-steered and egress refuses loopback, so the session cannot reach it.
-A name equal to or under `frisket.internal` or `google.internal` is never
-generated, and a document whose names equal or fall under one of its own
-route hosts does not load. The names say `internal`, not `docker`, because
-the address will later carry the session's own dev servers too.
-
-## Asking
-
-A route can put a request to a person instead of deciding it. A path rule
-names one operation exactly with `path`, a `*` segment matching any one
-segment and `*:verb` one ending in `:verb` (Google's custom methods, the
-colon unencoded and the verb in its case), and `ask = true` holds a matching
-request while the asker decides; `unmatched = "ask"` does the same for
-anything no rule matches, and `refuse = true` refuses what it matches
-outright -- a hole in a broader rule. Where several rules match, the most
-specific decides, segment by segment from the left -- a literal beats
-`*:verb`, that beats `*`, and each beats the end of a prefix -- and between
-equals, the stricter: refusing, then asking, then admitting. Neither a
-question nor a refusal can be spelt around: a request is also read as
-leniently as an upstream might -- decoded, case-folded, a `;parameter` or
-trailing dot dropped, an encoded slash taken either way, `%3A` as a colon --
-and a stricter rule that matches that reading decides.
-
-A `*` never matches a segment holding an encoded slash, which an upstream
-might read as two, unless its rule has `encodedSlashes = true`: Cloud
-Storage's `/storage/v1/b/*/o/*`, whose object names are one segment.
-
-```nix
-routes.cloudflare = {
-  host = "api.cloudflare.com";
-  upstream = "https://api.cloudflare.com";
-  credentialFile = "/run/secrets/cloudflare-token";
-  placeholder = "proxy-injected";
-  unmatched = "ask";
-  paths = [
-    { methods = [ "GET" "HEAD" ]; path = "/client/v4/zones/*/dns_records/*"; }
-    {
-      methods = [ "DELETE" ];
-      path = "/client/v4/zones/*/dns_records/*";
-      ask = true;
-      operation = {
-        id = "dns-records-for-a-zone-delete-dns-record";
-        summary = "Delete DNS Record";
-        description = "Permanently removes a DNS record from the zone.";
-        class = "guarded";   # read, write or guarded: shown, never matched on
-        category = "DNS Records for a Zone";
-      };
-    }
-  ];
-};
-```
-
-frisket ships no dialog. `services.frisket.asker` names a program, run as the
-daemon's user inside its sandbox, once per question and one at a time. The
-question is one JSON document on stdin:
-
-```json
-{"session": "...", "workspace": "/home/alice/Projects/site", "policy": "...",
- "route": "cloudflare", "method": "PATCH", "host": "api.cloudflare.com",
- "path": "/client/v4/zones/023e/dns_records/372e", "query": "...",
- "body": "{\"content\":\"203.0.113.9\"}", "bodyMore": false, "bodyLength": 26,
- "operation": {"id": "...", "summary": "...", "description": "...",
-               "class": "write", "category": "..."}}
-```
-
-A GraphQL request holding several fields has every one's in `operations`, and
-`operation` is the one that decided.
-
-A request with a body is asked about by its start: `body` is its first 4 KiB,
-or what arrived before it paused for half a second -- a streaming RPC sends
-one message and waits -- `bodyMore` whether it went on past that, and
-`bodyLength` the length it declared, if it did. A body is waited for until
-its first byte, so a question never shows an empty start of a body still to
-come; one without a body is asked about at once. On an allow, `body` goes
-upstream first and the rest streams after it, however long it is: what a
-person admits is the start of a body.
-
-Exit 0 admits the request, 1 declines it, and anything else refuses it and is
-logged as the asker failing. `operation` is absent when nothing matched, and it
-is the only prose in the question: it comes from the configuration, and
-everything else is the workload's, to be shown as the request. A client that
-stops waiting takes its question with it: queued, it is never asked; open, the
-asker's process group is sent SIGTERM. With no asker, every ask is refused.
-
-Each session has one question at most: another while one waits is refused at
-once, so no sandbox can queue ahead of another's or bury a question among
-many.
-
-Where several rules match, an admission never depends on how literally the
-upstream reads its paths: a rule that asks, and matches the request read
-leniently -- another case, a trailing slash, a `;parameter`, a trailing dot --
-asks, unless the rule that admits is more specific. An operation named with
-`path` always outranks a `prefix`.
-
-A method override is the method: `X-HTTP-Method-Override`, `X-HTTP-Method`,
-`X-Method-Override`, and `$httpMethod` or `_method` in the query or a POST's
-form body (up to 1 MiB), are taken, upper-cased, stripped, and everything
-after -- a session key's grant, every rule, the question, the log line and
-the request upstream -- is that method. A form a POST names `GET` for goes
-upstream as the GET's query. Overrides that disagree, or name no method, are
-400.
-
-A gRPC call's log line carries its `grpc_status`, from its trailers: its HTTP
-status is 200 whatever happened.
-
-A refusal is plain text unless the route gives it the API's own error shape,
-which a client then reads and reports:
-
-```nix
-refusal = {
-  contentType = "application/json";
-  body = builtins.toJSON {
-    success = false;
-    errors = [{ code = 403; message = "{{message}}"; }];
-    messages = [ ];
-    result = null;
-  };
-};
-```
-
-`{{message}}` is frisket's reason and the matched operation's summary --
-`frisket: refused: declined (Create a Namespace)` -- never the request's.
+Each policy is written to `/etc/frisket/policies/<name>.json` and checked with
+`frisket check` when the system builds. Not using flong? See
+[docs/launchers.md](docs/launchers.md). The design, and what was measured and
+rejected, is in [PLAN.md](PLAN.md).
 
 ## Development
 
 ```console
-$ nix develop                        # go, gopls, golangci-lint
+$ nix develop          # go, gopls, golangci-lint
 $ go test ./...
-$ CGO_ENABLED=1 go test -race ./...  # the shell builds static, as the flake does
-$ nix flake check                    # the build, the tests with and without -race,
-                                     # gofmt, go vet, shellcheck, both rulesets
-                                     # through nft, and the flong VM test
+$ nix flake check      # build, tests with and without -race, lint, both
+                       # rulesets through nft, and the flong VM test
 ```
-
-The tests make user and network namespaces with clone flags and skip where the
-kernel refuses, so `nix flake check` runs inside the Nix sandbox. Logs are
-asserted through an injected writer.
 
 ## Licence
 
