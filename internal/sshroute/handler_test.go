@@ -584,18 +584,30 @@ func TestASilentMachineFailsTheCommandWaitingOnIt(t *testing.T) {
 	shrink(t, &keepaliveTimeout, 50*time.Millisecond)
 	silence := f.wedged()
 	c := f.connect()
-	results := make(chan result, 1)
-	go func() { results <- run(t, c, "wait", nil) }()
-	waitFor(t, "the command to run", func() bool { return len(f.sshd.commands()) == 1 })
+	s, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var stderr bytes.Buffer
+	s.Stderr = &stderr
+	// Silenced only once the exec is answered: the machine answering it is
+	// what frisket waits on before the sandbox's Start returns, and one
+	// silenced before that fails the exec itself rather than the command.
+	if err := s.Start("wait"); err != nil {
+		t.Fatal(err)
+	}
 	silence()
-	var r result
+	done := make(chan error, 1)
+	go func() { done <- s.Wait() }()
 	select {
-	case r = <-results:
+	case err = <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the command is still waiting on a machine that went silent")
 	}
-	if r.status != exitUpstream || !strings.Contains(r.stderr, "frisket: server: "+ReasonUpstream) {
-		t.Errorf("got %+v", r)
+	var ee *ssh.ExitError
+	if !errors.As(err, &ee) || ee.ExitStatus() != exitUpstream || !strings.Contains(stderr.String(), "frisket: server: "+ReasonUpstream) {
+		t.Errorf("got %v, stderr %q", err, stderr.String())
 	}
 	if l := only(t, f.sshLines()); l["decision"] != "failed" || l["reason"] != ReasonUpstream || l["error"] == nil {
 		t.Errorf("line %v", l)
