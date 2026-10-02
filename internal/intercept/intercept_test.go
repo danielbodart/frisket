@@ -1042,8 +1042,17 @@ func TestHandshakeRefusesNoSNIAndUnknownNames(t *testing.T) {
 			t.Errorf("a tls line without the destination the sandbox dialled: %v", l)
 		}
 	}
-	if l := lines[2]; l["decision"] != DecisionAllowed || l["requests"] != float64(0) || l["sni"] != apiHost {
-		t.Errorf("the connection that asked nothing: %v", l)
+	allowed := 0
+	for _, l := range lines {
+		if l["decision"] == DecisionAllowed {
+			allowed++
+			if l["requests"] != float64(0) || l["sni"] != apiHost {
+				t.Errorf("the connection that asked nothing: %v", l)
+			}
+		}
+	}
+	if allowed != 1 {
+		t.Errorf("%d tls lines allow a connection, not one: %v", allowed, lines)
 	}
 	if len(up.requests()) != 0 {
 		t.Fatal("a refused handshake reached the upstream")
