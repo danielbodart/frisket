@@ -655,3 +655,53 @@ func TestADocumentIsCheckedWithoutItsCredentials(t *testing.T) {
 		t.Fatalf("a document was refused for a credential file it cannot be expected to find: %v", err)
 	}
 }
+
+// A document's lan names are exact names the allowlist allows, never a
+// route's host, with ports a TCP port can be; the rest is refused.
+func TestLANNamesAreExactAllowedNamesOfTheirOwn(t *testing.T) {
+	p := valid(t)
+	p.Allow = append(p.Allow, "nas.lan", "*.home.arpa")
+	p.LAN = []policy.LANHost{{Name: "nas.lan", Ports: []int{445}}, {Name: "printer.home.arpa"}, {Name: "nas.lan", Ports: []int{80, 445}}}
+	if err := check(t, "p", p); err != nil {
+		t.Fatalf("refused: %v", err)
+	}
+	got, err := lanHosts(p, mustMatcher(t, p.Allow...), mustMatcher(t, "api.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got["nas.lan"], []uint16{445, 80}) || got["printer.home.arpa"] != nil || len(got) != 2 {
+		t.Fatalf("lan %v", got)
+	}
+	// A name with no ports is every port, whatever another entry says.
+	p.LAN = append(p.LAN, policy.LANHost{Name: "nas.lan"})
+	if got, _ := lanHosts(p, mustMatcher(t, p.Allow...), mustMatcher(t, "api.test")); got["nas.lan"] != nil {
+		t.Fatalf("lan %v", got)
+	}
+
+	for name, h := range map[string]policy.LANHost{
+		"a wildcard":                  {Name: "*.home.arpa"},
+		"a name not on the allowlist": {Name: "other.lan"},
+		"a route's host":              {Name: "api.test"},
+		"upper case":                  {Name: "NAS.lan"},
+		"a trailing dot":              {Name: "nas.lan."},
+		"no name":                     {},
+		"port 0":                      {Name: "nas.lan", Ports: []int{0}},
+		"a port past 65535":           {Name: "nas.lan", Ports: []int{65536}},
+	} {
+		p := valid(t)
+		p.Allow = append(p.Allow, "nas.lan", "*.home.arpa")
+		p.LAN = []policy.LANHost{h}
+		if check(t, "p", p) == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func mustMatcher(t *testing.T, patterns ...string) *dns.Matcher {
+	t.Helper()
+	m, err := dns.NewMatcher(patterns...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}

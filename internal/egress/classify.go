@@ -7,11 +7,14 @@
 //     unspecified, multicast, every other spelling of any of those, and every
 //     address the host itself owns. Not configurable per session, and nothing
 //     later can override it: there is no code path from "refused here" to
-//     "accepted" -- but one. A recording session, whose every decision a
-//     person makes or chose up front, may reach the local network by a name
-//     its DNS gave, through ClassifyLAN, which is this table less private,
-//     unique-local and link-local addresses written as themselves, and still
-//     refuses the host's own addresses, its routers and a metadata service.
+//     "accepted" -- but two, both through ClassifyLAN, which is this table
+//     less private, unique-local and link-local addresses written as
+//     themselves, and still refuses the host's own addresses, its routers,
+//     the networks only it is on and a metadata service. A document's lan
+//     names (DecideLAN) reach the local network by an address the session's
+//     DNS gave one of them, at its ports; and a recording session, whose
+//     every decision a person makes or chose up front, by a name its DNS
+//     gave.
 //     ottergate consults its allowlist FIRST, which is why its
 //     shipped configuration (0.0.0.0/0 allowlisted) lets a sandbox reach
 //     169.254.169.254 and anything in 100.64/10.

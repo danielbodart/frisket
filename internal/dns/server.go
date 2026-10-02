@@ -92,6 +92,13 @@ type Config struct {
 	// the host.
 	Unlisted   Recorder
 	OnUnlisted func(name string)
+	// LAN are exact names, each one the allowlist allows, whose answers are
+	// kept in LANResolved as well as in Resolved: the names a document lets
+	// its sessions reach on the local network. egress admits a private,
+	// unique-local or link-local address only from LANResolved, and only
+	// for a name and port the document names. Nil for a document without.
+	LAN         map[string]bool
+	LANResolved Recorder
 	// OnRefused is told each name refused as not allowed, with no lookup:
 	// a recording session that refuses whatever its policy does, which
 	// keeps its names on the host as any other session does, and writes
@@ -453,8 +460,12 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 	if unlisted {
 		l.decision, set = DecisionUnlisted, s.cfg.Unlisted
 	}
+	lan := !unlisted && s.cfg.LANResolved != nil && s.cfg.LAN[name]
 	for _, a := range chainAddrs(q.Name, m.Answers) {
 		set.Record(name, a.addr, time.Duration(a.ttl)*time.Second, l.id)
+		if lan {
+			s.cfg.LANResolved.Record(name, a.addr, time.Duration(a.ttl)*time.Second, l.id)
+		}
 		l.answers = append(l.answers, a.addr.String())
 	}
 	// Written down only as a name that gave an address: an NXDOMAIN, every

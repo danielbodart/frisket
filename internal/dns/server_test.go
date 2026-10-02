@@ -963,3 +963,30 @@ func TestARecordingSessionRefusingLooksNothingUp(t *testing.T) {
 		t.Fatalf("told %v", told)
 	}
 }
+
+// A document's lan names have their answers kept apart as well, in
+// LANResolved, beside the resolved set: and no other name's ever are.
+func TestALANNamesAnswersAreKeptApart(t *testing.T) {
+	lan := &fakeRecorder{}
+	f := newFixture(t, func(c *Config) {
+		c.LAN = map[string]bool{"nas.cdn.example": true}
+		c.LANResolved = lan
+	})
+	for _, n := range []string{"nas.cdn.example", "other.cdn.example"} {
+		f.up.answers[n] = func(q dnsmessage.Question) []dnsmessage.Resource {
+			return []dnsmessage.Resource{rrA(q.Name, "192.168.1.20", 60)}
+		}
+	}
+	if _, line := f.ask(t, query(t, 9, "NAS.cdn.example.", dnsmessage.TypeA, false)); line["decision"] != DecisionResolved {
+		t.Fatalf("line %v", line)
+	}
+	if r := lan.all(); len(r) != 1 || r[0].addr != netip.MustParseAddr("192.168.1.20") || r[0].name != "nas.cdn.example" {
+		t.Fatalf("lan %+v", r)
+	}
+	if len(f.rec.all()) != 1 {
+		t.Fatalf("resolved %+v", f.rec.all())
+	}
+	if _, line := f.ask(t, query(t, 10, "other.cdn.example.", dnsmessage.TypeA, false)); line["decision"] != DecisionResolved || len(lan.all()) != 1 {
+		t.Fatalf("another name went into the lan set: %v %+v", line, lan.all())
+	}
+}

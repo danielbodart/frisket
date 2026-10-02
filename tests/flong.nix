@@ -15,9 +15,10 @@
 # intercepted name whose route adds a bearer token read from a file on the
 # host. No tool's route is here; each is designed on its own.
 #
-# The upstream's VLAN address, 192.168.1.2, is private, and is used for one
-# thing: an sshd, reached only as an SSH route frisket terminates, with
-# raw TCP to it refused as ever.
+# The upstream's VLAN address, 192.168.1.2, is private, and is used for two
+# things: an sshd, reached only as an SSH route frisket terminates, with
+# raw TCP to it refused as ever; and a document's lan name, nas.lan, by
+# which its web server is reached at port 80 alone.
 { self, flong }:
 { lib, hostPkgs, ... }:
 
@@ -25,6 +26,8 @@ let
   pkgs = hostPkgs;
   upstream4 = "203.0.113.20";
   upstream6 = "2001:db8:113::20";
+  # The upstream's own address on the test VLAN: private.
+  upstreamLAN = "192.168.1.2";
   # Where the host's resolver moves to mid-test.
   moved4 = "203.0.113.21";
   url4 = "http://${upstream4}/";
@@ -245,6 +248,8 @@ in
           "/denied.test/${upstream4}"
           # On no allowlist: only a policy that allows every name resolves it.
           "/unlisted.test/${upstream4}"
+          # A host on the local network, by its private VLAN address.
+          "/nas.lan/${upstreamLAN}"
         ];
       };
     };
@@ -1766,6 +1771,28 @@ in
           assert [(l["address"], l["reason"]) for l in hard] == [("[${upstream6}]:80", "not resolved by this session")], egress
           # And the journal has them too, as `record` lines.
           assert len(lines_of("record", name)) == len(lines), lines_of("record", name)
+
+      with subtest("a document's lan name is reached by name, at its own port alone, and never by its address"):
+          doc = json.loads(machine.succeed("cat /etc/frisket/policies/test.json"))
+          doc["allow"] = doc["allow"] + ["nas.lan"]
+          doc["lan"] = [{"name": "nas.lan", "ports": [80]}]
+          machine.succeed(f"printf '%s' {shlex.quote(json.dumps(doc))} > /srv/policies/record.json && chmod 0644 /srv/policies/record.json")
+          name, leader = hold("${recordLauncher}", "ip link show frisket0")
+          # The upstream's private VLAN address, by the name dnsmasq gives it.
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 http://nas.lan/"))
+          assert "upstream-body" in out, out
+          # An address no lan name gave, dialled by itself, and another port
+          # of the one it did, stay refused. (Its own address, once nas.lan
+          # gave it, is nas.lan's: egress knows a name by its address.)
+          machine.fail(as_workload(leader, "curl -sS -m 5 http://192.168.1.3/"))
+          machine.fail(as_workload(leader, "curl -sS -m 5 http://nas.lan:8080/"))
+          release(name)
+          lines = lines_of("egress", name)
+          assert [(l["dst"], l["decision"], l.get("reason"), l.get("name")) for l in lines] == [
+              ("${upstreamLAN}:80", "accepted", "lan", "nas.lan"),
+              ("192.168.1.3:80", "refused", "structural: private", None),
+              ("${upstreamLAN}:8080", "refused", "structural: private", "nas.lan"),
+          ], lines
 
       with subtest("a session with a policy the daemon does not have never runs"):
           err = machine.succeed(as_user("${badpolicy} 'echo ran' 2>&1; echo rc=$?"))

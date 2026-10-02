@@ -14,8 +14,9 @@
 // a method override, a git request git would never send, a command the
 // rules cannot read, anything on a Docker route, and a connection to an
 // address nobody resolved stay exactly what they are in every session, and
-// are written down as `hard`. Nor is the local network the default's: only
-// a person answers for a LAN host.
+// are written down as `hard`. The local network, by a name, is a subject like
+// any other, decided by the default as by a person; only the host's own
+// networks, its routers and its metadata service stay out of reach.
 //
 // The package is a leaf: intercept, sshroute, egress and dns call it, and it
 // calls none of them. A person is asked through a function the caller
@@ -272,14 +273,6 @@ func (r *Recorder) Interactive() bool { return r.cfg.Default == "" }
 // put to a person.
 func (r *Recorder) Default() Answer { return r.cfg.Default }
 
-// personal is whether a subject is put to a person: every one when there is
-// no default, and one on the local network whatever the default. A default
-// is an answer given before anything was seen, and the local network -- a
-// NAS, a printer, a device's admin page -- is reached by a name anybody's
-// wildcard DNS gives for any address, so a sandbox would choose what the
-// default admitted.
-func (r *Recorder) personal(l Line) bool { return r.Interactive() || l.LAN }
-
 // Asking puts a subject to a person: their answer, or why there was none --
 // the reason a refusal gives -- with the asker's own error, for the caller's
 // log, if it failed.
@@ -348,7 +341,7 @@ func (r *Recorder) decide(ctx context.Context, l Line, key string, ask Asking, e
 		switch {
 		case !answered:
 			continue
-		case r.personal(l) && (each || answer == Ask):
+		case r.Interactive() && (each || answer == Ask):
 			return r.again(ctx, e, l, ask)
 		}
 		return Result{Answer: answer, Source: SourceMemo}
@@ -364,7 +357,7 @@ const ReasonStoppedWaiting = "client stopped waiting"
 
 func (r *Recorder) answer(ctx context.Context, k string, e *entry, l Line, ask Asking) Result {
 	res := Result{Answer: r.cfg.Default, Source: SourceDefault}
-	if r.personal(l) {
+	if r.Interactive() {
 		res = r.ask(ctx, ask)
 	}
 	r.mu.Lock()

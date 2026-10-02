@@ -696,17 +696,18 @@ about forty lines.
   rebinding cannot slip past, and so no allowlist can override it. ottergate's
   allowlist is consulted *before* its equivalent check, which is why its shipped
   configuration allows the cloud metadata address. A private address is
-  reachable in one way only: as an SSH route (below), whose exact address and
-  port the session's ruleset steers to frisket, which terminates the SSH and
-  dials the machine itself with a dialer pinned to that address. It is never
-  spliced as raw TCP: another port on the same machine, or the same port
-  dialled any other way, is refused here as before, and no allowlist or
-  route can change that. The one exception is a recording session's, which
-  a person runs and answers for: there, a private, unique-local or
-  link-local address its DNS gave for a name is the recording's to decide,
-  and dialled through `ClassifyLAN`, which still refuses the host's own
-  addresses, its routers, the networks only it is on and a metadata service
-  ("Recording", below).
+  reachable in three ways only. As an SSH route (below), whose exact address
+  and port the session's ruleset steers to frisket, which terminates the SSH
+  and dials the machine itself with a dialer pinned to that address. As a
+  document's `lan` name: an exact name the allowlist allows, at the ports
+  it lists, admitted for an address the session's DNS gave that name and
+  for nothing else. And in a recording session, which a person runs and
+  answers for: there, a private, unique-local or link-local address its DNS
+  gave for any name is the recording's to decide ("Recording", below).
+  Both of the last two dial through `ClassifyLAN`, which still refuses the
+  host's own addresses, its routers, the networks only it is on and a
+  metadata service. Otherwise it is never spliced as raw TCP: an address no
+  lan name gave, a literal one, another port, is refused here as before.
 - **Allowlist:** a connection is accepted only to an address frisket resolved
   for an allowed name in that session, with a bounded TTL and a cap on the set.
 - **Names** come from frisket's own DNS answers to that session, with SNI or
@@ -1229,7 +1230,7 @@ shaped so is below.
   nothing: it is telemetry. A name leaves the host while recording; that is
   what recording is -- but not with a default of refuse, which keeps a name
   off the allowlist on the host as any session does, and writes it down.
-- **The local network, by name, and by a person.** A private, unique-local
+- **The local network, by name.** A private, unique-local
   or link-local address the session's DNS gave is a recording's subject,
   dialled through `ClassifyLAN` at the dial as `Classify` is: never the
   host's own addresses, a router its routing tables name, a network only
@@ -1239,10 +1240,13 @@ shaped so is below.
   an interface with no device behind it, a container bridge, a tunnel --
   holds other projects' containers and machines, not the LAN. The routing
   tables say which is which, read live as the host's own addresses are,
-  failing closed. And never the default's: a public wildcard DNS service
-  names any address, so a name is no boundary, and only a person answers
-  for a LAN host. Only in recording sessions: the structural table is
-  unchanged for every other.
+  failing closed. Decided by the default as any subject is: recording is
+  manual mode, and may override anything the tier refuses, so a default of
+  allow reaches whatever private address a name gives -- a public wildcard
+  DNS service names any address -- short of the host's own networks above.
+  Outside recording, only a document's `lan` names reach the local network
+  (the structural refusal, above); the structural table is unchanged for
+  every other address.
 - **Each subject once a session.** The first answer is remembered in memory
   for the rest of the session and written down; later ones are answered
   silently. Two at once wait for one answer. A person's ask is asked again

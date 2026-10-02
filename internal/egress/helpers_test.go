@@ -136,3 +136,23 @@ func tcpPair(t tb) (dialled, accepted *net.TCPConn) {
 	}
 	return d, r.c
 }
+
+// lanTestClassifier is the default table with loopback counted as private,
+// and no host addresses, routers or host networks: a test's echo server on
+// 127.0.0.1 stands for a host on the local network, refused by Classify and
+// admitted by ClassifyLAN.
+func lanTestClassifier(t testing.TB) *Classifier {
+	t.Helper()
+	var ranges []Range
+	for _, r := range DefaultRanges() {
+		if r.Reason == ReasonLoopback {
+			r.Reason = ReasonPrivate
+		}
+		ranges = append(ranges, r)
+	}
+	c, err := NewClassifier(ranges, StaticHostAddrs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.WithGateways(StaticHostAddrs()).WithHostNetworks(StaticHostAddrs())
+}

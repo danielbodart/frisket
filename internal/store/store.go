@@ -334,6 +334,11 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 		return nil, closers, err
 	}
 
+	lanPorts, err := lanHosts(p, allow, icpt)
+	if err != nil {
+		return nil, closers, err
+	}
+
 	rec, err := recorder(name, p.Record, d)
 	if err != nil {
 		return nil, closers, err
@@ -425,6 +430,16 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 			PolicyName: name,
 			Log:        log,
 		}
+		if lanPorts != nil {
+			// A set of the session's own, apart from resolved: only what
+			// a lan name was answered with is ever a LAN destination.
+			lan := egress.NewResolved(egress.ResolvedConfig{})
+			dc.LAN, dc.LANResolved = make(map[string]bool, len(lanPorts)), lan
+			for n := range lanPorts {
+				dc.LAN[n] = true
+			}
+			eg.Policy.LAN = &egress.LAN{Resolved: lan, Ports: lanPorts}
+		}
 		if rec != nil {
 			// A set of the session's own, apart from resolved: what the
 			// policy does not allow is never in the allowlist egress
@@ -479,6 +494,55 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 		}
 		return h, nil
 	}), closers, nil
+}
+
+// lanHosts are the document's lan names, each with the ports it may be
+// reached at -- empty for every port -- or nil for a document with none.
+// Each is an exact name the allowlist allows, never a route's host or the
+// Docker project's name, which the session's DNS answers with frisket's
+// own addresses and never looks up.
+func lanHosts(p policy.Policy, allow, icpt *dns.Matcher) (map[string][]uint16, error) {
+	if len(p.LAN) == 0 {
+		return nil, nil
+	}
+	var projectNames []string
+	if dr := p.DockerRoute(); dr != nil {
+		projectNames = dr.Names
+	}
+	out := make(map[string][]uint16, len(p.LAN))
+	every := map[string]bool{}
+	for _, h := range p.LAN {
+		n := h.Name
+		switch {
+		case strings.Contains(n, "*"):
+			return nil, fmt.Errorf("lan %q: an exact name, never a wildcard: a name below one is anybody's to give any address", n)
+		case dns.Normalize(n) != n || !dns.ValidQueryName(n):
+			return nil, fmt.Errorf("lan %q: not a lower-case DNS name without a trailing dot", n)
+		case !allow.Match(n):
+			return nil, fmt.Errorf("lan %s: not on the allowlist", n)
+		case icpt.Match(n):
+			return nil, fmt.Errorf("lan %s: a route's host, which the session's DNS answers with frisket's own address", n)
+		case slices.ContainsFunc(projectNames, func(d string) bool { return dns.Normalize(d) == n }):
+			return nil, fmt.Errorf("lan %s: the Docker project's name, which the session's DNS answers with the project's address", n)
+		}
+		if len(h.Ports) == 0 {
+			every[n] = true
+		}
+		ports := out[n]
+		for _, port := range h.Ports {
+			if port < 1 || port > 65535 {
+				return nil, fmt.Errorf("lan %s: port %d: 1 to 65535", n, port)
+			}
+			if !slices.Contains(ports, uint16(port)) {
+				ports = append(ports, uint16(port))
+			}
+		}
+		out[n] = ports
+	}
+	for n := range every {
+		out[n] = nil
+	}
+	return out, nil
 }
 
 // recorder is a recording document's recorder, with its sink open, or nil

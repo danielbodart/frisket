@@ -171,6 +171,10 @@ type Question struct {
 	// recorded as one to ask about -- or refuse. An asker shows the third
 	// answer for it.
 	Record bool `json:"record,omitempty"`
+	// LAN is an egress question's destination on the local network: a
+	// private, unique-local or link-local address the session's DNS gave
+	// for Host, which only a recording reaches.
+	LAN bool `json:"lan,omitempty"`
 	// ID names what is asked about within its session: the same for a
 	// second asking of the same subject, different for any other.
 	ID string `json:"id"`

@@ -109,8 +109,9 @@ In the `agent` container:
   that sandbox. Loopback, private ranges, link-local, CGNAT, ULA and the
   host's own addresses are always refused, checked at connect time so DNS
   rebinding can't get round it. frisket reaches a private address only for
-  an SSH route, which it terminates, or for a recording session, by a name,
-  when someone recording says so.
+  an SSH route, which it terminates; for a name the document lists as on
+  the local network ([below](#the-local-network)); or for a recording
+  session, by a name, as its default or the person recording says.
 - **Interception.** Each session gets its own CA, name-constrained to its
   routes' hosts, mounted read-only at `/etc/frisket` (`ca.crt`, and
   `ca-bundle.crt`, the system bundle plus the CA). The key never leaves the
@@ -138,6 +139,36 @@ In the `agent` container:
   dev server listening on `localhost` alone is reached at whatever host
   address flong's `forwardAddress` binds (IPv4 only; see
   [nix/steering.nix](nix/steering.nix)).
+
+## The local network
+
+A document's `lan` list names hosts on your own network -- a NAS, a
+printer, a device's admin page -- that its sessions may reach at the
+private (RFC 1918), unique-local or link-local address their DNS gives:
+
+```json
+{
+  "allow": ["nas.home.arpa", "printer.lan"],
+  "lan": [{"name": "nas.home.arpa", "ports": [445]}, {"name": "printer.lan"}]
+}
+```
+
+- Each `name` is an exact name, lower-case, that `allow` also allows: no
+  wildcard, since a name below one is anybody's to give any address. Not a
+  route's host, and not the session's own project name.
+- `ports` are the TCP ports it may be reached at; absent or empty, every
+  port.
+- Only by name: a connection is admitted to an address the session's DNS
+  gave for that name, at one of its ports. An address no `lan` name was
+  answered with -- a literal IP, another name's private answer -- is refused
+  as ever.
+- Never the host's own addresses, a router its routing tables name, a
+  network only the host is on (a container bridge, a veth, a tunnel or VPN,
+  read live from the routes, failing closed) or a cloud's metadata service;
+  never loopback or CGNAT. These are the same exclusions as a recording
+  session's, checked again at the dial.
+
+The connection's `egress` line has `reason` `lan`.
 
 ## Routes
 

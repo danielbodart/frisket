@@ -226,19 +226,15 @@ func TestDecideEachAsksAPersonEveryTime(t *testing.T) {
 	}
 }
 
-// A subject on the local network is never the default's: a person is
-// asked, and with nobody there it is refused for want of an answer.
-func TestTheLocalNetworkIsPutToAPersonWhateverTheDefault(t *testing.T) {
+// A subject on the local network is the default's like any other: nobody
+// is asked, and the line says lan.
+func TestTheLocalNetworkIsAnsweredByTheDefault(t *testing.T) {
 	r, j := newRecorder(t, Allow, nil)
 	lan := Line{Session: "s", Kind: KindEgress, Name: "nas.lan", Port: 445, LAN: true, Would: "refuse", Rule: "structural: private"}
-	var asked atomic.Int32
-	if res := r.Decide(context.Background(), lan, "nas.lan:445 lan", answers(&asked, Refuse)); res.Answer != Refuse || res.Source != SourceHuman {
+	if res := r.Decide(context.Background(), lan, "nas.lan:445 lan", never(t)); res.Answer != Allow || res.Source != SourceDefault {
 		t.Fatalf("%+v", res)
 	}
-	if asked.Load() != 1 {
-		t.Fatalf("asked %d times", asked.Load())
-	}
-	if l := j.lines(t); len(l) != 1 || l[0]["source"] != SourceHuman || l[0]["lan"] != true {
+	if l := j.lines(t); len(l) != 1 || l[0]["source"] != SourceDefault || l[0]["lan"] != true || l[0]["answer"] != "allow" {
 		t.Fatalf("lines %v", l)
 	}
 }

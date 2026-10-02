@@ -189,30 +189,32 @@ func TestARecordingSessionStillRefusesWhatNoGrantCouldAllow(t *testing.T) {
 }
 
 // A private address by a name -- the local network -- is a recording's
-// subject, marked lan and put to a person, unless it is a router of the
-// host's.
+// subject, marked lan and decided as any other is, by the default or by a
+// person, unless it is a router of the host's.
 func TestARecordingSessionDecidesTheLocalNetworkByName(t *testing.T) {
-	gw := netip.MustParseAddr("10.9.0.1")
-	c := defaultClassifier(t).WithGateways(StaticHostAddrs(netip.PrefixFrom(gw, 32))).WithHostNetworks(StaticHostAddrs(dockerBridge))
-	nas := netip.MustParseAddrPort("10.9.0.20:445")
-	// Never by the default, whatever it is: with nobody to ask, refused for
-	// want of an answer.
-	h, unlisted, rj := recordingHandler(t, c, recording.Allow, nil)
+	// By the default, with nobody asked: the echo server stands for a LAN
+	// host, on an address this classifier calls private.
+	nas, n := echoServer(t)
+	h, unlisted, rj := recordingHandler(t, lanTestClassifier(t), recording.Allow, nil)
 	unlisted.Record("nas.lan", nas.Addr(), 0, 1)
 	f := startEgress(t, h, nas)
-	if got := f.roundTrip(t, "hello"); got != "" {
+	if got := f.roundTrip(t, "hello"); got != "hello" || n.Load() != 1 {
 		t.Fatalf("got %q", got)
 	}
 	waitFor(t, "the record line", func() bool { return len(rj.lines(t, "record")) == 1 })
-	if l := rj.lines(t, "record")[0]; l["lan"] != true || l["name"] != "nas.lan" || l["source"] != "unanswered" ||
-		l["reason"] != intercept.ReasonNobodyToAsk || l["rule"] != "structural: private" {
+	if l := rj.lines(t, "record")[0]; l["lan"] != true || l["name"] != "nas.lan" || l["source"] != "default" ||
+		l["answer"] != "allow" || l["rule"] != "structural: private" {
 		t.Fatalf("record line %v", l)
 	}
-	// But by a person, under a default of allow as without one.
+
+	gw := netip.MustParseAddr("10.9.0.1")
+	c := defaultClassifier(t).WithGateways(StaticHostAddrs(netip.PrefixFrom(gw, 32))).WithHostNetworks(StaticHostAddrs(dockerBridge))
+	lanHost := netip.MustParseAddrPort("10.9.0.20:445")
+	// By a person, with no default, and the question says lan.
 	asker := &connAsker{answer: recording.Refuse}
-	h1, unlisted1, rj1 := recordingHandler(t, c, recording.Allow, asker)
-	unlisted1.Record("nas.lan", nas.Addr(), 0, 1)
-	f1 := startEgress(t, h1, nas)
+	h1, unlisted1, rj1 := recordingHandler(t, c, "", asker)
+	unlisted1.Record("nas.lan", lanHost.Addr(), 0, 1)
+	f1 := startEgress(t, h1, lanHost)
 	if got := f1.refused(t, "hello"); got != "" {
 		t.Fatalf("got %q", got)
 	}
@@ -220,7 +222,7 @@ func TestARecordingSessionDecidesTheLocalNetworkByName(t *testing.T) {
 	if l := rj1.lines(t, "record")[0]; l["lan"] != true || l["source"] != "human" || l["answer"] != "refuse" {
 		t.Fatalf("record line %v", l)
 	}
-	if q := asker.questions(); len(q) != 1 || q[0].Address != nas.String() {
+	if q := asker.questions(); len(q) != 1 || q[0].Address != lanHost.String() || !q[0].LAN {
 		t.Fatalf("questions %+v", q)
 	}
 

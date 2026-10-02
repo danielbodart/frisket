@@ -23,9 +23,9 @@ otherwise; nothing in a project's own files can ask for it.
 }
 ```
 
-- `default` is `allow`, `ask` or `refuse`: the answer to every subject but
-  the local network's (below), with nobody asked. `allow` and `ask` both let it through now and differ only in
-  what is recorded -- a grant entry that allows, or one that asks. `refuse`
+- `default` is `allow`, `ask` or `refuse`: the answer to every subject, the
+  local network's included, with nobody asked. `allow` and `ask` both let it
+  through now and differ only in what is recorded -- a grant entry that allows, or one that asks. `refuse`
   refuses it, as the policy would have, and records that. Absent or empty,
   each subject is put to the asker (below), and the person's answer does the
   same. A document with no default needs a daemon with an asker, or it is
@@ -59,11 +59,11 @@ Everything a policy decides by its rules:
   up`.
 - **a connection to the local network, by name**: a private (RFC 1918),
   unique-local or link-local address that the session's DNS gave for any
-  name, allowed or not. Never by the default: each is put to a person, with
-  a default as without one, and with nobody to ask it is refused for want
-  of an answer. A name is no boundary -- a public wildcard DNS service gives
-  one for any address -- so a default would be an answer for whatever the
-  sandbox chose. Not the host's own addresses, not a router the host's
+  name, allowed or not, decided as any other subject is: by the default, or
+  by a person. Recording is manual mode, and a default of `allow` lets the
+  sandbox reach whatever private address a name gives it -- a public
+  wildcard DNS service gives a name for any address -- on the local network
+  as on the internet. What stays out of reach is the host's own: not the host's own addresses, not a router the host's
   routing tables name (a route's gateway, each of a multipath route's), not
   a network only the host is on -- the destination of a route by an
   interface with no device behind it: a Docker, podman or libvirt bridge,
@@ -173,7 +173,7 @@ the local network. The rest depends on `kind`:
  "address":"104.16.1.34:443","would":"refuse","rule":"not allowed","answer":"allow","source":"default"}
 {"time":"...","session":"...","policy":"...","kind":"egress","name":"nas.lan","port":445,
  "address":"192.168.1.20:445","lan":true,"would":"refuse","rule":"structural: private",
- "answer":"allow","source":"human"}
+ "answer":"allow","source":"default"}
 {"time":"...","session":"...","policy":"...","kind":"egress","address":"203.0.113.9:443",
  "would":"refuse","rule":"not resolved by this session","answer":"refuse","source":"hard",
  "reason":"not resolved by this session"}
@@ -216,7 +216,8 @@ With no default, each subject is put to `services.frisket.asker` as any
 question is, with `record` set, and an `id` naming the subject within its
 session -- the same for a second asking, different for any other. A
 connection is asked about with `kind` `egress`, `host` the name and `address`
-the ip:port; its question is withdrawn when the connection's client closes
-its side, as an HTTP or SSH one is when its client goes. The asker's answer is one of three: see
+the ip:port, and `lan` set where that is on the local network; its question
+is withdrawn when the connection's client closes its side, as an HTTP or SSH
+one is when its client goes. The asker's answer is one of three: see
 [routes.md](routes.md#asking) for how it says which. A recording session's
 questions are never refused for being busy: each waits its turn.

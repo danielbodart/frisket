@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"time"
 
@@ -34,7 +35,24 @@ const ReasonNotResolved = "not resolved by this session"
 type Policy struct {
 	Classifier *Classifier
 	Resolved   *Resolved
+	// LAN is what the session may reach on the local network, or nil for a
+	// document that names nothing there.
+	LAN *LAN
 }
+
+// LAN is a document's names on the local network, for one session: the
+// addresses its DNS gave for them, kept apart from the resolved set, and
+// the ports each may be reached at.
+type LAN struct {
+	Resolved *Resolved
+	// Ports are each name's ports: empty for every port. A name not here
+	// is no LAN name.
+	Ports map[string][]uint16
+}
+
+// ReasonLAN is the reason on an egress line for a connection admitted to
+// the local network by the document's lan names.
+const ReasonLAN = "lan"
 
 // Decision is Policy's answer for one destination.
 type Decision struct {
@@ -50,6 +68,9 @@ type Decision struct {
 	// nothing reads it to make the decision.
 	Entry    Entry
 	Resolved bool
+	// LAN is a destination on the local network admitted by the document's
+	// lan names, which is dialled through ClassifyLAN.
+	LAN bool
 }
 
 // Decide applies the policy to dst.
@@ -69,6 +90,34 @@ func (p *Policy) Decide(dst netip.Addr) Decision {
 	default:
 		d.Allowed = true
 	}
+	return d
+}
+
+// DecideLAN is d, for dst, unless d refused it only as on the local
+// network -- private, unique-local or link-local, written as itself -- and
+// the session's DNS gave dst's address for one of the document's lan names,
+// which may be reached at dst's port: then it is admitted, if ClassifyLAN
+// does not refuse it as the host's own address, a router of the host's, on
+// a network only the host is on, or a metadata service. Only by name: an
+// address no lan name resolved to, a literal IP among them, stays refused.
+func (p *Policy) DecideLAN(dst netip.AddrPort, d Decision) Decision {
+	if d.Allowed || p.LAN == nil || !lan(d.Refusal) {
+		return d
+	}
+	e, ok := p.LAN.Resolved.Lookup(dst.Addr())
+	if !ok {
+		return d
+	}
+	ports, named := p.LAN.Ports[e.Name]
+	if !named || len(ports) > 0 && !slices.Contains(ports, dst.Port()) {
+		return d
+	}
+	d.Entry, d.Resolved = e, true
+	if r := p.Classifier.ClassifyLAN(dst.Addr()); r.Refused() {
+		d.Refusal, d.Reason = r, "structural: "+r.String()
+		return d
+	}
+	d.Allowed, d.Reason, d.LAN = true, ReasonLAN, true
 	return d
 }
 
@@ -113,7 +162,7 @@ func (h *Handler) ServeConn(ctx context.Context, c *steer.Conn) {
 	defer c.Close()
 
 	dst := c.Orig
-	d := h.Policy.Decide(dst.Addr())
+	d := h.Policy.DecideLAN(dst, h.Policy.Decide(dst.Addr()))
 	line := egressLine{conn: c, policy: h.PolicyName, decision: d}
 
 	lanDst := false
@@ -140,7 +189,7 @@ func (h *Handler) ServeConn(ctx context.Context, c *steer.Conn) {
 	}
 
 	dial := h.Dialer.DialTCP
-	if lanDst {
+	if lanDst || line.decision.LAN {
 		dial = h.Dialer.DialLAN
 	}
 	up, err := dial(ctx, dst)
@@ -269,6 +318,7 @@ func (h *Handler) record(ctx context.Context, c *steer.Conn, d Decision) (reason
 			Host:      name,
 			Address:   dst.String(),
 			Record:    true,
+			LAN:       lanDst,
 			ID:        recording.ID(c.Session, recording.KindEgress, key),
 		}
 		a, reason, err := intercept.AskAbout(ctx, rc.Asker, q)

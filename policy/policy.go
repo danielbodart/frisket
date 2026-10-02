@@ -49,6 +49,10 @@ type Policy struct {
 	// answers with the service address, and an SSH route is neither -- it is
 	// reached at its own address, which no name resolves to.
 	SSH []SSHRoute `json:"ssh,omitempty"`
+	// LAN are the names on the local network the session may reach, by
+	// name alone (see LANHost). Absent, a private, unique-local or
+	// link-local address is refused, whatever name gave it.
+	LAN []LANHost `json:"lan,omitempty"`
 	// Record makes every session served under the document a recording one
 	// (see Record). Absent, the policy decides, as it always has.
 	Record *Record `json:"record,omitempty"`
@@ -79,6 +83,26 @@ type Record struct {
 	// -record-dir, created 0600 and bounded at 64 MiB. Empty: the journal
 	// alone.
 	Sink string `json:"sink,omitempty"`
+}
+
+// LANHost is a name on the local network -- a NAS, a printer, a device's
+// admin page -- that a session may reach at a private (RFC 1918),
+// unique-local or link-local address its DNS gives for it. Only by the
+// name: a connection is admitted to an address the session's DNS gave for
+// Name, at one of Ports, and to nothing else -- a literal IP is refused as
+// ever. Never the host's own addresses, a router of the host's, a network
+// only the host is on -- a container bridge, a tunnel -- or a metadata
+// service: the same exclusions as a recording session's. Name must be on
+// the allowlist, and is the name exactly: no wildcard, since a name below
+// one is anybody's to give any address.
+//
+//	{"lan": [{"name": "nas.home.arpa", "ports": [445]}, {"name": "printer.lan"}]}
+type LANHost struct {
+	// Name is an exact DNS name, lower-case, with no trailing dot.
+	Name string `json:"name"`
+	// Ports are the TCP ports it may be reached at, 1 to 65535. Empty is
+	// every port.
+	Ports []int `json:"ports,omitempty"`
 }
 
 // SSHRoute is one machine a session may run commands on, by SSH, as User.
