@@ -51,6 +51,8 @@ func TestDecodeRefusesAnUnknownFieldInAnSSHRoute(t *testing.T) {
 		`{"name":"p","allow":[],"ssh":[{"name":"s","address":"10.0.0.5","user":"u","hostKeys":[],"agnet":"/a"}]}`,
 		`{"name":"p","allow":[],"ssh":[{"name":"s","address":"10.0.0.5","user":"u","hostKeys":[],"exec":[{"command":"ls","allow":true}]}]}`,
 		`{"name":"p","allow":[],"ssh":{"name":"s"}}`,
+		`{"name":"p","allow":[],"ssh":[{"name":"s","address":"10.0.0.5","user":"u","hostKeys":[],"password":"/p"}]}`,
+		`{"name":"p","allow":[],"ssh":[{"name":"s","address":"10.0.0.5","user":"u","hostKeys":[],"passwordFile":"/p","shell":"yes"}]}`,
 	} {
 		var d Document
 		if err := Decode([]byte(b), &d); err == nil {
@@ -79,6 +81,14 @@ func TestAnSSHRouteRoundTrips(t *testing.T) {
 				{Command: "less **", Arg: "+*", Ask: true},
 			},
 			Unmatched: "refuse",
+		}, {
+			Name:         "modem",
+			Address:      "192.168.1.1",
+			User:         "admin",
+			HostKeys:     []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKk7kU0dW1lSbm8W7xQ2uZVXvVq2zDQm0V6Zg7I4pYQb modem"},
+			PasswordFile: "/run/secrets/modem-password",
+			Shell:        true,
+			Exec:         []ExecRule{{Command: "xdslctl info **"}},
 		}},
 	}}
 	b, err := json.Marshal(want)

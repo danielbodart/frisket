@@ -53,10 +53,11 @@ type Policy struct {
 
 // SSHRoute is one machine a session may run commands on, by SSH, as User.
 // frisket terminates the sandbox's SSH, logs in to Address with the user's
-// own key, and decides each command the sandbox asks to run: no key ever
-// enters the sandbox, and no shell is ever opened. The machine's login shell
-// must be of the POSIX family, fish or csh: a command is decided by the words
-// those shells read in it, and Windows' cmd.exe reads others.
+// own key or password, and decides each command the sandbox asks to run: no
+// credential ever enters the sandbox, and no shell is ever opened for it. The
+// machine's login shell must be of the POSIX family, fish or csh: a command
+// is decided by the words those shells read in it, and Windows' cmd.exe
+// reads others -- or the route is a Shell route, which reads far less.
 type SSHRoute struct {
 	// Name is the route's Host alias in the sandbox's ssh_config, and the
 	// principal its host certificate names: [a-z0-9][a-z0-9.-]*.
@@ -73,14 +74,24 @@ type SSHRoute struct {
 	// the trust in it -- nothing is learnt on first use, and nobody is ever
 	// asked about a key.
 	HostKeys []string `json:"hostKeys"`
-	// Agent is the absolute path of an ssh-agent's socket, and KeyFile of an
-	// unencrypted private key: what frisket logs in with. Exactly one.
-	Agent   string `json:"agent,omitempty"`
-	KeyFile string `json:"keyFile,omitempty"`
+	// Agent is the absolute path of an ssh-agent's socket, KeyFile of an
+	// unencrypted private key, and PasswordFile of a file holding a password,
+	// for a machine that takes no key: what frisket logs in with. Exactly one.
+	// Each is read at login, and never by the sandbox.
+	Agent        string `json:"agent,omitempty"`
+	KeyFile      string `json:"keyFile,omitempty"`
+	PasswordFile string `json:"passwordFile,omitempty"`
 	// Identity is a key's "SHA256:..." fingerprint: the one key offered,
 	// where an agent holds several and a server counts every one it is
-	// offered against its limit.
+	// offered against its limit. Never with PasswordFile.
 	Identity string `json:"identity,omitempty"`
+	// Shell is for a device whose login shell ignores the command an exec
+	// carries -- a router's or a modem's CLI. frisket opens that shell on a
+	// terminal instead, types the command into it, and gives back what it
+	// printed. Only a single simple command of plain words is readable on
+	// such a route, since the device's shell is no shell frisket knows the
+	// grammar of, and none of the command's stdin is sent.
+	Shell bool `json:"shell,omitempty"`
 	// Exec decides each simple command in a command by the most literal
 	// pattern it matches, made stricter by every arg rule that matches it;
 	// the strictest of them decides the command.

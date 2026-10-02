@@ -131,7 +131,7 @@ func TestAnUnreadableCommandIsAskedAboutEvenUnderARuleForEverything(t *testing.T
 		t.Errorf("got %+v", r)
 	}
 	q := a.questions()
-	if len(q) != 1 || q[0].Command != "echo a; echo $(id)" || q[0].Kind != "ssh" {
+	if len(q) != 1 || q[0].Command != "echo a; echo $(id)" || q[0].Kind != "ssh" || q[0].Shell {
 		t.Errorf("questions %+v", q)
 	}
 	if len(f.sshd.commands()) != 0 {

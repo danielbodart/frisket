@@ -455,11 +455,54 @@ func (r *Rules) listed(name string) bool {
 	return false
 }
 
+// maxShellCommand bounds a command on a Shell route. It is typed into a
+// device's line editor, whose buffer frisket does not know the size of, and
+// one that cut a longer line short would run the start of it, a command
+// nobody decided. 255 bytes is as long as a line editor is likely to be
+// short, and longer than any command a device's CLI is given.
+const maxShellCommand = 255
+
+// parseShell reads a command for a Shell route: one simple command of plain
+// words separated by spaces, and nothing else -- no operator, no
+// redirection, no quote, and nothing taken off it. The device's shell is a
+// router's or a modem's own CLI, not of the POSIX family, and frisket knows
+// nothing of its grammar: what it can say is that a line of letters, digits
+// and _@%+=:,./- is words to any shell, and holds no byte a line editor
+// reads as more than itself -- no control byte to end the line early, no
+// tab or ? to complete or ask for help. So `;`, `&&`, `|` and `>` are
+// unreadable, not decided as they would be on another route, since whether
+// a device's shell reads them as operators is the device's business. A word
+// may not begin % or =, as on any route. env, time and the precommands are
+// words like any other here: what they mean to the device is the device's.
+func parseShell(command string) ([]Simple, bool) {
+	if len(command) > maxShellCommand {
+		return nil, false
+	}
+	for i := 0; i < len(command); i++ {
+		if b := command[i]; b != ' ' && !plainByte(b) {
+			return nil, false
+		}
+	}
+	ws := strings.Fields(command)
+	if len(ws) == 0 {
+		return nil, false
+	}
+	for _, w := range ws {
+		if w[0] == '%' || w[0] == '=' {
+			return nil, false
+		}
+	}
+	return []Simple{{Words: ws}}, true
+}
+
 // Parse reads command as these rules' grammar: its simple commands, each
 // with what strip took off it, or false where it is unreadable. Which
 // assignments are read depends on the route's env names; with none, every
 // assignment is unreadable.
 func (r *Rules) Parse(command string) ([]Simple, bool) {
+	if r.shell {
+		return parseShell(command)
+	}
 	cmds, ok := lex(command)
 	if !ok {
 		return nil, false

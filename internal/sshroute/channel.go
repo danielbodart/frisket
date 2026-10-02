@@ -32,6 +32,10 @@ const (
 	ReasonUpstream    = "upstream failed"
 	ReasonExecFailed  = "upstream refused the command"
 	ReasonMalformed   = "malformed exec"
+	// ReasonUnreadable is a command on a Shell route that is not one line
+	// of plain words: refused, never asked about, since it would be typed
+	// into the device byte for byte.
+	ReasonUnreadable = "not one line of plain words, which is all a shell route types"
 )
 
 // queue is a channel's requests, held for the one goroutine that answers
@@ -201,6 +205,9 @@ func (c *channel) exec(r *ssh.Request) {
 		line.decision, line.reason = intercept.DecisionRefused, intercept.ReasonRefused
 		if d.Rule == intercept.RuleUnmatched {
 			line.reason = intercept.ReasonOutOfScope
+			if rt.shell && !rt.rules.Readable(p.Command) {
+				line.reason = ReasonUnreadable
+			}
 		}
 		c.refuse(r, line, start, exitRefused)
 		return
@@ -222,6 +229,10 @@ func (c *channel) exec(r *ssh.Request) {
 			line.reason = ReasonHostKey
 		}
 		c.refuse(r, line, start, exitUpstream)
+		return
+	}
+	if rt.shell {
+		c.shell(r, client, p.Command, line, start)
 		return
 	}
 	up, upReqs, err := client.OpenChannel("session", nil)
@@ -343,7 +354,7 @@ func (c *channel) refuse(r *ssh.Request, line *execLine, start time.Time, status
 	_ = r.Reply(true, nil)
 	what := line.reason
 	if line.err != nil {
-		what += ": " + line.err.Error()
+		what += ": " + sandboxError(line.err)
 	}
 	fmt.Fprintf(c.ch.Stderr(), "frisket: %s: %s\n", c.s.route.Name, what)
 	_ = c.ch.CloseWrite()
@@ -361,11 +372,20 @@ func (c *channel) ask(command string, d Decision) (string, io.Reader) {
 	if h.asker == nil {
 		return intercept.ReasonNobodyToAsk, nil
 	}
-	head, more, rest, err := intercept.Preview(c.ctx, c.ch, previewIdle, true)
-	if err != nil {
-		return intercept.ReasonStoppedWaiting, nil
-	}
 	rt := c.s.route
+	var (
+		head []byte
+		more bool
+		rest io.Reader
+	)
+	if !rt.shell {
+		// A Shell route's command is given no stdin, so there is none to
+		// show.
+		var err error
+		if head, more, rest, err = intercept.Preview(c.ctx, c.ch, previewIdle, true); err != nil {
+			return intercept.ReasonStoppedWaiting, nil
+		}
+	}
 	q := intercept.Question{
 		Session:   c.s.c.Session,
 		Workspace: h.workspace,
@@ -378,6 +398,7 @@ func (c *channel) ask(command string, d Decision) (string, io.Reader) {
 		Address:   rt.Address.String(),
 		User:      rt.User,
 		Command:   command,
+		Shell:     rt.shell,
 		// What the rules call the command, from the route's own document:
 		// the operation of the simple command that decided, and of each
 		// of them where there are several.

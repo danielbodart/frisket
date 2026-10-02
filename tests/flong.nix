@@ -58,6 +58,10 @@ let
   # ProtectHome=read-only, which connecting to a socket needs no more than.
   agentSocket = "/run/user/1000/ssh-agent.sock";
 
+  # The password the machine takes on 2223, which frisket reads from a file
+  # of alice's and the sandbox never sees.
+  sshPassword = "open sesame 2223";
+
   # Says what it was asked, and with which Authorization, in its own journal
   # -- never in its answer, which goes back into the sandbox.
   # Every session's first step, ahead of frisket's: where the test finds it.
@@ -212,7 +216,7 @@ in
 {
   name = "frisket-flong";
 
-  nodes.upstream = { pkgs, ... }: {
+  nodes.upstream = { lib, pkgs, ... }: {
     networking.interfaces.eth1.ipv4.addresses = [
       { address = upstream4; prefixLength = 24; }
       { address = moved4; prefixLength = 24; }
@@ -263,20 +267,29 @@ in
     # host key from the store, a copy only root reads, as sshd insists; a
     # user whose one authorized key is alice's; and a command that says who
     # ran it and exits with the status it is given. On 2222 too, where a
-    # route pins a key the machine does not have.
+    # route pins a key the machine does not have, and on 2223, where it
+    # takes a password and no key, as a device with no key support does.
     services.openssh = {
       enable = true;
-      ports = [ 22 2222 ];
+      ports = [ 22 2222 2223 ];
       hostKeys = [{ path = "/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }];
       settings.PasswordAuthentication = false;
       settings.KbdInteractiveAuthentication = false;
+      extraConfig = ''
+        Match LocalPort 2223
+          PasswordAuthentication yes
+          PubkeyAuthentication no
+      '';
     };
     environment.etc."ssh/ssh_host_ed25519_key" = { source = "${sshKeys}/host"; mode = "0600"; };
     # Copied at activation rather than read at evaluation, which keyFiles
     # would do: the key is built, and a check that imports from a build
     # cannot be evaluated where builds are not allowed.
     environment.etc."ssh/authorized_keys.d/ops" = { source = "${sshKeys}/client.pub"; mode = "0444"; };
-    users.users.ops.isNormalUser = true;
+    users.users.ops = { isNormalUser = true; password = sshPassword; };
+    # NixOS gives sshd's PAM a password check only when PasswordAuthentication
+    # is on everywhere; here it is on for 2223 alone.
+    security.pam.services.sshd.unixAuth = lib.mkForce true;
     environment.systemPackages = [
       (pkgs.writeShellScriptBin "greet" ''
         echo "greetings from $(${pkgs.coreutils}/bin/cat /proc/sys/kernel/hostname) as $(${pkgs.coreutils}/bin/id -un): $*"
@@ -1509,8 +1522,12 @@ in
                "env": ["LANG", "LC_*"]},
               {"name": "wrongkey", "address": f"{ssh_ip}:2222", "user": "ops", "hostKeys": [other_pub], "agent": "${agentSocket}",
                "exec": [{"command": "greet *"}], "unmatched": "refuse"},
+              {"name": "pw", "address": f"{ssh_ip}:2223", "user": "ops", "hostKeys": [host_pub], "passwordFile": "/srv/secrets/ssh-password",
+               "exec": [{"command": "greet *"}], "unmatched": "refuse"},
           ],
       }
+      machine.succeed("printf '%s\\n' '${sshPassword}' > /srv/secrets/ssh-password && chown alice:users /srv/secrets/ssh-password "
+                      "&& chmod 0400 /srv/secrets/ssh-password")
       machine.succeed(f"printf '%s' {shlex.quote(json.dumps(ssh_doc))} > /srv/policies/ssh.json && chmod 0644 /srv/policies/ssh.json")
       upstream.wait_for_unit("sshd.service")
       machine.wait_for_unit("test-ssh-agent.service")
@@ -1541,7 +1558,8 @@ in
           assert machine.succeed(f"ls -A {inside}").split() == ["ca-bundle.crt", "ca.crt", "ssh_config", "ssh_known_hosts"]
           assert machine.succeed(f"cat {inside}/ssh_config") == (
               f"Host server\n\tHostName {ssh_ip}\n\tPort 22\n\tUser ops\n\n"
-              f"Host wrongkey\n\tHostName {ssh_ip}\n\tPort 2222\n\tUser ops\n")
+              f"Host wrongkey\n\tHostName {ssh_ip}\n\tPort 2222\n\tUser ops\n\n"
+              f"Host pw\n\tHostName {ssh_ip}\n\tPort 2223\n\tUser ops\n")
           known = machine.succeed(f"cat {inside}/ssh_known_hosts")
           assert re.fullmatch(r"@cert-authority \* ssh-ed25519 \S+ frisket\n", known), known
           # The CA's public half only; the machine's own key is nowhere in
@@ -1621,6 +1639,17 @@ in
           assert logins() == before
           l = ssh_line(lambda m: m.get("route") == "wrongkey", "the wrong host key")
           assert l["decision"] == "failed" and l["reason"] == "host key not pinned" and l["dst"] == f"{ssh_ip}:2222", l
+
+      with subtest("a machine that takes only a password is logged in to with the route's password file, which the sandbox never sees"):
+          code, out = run_ssh("pw greet 4")
+          assert (code, out) == (4, "greetings from upstream as ops: 4\n"), (code, out)
+          upstream.succeed("journalctl -u sshd -o cat | grep -q 'Accepted password for ops'")
+          l = ssh_line(lambda m: m.get("route") == "pw", "the password route")
+          assert (l["decision"], l["exit_status"], l["dst"]) == ("allowed", 4, f"{ssh_ip}:2223"), l
+          machine.fail(f"grep -rqF '${sshPassword}' {inside}")
+          machine.fail("journalctl -u frisket.service -o cat --no-pager | grep -qF '${sshPassword}'")
+          _, out = machine.execute(as_workload(leader, "cat /srv/secrets/ssh-password 2>&1"))
+          assert "${sshPassword}" not in out, out
 
       with subtest("raw TCP to another port of the machine's private address is still refused"):
           _, out = machine.execute(as_workload(leader, f"curl -sS -m 5 http://{ssh_ip}/ 2>&1"))

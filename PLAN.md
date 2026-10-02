@@ -1143,11 +1143,39 @@ is shaped so is below.
   pins, byte for byte. Never trust on first use, never a person asked about
   a key, certificates refused; frisket asks for the pinned types alone, so a
   machine with a preferred key of another type presents the pinned one.
-- **The user's own key, by agent or file.** An agent socket, dialled per
-  login and closed after it, optionally narrowed to one identity, or an
-  unencrypted key file. Paths are written out: the daemon is a system unit
-  with no `SSH_AUTH_SOCK`, a private `/tmp` and a read-only home. One login
-  per sandbox connection, made on its first command that runs.
+- **The user's own key, by agent or file, or a password for a device that
+  takes no key.** An agent socket, dialled per login and closed after it,
+  optionally narrowed to one identity, an unencrypted key file, or a
+  password file -- sops-nix's -- read at each login, never at check and
+  never logged, given by `password` or by `keyboard-interactive` to hidden
+  prompts in one round, and tried once in all, since a device that locks
+  an account counts each try; one refused is not tried again for five
+  minutes while the file holds it. A credential that cannot be read says
+  why on the sandbox's stderr but not where it is, which only the journal
+  is told. Paths are written out: the daemon is a
+  system unit with no `SSH_AUTH_SOCK`, a private `/tmp` and a read-only
+  home. One login per sandbox connection, made on its first command that
+  runs.
+- **Shell routes, for a device whose CLI ignores an exec.** A Zyxel's ZySH,
+  and routers' CLIs like it, run their own shell whatever command an exec
+  carries, so a route with `shell` has frisket open a session with a `dumb`
+  terminal and a shell upstream, wait for the greeting to go quiet, type
+  the command and a carriage return, wait for the output to end with the
+  greeting's prompt or go quiet, type `exit` only where the prompt came
+  back -- else it could answer a question the command asked -- and give the
+  sandbox what was printed as the exec's stdout, the echo and prompt taken
+  off where found -- best effort, since the device draws them -- with
+  status 0, or 255 for a conversation that did not finish in 60 seconds or
+  a prompt that did not come back. The sandbox's side is
+  an exec as on any route. Only one simple command of plain words is
+  readable there, at most 255 bytes -- no operator, redirection or quote,
+  and nothing taken off it -- since the device's grammar is unknown, and a
+  plain line holds nothing a line editor reads as more than itself; anything
+  else is refused there, never asked about, since a person approving it
+  could not see a carriage return that types a second command. The
+  sandbox's stdin is never sent: it would be typed as commands nobody
+  decided. Checked end to end against the modem: an RSA host key pinned,
+  asked for by `ssh-rsa`, and nothing else widened.
 - **A CA derived, not stored.** The SSH CA is ed25519 from HKDF over the
   session's TLS CA key, so the session record does not change and a restored
   session keeps the CA its sandbox trusts. `/etc/frisket` gains
@@ -1315,8 +1343,10 @@ node's address can be used.
   returns its output and exit status, as does one with a listed assignment
   before it, while one assigning `LD_PRELOAD` is unmatched; a refused one
   never reaches sshd, an asked one is admitted and declined by the test
-  asker, a wrong pinned key fails, `-L` is refused, and raw TCP to another
-  port on that address is still refused.
+  asker, a wrong pinned key fails, a port that takes only a password is
+  logged in to from a password file the sandbox cannot read and no log
+  holds, `-L` is refused, and raw TCP to another port on that address is
+  still refused.
 
 **Everywhere:** every connection and query produces exactly one log line.
 

@@ -117,8 +117,17 @@ func TestARouteIsRefusedNamingWhatIsWrong(t *testing.T) {
 		}, "one line"},
 		{"a certificate", func(r *policy.SSHRoute) { r.HostKeys = []string{cert()} }, "certificate"},
 		{"a key listed twice", func(r *policy.SSHRoute) { r.HostKeys = append(r.HostKeys, r.HostKeys[0]) }, "twice"},
-		{"agent and key file", func(r *policy.SSHRoute) { r.KeyFile = "/home/dan/.ssh/id_ed25519" }, "agent and keyFile"},
-		{"neither", func(r *policy.SSHRoute) { r.Agent = "" }, "nothing to log in with"},
+		{"agent and key file", func(r *policy.SSHRoute) { r.KeyFile = "/home/dan/.ssh/id_ed25519" }, "more than one of agent, keyFile and passwordFile"},
+		{"agent and password file", func(r *policy.SSHRoute) { r.PasswordFile = "/run/secrets/p" }, "more than one of"},
+		{"key file and password file", func(r *policy.SSHRoute) {
+			r.Agent, r.KeyFile, r.PasswordFile = "", "/home/dan/.ssh/id_ed25519", "/run/secrets/p"
+		}, "more than one of"},
+		{"none", func(r *policy.SSHRoute) { r.Agent = "" }, "nothing to log in with"},
+		{"a relative password file", func(r *policy.SSHRoute) { r.Agent, r.PasswordFile = "", "secrets/p" }, "passwordFile"},
+		{"an identity with a password file", func(r *policy.SSHRoute) {
+			r.Agent, r.PasswordFile, r.Identity = "", "/run/secrets/p", "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+		}, "identity with passwordFile"},
+		{"env names on a shell route", func(r *policy.SSHRoute) { r.Shell, r.Env = true, []string{"LANG"} }, "shell route"},
 		{"a relative agent", func(r *policy.SSHRoute) { r.Agent = "gcr/ssh" }, "agent"},
 		{"an unclean key file", func(r *policy.SSHRoute) { r.Agent, r.KeyFile = "", "/home/dan/../dan/.ssh/id" }, "keyFile"},
 		{"an identity that is not a fingerprint", func(r *policy.SSHRoute) { r.Identity = "MD5:aa:bb" }, "identity"},

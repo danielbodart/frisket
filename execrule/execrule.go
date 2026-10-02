@@ -64,15 +64,21 @@ type Rules struct {
 	rules     []rule
 	env       []string
 	unmatched Outcome
+	// shell is a Shell route's: commands are typed into a device's own
+	// shell, and read as parseShell reads them.
+	shell bool
 }
 
-// Compile reads a route's Exec, Env and Unmatched, and refuses what frisket
-// would refuse to load: a rule that is not one, a rule listed twice, an env
-// name that is not one, or listed twice, and a route that refuses every
-// command. The rest of the route is no part of how it decides, and is
-// neither read nor checked.
+// Compile reads a route's Exec, Env, Unmatched and Shell, and refuses what
+// frisket would refuse to load: a rule that is not one, a rule listed twice,
+// an env name that is not one, or listed twice, env names on a Shell route,
+// and a route that refuses every command. The rest of the route is no part
+// of how it decides, and is neither read nor checked.
 func Compile(route policy.SSHRoute) (*Rules, error) {
-	r := &Rules{}
+	r := &Rules{shell: route.Shell}
+	if route.Shell && len(route.Env) > 0 {
+		return nil, errors.New("env on a shell route: a command typed into the device's shell is its words alone, and no assignment is read in it")
+	}
 	switch route.Unmatched {
 	case "", "ask":
 		r.unmatched = Ask
@@ -169,10 +175,18 @@ func checkEnv(names []string) ([]string, error) {
 // equals -- `cd /etc && ls` is admitted only if both are, and `ls | sh` is
 // whatever sh is. Every simple command runs or might, whatever joins it to
 // the rest, so none is excused by an operator. A command that is not
-// readable is unmatched.
+// readable is unmatched -- but on a Shell route refused, whatever unmatched
+// says: what it cannot read is typed into a device's line editor byte for
+// byte, where a carriage return in it ends the line and types a second
+// command, a ^U erases what came before, and a line too long is cut short,
+// none of which a person asked about it could be shown or would have
+// decided.
 func (r *Rules) Decide(command string) Decision {
 	cmds, ok := r.Parse(command)
 	if !ok {
+		if r.shell {
+			return Decision{Outcome: Refuse, Rule: RuleUnmatched}
+		}
 		return Decision{Outcome: r.unmatched, Rule: RuleUnmatched}
 	}
 	var (

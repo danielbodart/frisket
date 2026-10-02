@@ -150,6 +150,9 @@ type Question struct {
 	User    string `json:"user,omitempty"`
 	// Command is the command exactly as the workload sent it.
 	Command string `json:"command,omitempty"`
+	// Shell is a command on a Shell route: typed into the device's own CLI,
+	// whose grammar frisket does not know, rather than run as an exec.
+	Shell bool `json:"shell,omitempty"`
 }
 
 // Config is everything an Interceptor needs.

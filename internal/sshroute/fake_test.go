@@ -122,6 +122,12 @@ type sshd struct {
 	user     string
 	key      ssh.PublicKey
 
+	// configure changes how the machine logs a user in, and shell, if set,
+	// serves each session channel in place of session: both are set before
+	// it serves anything.
+	configure func(*ssh.ServerConfig)
+	shell     func(ch ssh.Channel, reqs <-chan *ssh.Request)
+
 	mu    sync.Mutex
 	ran   []string
 	pty   int
@@ -139,13 +145,16 @@ func (d *sshd) drop() {
 	}
 }
 
-func newSSHD(t *testing.T, user string, key ssh.PublicKey, hostKeys ...ssh.Signer) *sshd {
+func newSSHD(t *testing.T, user string, key ssh.PublicKey, setup func(*sshd), hostKeys ...ssh.Signer) *sshd {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	d := &sshd{t: t, ln: ln, hostKeys: hostKeys, user: user, key: key}
+	if setup != nil {
+		setup(d)
+	}
 	t.Cleanup(func() { _ = ln.Close() })
 	go d.serve()
 	return d
@@ -175,6 +184,9 @@ func (d *sshd) serve() {
 	for _, k := range d.hostKeys {
 		cfg.AddHostKey(k)
 	}
+	if d.configure != nil {
+		d.configure(cfg)
+	}
 	for {
 		c, err := d.ln.Accept()
 		if err != nil {
@@ -198,6 +210,10 @@ func (d *sshd) serve() {
 				}
 				ch, creqs, err := nc.Accept()
 				if err != nil {
+					continue
+				}
+				if d.shell != nil {
+					go d.shell(ch, creqs)
 					continue
 				}
 				go d.session(ch, creqs)
@@ -373,6 +389,8 @@ type options struct {
 	// userKey is the user's key, in the agent and on the machine; nil is a
 	// new one.
 	userKey ed25519.PrivateKey
+	// sshd sets the fake machine up before it serves.
+	sshd func(*sshd)
 }
 
 func newFixture(t *testing.T, o options) *fixture {
@@ -392,7 +410,7 @@ func newFixture(t *testing.T, o options) *fixture {
 	if hostKeys == nil {
 		hostKeys = []ssh.Signer{newSigner(t)}
 	}
-	d := newSSHD(t, "dan", userSigner.PublicKey(), hostKeys...)
+	d := newSSHD(t, "dan", userSigner.PublicKey(), o.sshd, hostKeys...)
 	pr := policy.SSHRoute{
 		Name:     "server",
 		Address:  routeAddr.String(),

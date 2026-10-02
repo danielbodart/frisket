@@ -3,9 +3,11 @@
 An SSH route lets a session run commands on one of your machines -- `ssh
 gateway systemctl status nginx` -- with no key in the sandbox. frisket
 terminates the sandbox's SSH itself, decides each command it asks to run,
-and runs the ones it admits over its own login to the machine, with your key.
-No shell is ever opened: a route runs commands, one to a channel, and
-nothing else.
+and runs the ones it admits over its own login to the machine, with your key
+or your password. No shell is ever opened for the sandbox: a route runs
+commands, one to a channel, and nothing else -- on a [shell
+route](#shell-routes), to a device whose CLI ignores a command sent as one,
+by typing each into a shell frisket opens itself.
 
 A route is reached at its own address, which no name resolves to: the
 session's ruleset steers exactly that address and port to frisket. In the
@@ -72,12 +74,18 @@ than the module's `policies`:
 - **`hostKeys`**: the machine's own keys, one or more, as authorized_keys
   and known_hosts write them: `ssh-ed25519 AAAA... [comment]`, with no host
   or marker before it. ed25519, ECDSA or RSA; never a certificate.
-- **`agent`** or **`keyFile`**, exactly one: an ssh-agent's socket, or an
-  unencrypted private key, by absolute path. See [Logging in](#logging-in).
+- **`agent`**, **`keyFile`** or **`passwordFile`**, exactly one: an
+  ssh-agent's socket, an unencrypted private key, or a file holding a
+  password, for a machine that takes no key, by absolute path. See [Logging
+  in](#logging-in).
 - **`identity`**: optional, a key's `SHA256:...` fingerprint as `ssh-keygen
   -l` prints it: the one key offered, where an agent holds several and a
   server counts each one offered against its `MaxAuthTries`. With `keyFile`,
-  the file must be that key.
+  the file must be that key; with `passwordFile` it is an error.
+- **`shell`**: optional, `true` for a device whose login shell ignores the
+  command an exec carries -- a router's or a modem's own CLI. Its commands
+  are typed into a shell frisket opens, and read far more narrowly: see
+  [Shell routes](#shell-routes). A shell route lists no `env`.
 - **`exec`**: rules, each a `command` pattern, an `arg` glob, or both, and
   `ask` or `refuse`, or neither to admit; an `arg` rule must ask or refuse.
   Both is an error, and so is a rule listed twice. Each may have an
@@ -335,7 +343,8 @@ nobody wants it on by accident.
 
 **An unreadable command is never matched by any rule**, admitting or
 refusing, command or arg: it is unmatched, asked about by default and
-refused under `unmatched: "refuse"`. So no rule ever admits a command a
+refused under `unmatched: "refuse"` -- and on a [shell route](#shell-routes)
+refused either way. So no rule ever admits a command a
 shell would read differently from its words, and `ls; rm -rf $HOME` is
 never `ls **` and `rm **`. The converse is the caveat: a refuse rule decides
 readable commands only. `sudo **` refused does not refuse `sudo reboot`
@@ -409,13 +418,123 @@ the connection.
 - **`keyFile`** is an unencrypted private key, read at each login. An
   encrypted one fails, saying so: frisket has no passphrase, and an agent
   is the way to use one.
+- **`passwordFile`** is a file holding a password, for a machine that takes
+  no key -- sops-nix's `/run/secrets/<name>`, which the daemon's user must
+  be able to read. It is read at each login, never when the document is
+  checked, and never logged: the file's bytes, less one trailing newline
+  (`\n` or `\r\n`), at most 4 KiB and not empty. frisket logs in with it by
+  `password`, or by `keyboard-interactive` where that is all the machine
+  offers, answering each prompt that hides what is typed with the password,
+  in one round; a prompt that echoes, a second round that hides one --
+  the password wrong, or a second factor -- and more than three rounds in
+  all end the login rather than send the password somewhere it was not
+  asked for. The password is tried once: one `password` refused is not
+  offered again by `keyboard-interactive`, since a device that locks an
+  account counts each. No error quotes it. A password the machine refused
+  is not tried again for five minutes while the file still holds it -- a
+  workload running a command in a loop would otherwise try a stale password
+  once a connection, and lock a device that counts tries -- and one the file
+  holds instead is tried at once.
 
-A login that fails -- no agent, no key the server takes, a host key not
-pinned, a machine that does not answer within ten seconds -- fails the
-command, with exit status 255 and the reason on its stderr. So does a
+A login that fails -- no agent, no key the server takes, a password file
+missing or a password refused, a host key not pinned, a machine that does
+not answer within ten seconds -- fails the
+command, with exit status 255 and the reason on its stderr; where the
+credential could not be read, the reason says what was wrong with it but
+not where it is -- the file's or the agent's path is in the journal's line,
+never the sandbox's stderr. So does a
 machine that goes while a command runs -- rebooted, reset, or silent for
 the 45 seconds frisket's keepalives give it -- since the command never said
 how it ended.
+
+## Shell routes
+
+Some devices' SSH servers run their own CLI as the login shell, and that
+CLI ignores the command an exec carries: `ssh modem xdslctl info` on a
+Zyxel's ZySH opens the CLI and waits. A route with `"shell": true` is for
+one. The sandbox's side is unchanged -- it runs `ssh modem xdslctl info
+--show` as an exec like any other, and the command is decided as on any
+route -- but upstream frisket opens a session with a terminal, `dumb` and of
+no size, and a shell, and:
+
+1. waits for the device to finish greeting: its banner and prompt, until it
+   has printed nothing for 1.5 seconds. The last line it printed is taken as
+   its prompt, if it is a short one.
+2. types the command and a carriage return, as a terminal's Enter does.
+3. waits for the command's output to finish: when it ends with the prompt
+   and has printed nothing more for a quarter of a second, or, whatever it
+   ends with, when it has printed nothing for 3 seconds -- so a device whose
+   prompt frisket did not find takes that long for every command.
+4. types `exit`, gives the device 2 seconds to close, and closes it -- but
+   only where the prompt came back. Output that went quiet without it may
+   be a command waiting on a question, a pager or a value, which `exit`
+   would answer, so the shell is closed with nothing more typed into it.
+
+What the command printed is the exec's stdout, once it has finished --
+not streamed -- with the device's echo of the command taken off its start,
+the prompt off its end, and its lines ended `\n`, not the terminal's `\r\n`.
+That is **best effort**: the device draws its own echo and prompt, and one
+that draws them otherwise has them left in. The exit status is 0, since a
+CLI says nothing of how a command went but in what it prints. A device
+that greeted with a prompt that did not come back after the command has
+not been seen to finish it, and its output may be cut short: what it
+printed is given, with exit status 255 and that said on stderr. The whole
+conversation has 60 seconds; one that does not finish, a device that
+prints more than 1 MiB, its greeting with it -- nothing past that is kept --
+a device that closes before it is given the
+command, and one that refuses the terminal or the shell fail the command
+with exit status 255, what it had printed on stdout, and the reason on
+stderr. A device that closes after the command -- the command may have been
+what closed it -- has given its output, with status 0.
+
+**Only one simple command of plain words is readable on a shell route.**
+The device's shell is no shell of the POSIX family, and frisket knows
+nothing of its grammar: what it can say is that a line of letters, digits
+and `_@%+=:,./-`, words separated by spaces, is words to any shell, and
+holds no byte a line editor reads as more than itself -- nothing to end the
+line early, no tab or `?` to complete or ask for help. So `;`, `&&`, `||`,
+`|`, a redirection -- `>/dev/null` included -- and a quote are unreadable on
+a shell route, whatever they would be on another, since whether a device's
+CLI reads them as operators is the device's business; so is a word
+beginning `%` or `=`, as on any route, and a command longer than 255 bytes,
+since a line editor that cut a longer line short would run the start of
+it, a command nobody decided. Nothing is taken off a command: `env`,
+`time`, `exec` and an assignment are words like any other, and a shell
+route lists no `env` names. **An unreadable command is refused on a shell
+route, whatever `unmatched` says**, and never asked about: it would be typed
+into the device byte for byte, where a carriage return in it ends the line
+and types a second command, a `^U` erases what came before it, and a line
+too long is cut short -- none of which a person shown it could see or would
+have decided. Its stderr says it is not one line of plain words. A readable
+command no rule names is unmatched, as on any route.
+
+**The sandbox's stdin is never sent** to a shell route's device: whatever it
+sent would be typed into the device's shell as commands nobody decided. It
+is not read at all, and a question about a command on a shell route has an
+empty `body`.
+
+A device old enough to need this is often old enough to offer only
+`ssh-rsa` host keys, SHA-1 signatures: pinned, such a key is asked for by
+`ssh-rsa` last, after its SHA-2 signatures (see [Host keys](#host-keys)),
+and nothing else is widened for it. A Zyxel VMG4005-B50A on firmware V5.17
+ABQA, which offers `curve25519-sha256`, `aes128-ctr` and `hmac-sha2-256`
+and an RSA host key alone, takes no key and only a password, was checked
+end to end so: `passwordFile` from sops-nix, `"shell": true`, and `xdslctl
+info --show` given back as the device printed it, less the echo and the
+`ZySH> ` prompt.
+
+```json
+{
+  "name": "modem",
+  "address": "192.168.1.1",
+  "user": "admin",
+  "hostKeys": ["ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAwCGFmQQ..."],
+  "passwordFile": "/run/secrets/modem-password",
+  "shell": true,
+  "exec": [{ "command": "xdslctl info **" }],
+  "unmatched": "refuse"
+}
+```
 
 ## What is refused
 
@@ -427,7 +546,8 @@ so the agent sees why.
 Everything but a command is refused, on the connection, whatever the rules
 say:
 
-- **pty, shell and subsystem** requests, sftp included. A pty refused is a
+- **pty, shell and subsystem** requests from the sandbox, sftp included,
+  on a shell route too. A pty refused is a
   warning to ssh, which goes on to run the command; a bare `ssh gateway`
   is refused its shell, and exits.
 - **Forwarding**: `-L`, `-R`, `-D`, `-W`, agent forwarding and X11, each
@@ -459,8 +579,10 @@ A command asked about goes to `services.frisket.asker` like a request (see
 `operations` every operation the command's simple commands were decided by,
 where there are more than one -- `cd /srv && systemctl restart app` -- as
 for a GraphQL request with several fields. `command` is exactly as the
-sandbox sent it, and `body` the start of its
-stdin: its first 4 KiB, or what arrived before stdin was silent for half a
+sandbox sent it; `shell` is `true` on a [shell route](#shell-routes), where
+it is typed into the device's own CLI, and absent elsewhere; and `body` the
+start of its
+stdin -- empty on a [shell route](#shell-routes), which sends none: its first 4 KiB, or what arrived before stdin was silent for half a
 second, from the start -- `ssh host command` without `-n` holds stdin open
 and sends nothing, and a question that waited for a first byte would wait
 for ever. On an allow, `body` goes to the machine first and the rest streams

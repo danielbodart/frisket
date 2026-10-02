@@ -28,11 +28,18 @@ type Route struct {
 	// algorithms are the host key algorithms the upstream is asked for:
 	// those of the pinned keys and no others, so that a machine with a key
 	// that is not pinned as well is asked for the one that is.
-	algorithms []string
-	agent      string
-	keyFile    string
-	identity   string
-	rules      *execrule.Rules
+	algorithms   []string
+	agent        string
+	keyFile      string
+	passwordFile string
+	identity     string
+	// shell is whether commands are typed into the machine's shell, on a
+	// terminal, rather than sent as an exec it ignores.
+	shell bool
+	rules *execrule.Rules
+	// refusal is the password the machine last refused, on a route that
+	// logs in with one.
+	refusal refusal
 }
 
 // Decide is what the route's rules say about command.
@@ -82,8 +89,8 @@ const maxRoutes = 32
 
 // Compile checks a document's SSH routes, together and against what the
 // rest of the document reserves, and prepares them. It opens nothing: the
-// agent and the key file are read at login, so a document is checked where
-// neither exists.
+// agent, the key file and the password file are read at login, so a
+// document is checked where none of them exists.
 func Compile(routes []policy.SSHRoute, reserved Reserved) ([]*Route, error) {
 	if len(routes) > maxRoutes {
 		return nil, fmt.Errorf("ssh: %d routes, more than the %d a session may have", len(routes), maxRoutes)
@@ -128,9 +135,15 @@ func compile(pr policy.SSHRoute, reserved Reserved) (*Route, error) {
 	if r.hostKeys, r.algorithms, err = hostKeys(pr.HostKeys); err != nil {
 		return nil, err
 	}
+	credentials := 0
+	for _, c := range []string{pr.Agent, pr.KeyFile, pr.PasswordFile} {
+		if c != "" {
+			credentials++
+		}
+	}
 	switch {
-	case pr.Agent != "" && pr.KeyFile != "":
-		return nil, errors.New("agent and keyFile: frisket logs in with one of them")
+	case credentials > 1:
+		return nil, errors.New("more than one of agent, keyFile and passwordFile: frisket logs in with one of them")
 	case pr.Agent != "":
 		if err := checkPath(pr.Agent); err != nil {
 			return nil, fmt.Errorf("agent %w", err)
@@ -141,9 +154,18 @@ func compile(pr policy.SSHRoute, reserved Reserved) (*Route, error) {
 			return nil, fmt.Errorf("keyFile %w", err)
 		}
 		r.keyFile = pr.KeyFile
+	case pr.PasswordFile != "":
+		if err := checkPath(pr.PasswordFile); err != nil {
+			return nil, fmt.Errorf("passwordFile %w", err)
+		}
+		if pr.Identity != "" {
+			return nil, errors.New("identity with passwordFile: a password is no key, and identity names the key offered")
+		}
+		r.passwordFile = pr.PasswordFile
 	default:
-		return nil, errors.New("no agent and no keyFile: frisket has nothing to log in with")
+		return nil, errors.New("no agent, keyFile or passwordFile: frisket has nothing to log in with")
 	}
+	r.shell = pr.Shell
 	if pr.Identity != "" && !fingerprintRE.MatchString(pr.Identity) {
 		return nil, fmt.Errorf("identity %q: a key's fingerprint, SHA256: and 43 characters of base64, as ssh-keygen -l prints it", pr.Identity)
 	}
