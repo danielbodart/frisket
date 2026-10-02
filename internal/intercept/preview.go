@@ -24,22 +24,36 @@ type chunk struct {
 	err error
 }
 
-// preview reads the start of body: up to BodyPreview bytes, until it ends,
-// or until, having started, it produces nothing for previewIdle. more is whether the body had
-// not ended there. rest is the whole body again, the preview first, for
-// sending on.
+// preview is Preview of an HTTP request's body, waited for until its first
+// byte, and given back as a body still.
 func preview(ctx context.Context, body io.ReadCloser) (head []byte, more bool, rest io.ReadCloser, err error) {
+	head, more, r, err := Preview(ctx, body, previewIdle, false)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	return head, more, readCloser{r, body}, nil
+}
+
+// Preview reads the start of r: up to BodyPreview bytes, until it ends, or
+// until it produces nothing for idle -- counted from its first byte, or, if
+// fromStart, from the start, for a stream that may never send one. more is
+// whether r had not ended there. rest is the whole of r again, the preview
+// first, for sending on. The one reader of a preview, for everything that
+// asks with one.
+func Preview(ctx context.Context, r io.Reader, idle time.Duration, fromStart bool) (head []byte, more bool, rest io.Reader, err error) {
 	reads := make(chan chunk, 1)
 	read := func(n int) {
 		go func() {
 			b := make([]byte, n)
-			k, err := body.Read(b)
+			k, err := r.Read(b)
 			reads <- chunk{b[:k], err}
 		}()
 	}
-	idle := time.NewTimer(previewIdle)
-	idle.Stop()
-	defer idle.Stop()
+	timer := time.NewTimer(idle)
+	if !fromStart {
+		timer.Stop()
+	}
+	defer timer.Stop()
 	read(BodyPreview + 1)
 	for {
 		select {
@@ -49,29 +63,29 @@ func preview(ctx context.Context, body io.ReadCloser) (head []byte, more bool, r
 			case c.err != nil && c.err != io.EOF:
 				return nil, false, nil, c.err
 			case len(head) > BodyPreview:
-				return head[:BodyPreview], true, &resumed{head: head, err: c.err, body: body}, nil
+				return head[:BodyPreview], true, &resumed{head: head, err: c.err, r: r}, nil
 			case c.err == io.EOF:
-				return head, false, &resumed{head: head, err: io.EOF, body: body}, nil
+				return head, false, &resumed{head: head, err: io.EOF, r: r}, nil
 			}
 			if len(c.b) > 0 {
-				idle.Reset(previewIdle)
+				timer.Reset(idle)
 			}
 			read(BodyPreview + 1 - len(head))
-		case <-idle.C:
-			return head, true, &resumed{head: head, pending: reads, body: body}, nil
+		case <-timer.C:
+			return head, true, &resumed{head: head, pending: reads, r: r}, nil
 		case <-ctx.Done():
 			return nil, false, nil, ctx.Err()
 		}
 	}
 }
 
-// resumed is a body with its start already read: that, then whatever a read
-// still outstanding brings, then the rest.
+// resumed is a stream with its start already read: that, then whatever a
+// read still outstanding brings, then the rest.
 type resumed struct {
 	head    []byte
 	pending <-chan chunk
 	err     error
-	body    io.ReadCloser
+	r       io.Reader
 }
 
 func (r *resumed) Read(p []byte) (int, error) {
@@ -88,7 +102,5 @@ func (r *resumed) Read(p []byte) (int, error) {
 	if r.err != nil {
 		return 0, r.err
 	}
-	return r.body.Read(p)
+	return r.r.Read(p)
 }
-
-func (r *resumed) Close() error { return r.body.Close() }

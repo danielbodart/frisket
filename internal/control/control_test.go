@@ -104,6 +104,18 @@ func TestAnErrorResponseIsAnError(t *testing.T) {
 	}
 }
 
+// An answer longer than a message holds arrives cut short, and is said to
+// be too long rather than failing as JSON that says nothing of why.
+func TestAnAnswerTooLongForOneMessageSaysSo(t *testing.T) {
+	path := serveOnce(t, func(Request, []*os.File) Response {
+		return Response{SSHConfig: make([]byte, MaxMessage)}
+	})
+	_, err := Call(context.Background(), path, Request{Op: OpList}, nil)
+	if err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("err = %v, want the answer named too long", err)
+	}
+}
+
 // More descriptors than a request may carry is refused, and everything that
 // did arrive is closed rather than left open with nobody holding it.
 func TestTooManyDescriptorsAreRefusedAndClosed(t *testing.T) {
@@ -222,12 +234,14 @@ func TestValidNamesAreValidFDNames(t *testing.T) {
 	})
 }
 
-// An open's answer comes back as it was sent: the CA, and the relay's
-// destinations in their order.
+// An open's answer comes back as it was sent: the CA, the relay's
+// destinations in their order, and the sandbox's SSH files.
 func TestAnOpensResponseRoundTrips(t *testing.T) {
 	want := Response{
-		CACert: []byte("the session's CA\n"),
-		Relay:  []string{"127.0.0.1:64320", "127.101.170.171:64320", "[::1]:64320"},
+		CACert:        []byte("the session's CA\n"),
+		Relay:         []string{"127.0.0.1:64320", "127.101.170.171:64320", "[::1]:64320", "10.0.0.5:22"},
+		SSHKnownHosts: []byte("@cert-authority * ssh-ed25519 AAAA frisket\n"),
+		SSHConfig:     []byte("Host server\n\tHostName 10.0.0.5\n\tPort 22\n\tUser core\n"),
 	}
 	path := serveOnce(t, func(Request, []*os.File) Response { return want })
 	got, err := Call(context.Background(), path, Request{Op: OpList}, nil)

@@ -44,6 +44,77 @@ type Policy struct {
 	// name below it; a name's exact route serves it, and failing that the
 	// nearest wildcard above it.
 	Routes []Route `json:"routes,omitempty"`
+	// SSH are the machines the session may run commands on, each its own
+	// list rather than a route: a route is an HTTPS host the session's DNS
+	// answers with the service address, and an SSH route is neither -- it is
+	// reached at its own address, which no name resolves to.
+	SSH []SSHRoute `json:"ssh,omitempty"`
+}
+
+// SSHRoute is one machine a session may run commands on, by SSH, as User.
+// frisket terminates the sandbox's SSH, logs in to Address with the user's
+// own key, and decides each command the sandbox asks to run: no key ever
+// enters the sandbox, and no shell is ever opened. The machine's login shell
+// must be of the POSIX family, fish or csh: a command is decided by the words
+// those shells read in it, and Windows' cmd.exe reads others.
+type SSHRoute struct {
+	// Name is the route's Host alias in the sandbox's ssh_config, and the
+	// principal its host certificate names: [a-z0-9][a-z0-9.-]*.
+	Name string `json:"name"`
+	// Address is a literal IP, v4:port or [v6]:port; the port is 22 when
+	// absent. Never a name: what the session reaches is fixed here, not by
+	// whatever a resolver says later.
+	Address string `json:"address"`
+	// User is who the commands run as on the machine.
+	User string `json:"user"`
+	// HostKeys are the machine's own keys, "ssh-ed25519 AAAA... [comment]",
+	// as authorized_keys and known_hosts write them, with no host or marker:
+	// the machine must present one of these exactly. They are the whole of
+	// the trust in it -- nothing is learnt on first use, and nobody is ever
+	// asked about a key.
+	HostKeys []string `json:"hostKeys"`
+	// Agent is the absolute path of an ssh-agent's socket, and KeyFile of an
+	// unencrypted private key: what frisket logs in with. Exactly one.
+	Agent   string `json:"agent,omitempty"`
+	KeyFile string `json:"keyFile,omitempty"`
+	// Identity is a key's "SHA256:..." fingerprint: the one key offered,
+	// where an agent holds several and a server counts every one it is
+	// offered against its limit.
+	Identity string `json:"identity,omitempty"`
+	// Exec decides each simple command in a command by the most literal
+	// pattern it matches, made stricter by every arg rule that matches it;
+	// the strictest of them decides the command.
+	Exec []ExecRule `json:"exec,omitempty"`
+	// Env are the variables a command may set for itself -- `LANG=C ls`,
+	// `env LC_ALL=C ls` -- and still be decided as the command it runs: each
+	// a name, or a name's start and a trailing "*", as "LC_*". A command
+	// setting any other is unreadable. A name that changes what any command
+	// runs -- PATH, LD_*, BASH_ENV and their kin -- is refused.
+	Env []string `json:"env,omitempty"`
+	// Unmatched is "ask", the default here, unlike a route's, or "refuse":
+	// for a simple command no rule matches, and every command a shell would
+	// read as anything but its words.
+	Unmatched string `json:"unmatched,omitempty"`
+}
+
+// ExecRule decides the simple commands Command matches: admitted, asked
+// about, or refused. With Arg, it only tightens: it asks about or refuses
+// those of them with an argument Arg matches, or, with no Command, every
+// simple command with one.
+type ExecRule struct {
+	// Command is words separated by single spaces: each literal, "*" for
+	// exactly one word, or, last, "**" for any number of them. Optional
+	// with Arg.
+	Command string `json:"command,omitempty"`
+	// Arg is a glob whose "*" is any run of characters but "/", matched
+	// against each argument whole, what follows its first "=", and each
+	// "/"-separated part of either. A rule with one must ask or refuse.
+	Arg    string `json:"arg,omitempty"`
+	Ask    bool   `json:"ask,omitempty"`
+	Refuse bool   `json:"refuse,omitempty"`
+	// Operation is what the rule is, as a path rule's is: shown to the
+	// person asked and logged, never matched on.
+	Operation *Operation `json:"operation,omitempty"`
 }
 
 // Route is one intercepted host, as data: a bearer token, Basic with a fixed
@@ -155,6 +226,39 @@ func (p Policy) RelayDestinations() []netip.AddrPort {
 	}
 	return out
 }
+
+// SSHDestinations are what a session's ruleset steers to frisket for its SSH
+// routes: each route's address and port, in the routes' order. One that is
+// not an address at all is left out; whether the rest may be reached is
+// build's to decide, and a document it refuses is never served.
+func (p Policy) SSHDestinations() []netip.AddrPort {
+	out := make([]netip.AddrPort, 0, len(p.SSH))
+	for _, r := range p.SSH {
+		if ap, err := r.AddrPort(); err == nil {
+			out = append(out, ap)
+		}
+	}
+	return out
+}
+
+// AddrPort is the route's Address, read as a literal IP with an optional
+// port, 22 when absent. Whether frisket would reach it is build's to decide.
+func (r SSHRoute) AddrPort() (netip.AddrPort, error) {
+	if ap, err := netip.ParseAddrPort(r.Address); err == nil {
+		if ap.Port() == 0 {
+			return netip.AddrPort{}, fmt.Errorf("address %q: port 0", r.Address)
+		}
+		return ap, nil
+	}
+	a, err := netip.ParseAddr(r.Address)
+	if err != nil {
+		return netip.AddrPort{}, fmt.Errorf("address %q: a literal IP, v4:port or [v6]:port, never a name", r.Address)
+	}
+	return netip.AddrPortFrom(a, DefaultSSHPort), nil
+}
+
+// DefaultSSHPort is an SSH route's port when its address names none.
+const DefaultSSHPort = 22
 
 // APIVersions are "1.NN", min to max, and the paths asked with no version.
 type APIVersions struct {

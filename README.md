@@ -26,7 +26,7 @@ its method and path are allowed.
 | **Traffic reaches it** | Kernel steering, no proxy variables | Host proxy for a microVM | Proxy variables, enforced by the sandbox | Kernel steering on Linux, proxy variables on macOS | Proxy setting, plain HTTP | Proxy setting (CONNECT) |
 | **Name allowlist** | ✓, others NXDOMAIN | ✓ | ✓ | Through its rules | Per secret | ✓ |
 | **Credentials stay outside** | ✓ placeholder | ✓ sentinel | Claude Code's mask mode, Linux only | — | ✓ sent encrypted by the client | — |
-| **Method and path rules** | ✓, plus git and GraphQL | — | — | ✓ scripted | — | — |
+| **Method and path rules** | ✓, plus git, GraphQL and SSH commands | — | — | ✓ scripted | — | — |
 | **Ask a person per request** | ✓ | — | — | — | — | — |
 | **Works with** | Any network namespace; flong module | Its own microVM | Its own sandbox | Its own jail | Anything | Anything |
 | **Open source** | ✓ Go | — | ✓ TypeScript | ✓ Rust | ✓ Go | ✓ Go |
@@ -108,7 +108,8 @@ In the `agent` container:
 - **Egress.** A connection is allowed only to an address frisket resolved for
   that sandbox. Loopback, private ranges, link-local, CGNAT, ULA and the
   host's own addresses are always refused, checked at connect time so DNS
-  rebinding can't get round it.
+  rebinding can't get round it. frisket reaches a private address only for
+  an SSH route, which it terminates, and never relays one as raw TCP.
 - **Interception.** Each session gets its own CA, name-constrained to its
   routes' hosts, mounted read-only at `/etc/frisket` (`ca.crt`, and
   `ca-bundle.crt`, the system bundle plus the CA). The key never leaves the
@@ -149,6 +150,9 @@ A route can do more than add a bearer token. Each is in
   Google's that sign their own tokens.
 - **Docker**: hold a sandbox to its own project's containers on your daemon. See
   [docs/docker.md](docs/docker.md).
+- **SSH**: run commands on your own machines with no key in the sandbox, each
+  admitted, asked about or refused by its words; no shell, pty or forwarding.
+  See [docs/ssh.md](docs/ssh.md).
 
 ## Options
 

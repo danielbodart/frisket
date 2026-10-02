@@ -612,10 +612,21 @@ in
         `route`, `method`, `host`, `path` and `query` as sent, and the
         matched `operation`'s `id`, `summary` and `description` if there was
         one -- and, for a GraphQL request holding several fields, every one's
-        in `operations`, `operation` being the one that decided. Exit 0 admits the request, 1 declines it, anything else refuses
-        it and is logged as the asker failing. Everything but `operation` is
-        the workload's choosing: show it as the request, never as prose, and
-        escape it for whatever renders it. Null: every request a route asks
+        in `operations`, `operation` being the one that decided; `body`, the
+        start of the request's body, with `bodyMore` if it went on past what
+        was read and `bodyLength` if it declared one; and `workspace`, the
+        session's checkout. A command on an SSH route is asked about with
+        `kind` "ssh": `route` and `host` are the route's name, `address` its
+        machine, ip:port, `user` who the command runs as there, `command`
+        the command exactly as sent, and `body` and `bodyMore` the start of
+        its stdin; where its simple commands -- `cd /srv && systemctl restart
+        app` -- were decided by several operations, every one is in
+        `operations`, as for a GraphQL request, and one no rule names is only
+        in `command`; there is no `method` or `path` to show. Exit 0 admits the
+        request or command, 1 declines it, anything else refuses it and is
+        logged as the asker failing. Everything but `operation` is the
+        workload's choosing: show it as the request, never as prose, and
+        escape it for whatever renders it. Null: everything a route asks
         about is refused.
       '';
     };

@@ -26,7 +26,10 @@
 #      the exemption would hand them to a loopback where nothing listens.
 #      Their sets are empty here; `frisket steer` fills them from what the
 #      daemon answers `open` with, so a session with no Docker route steers
-#      exactly what it steered before the sets existed.
+#      exactly what it steered before the sets existed. The same sets carry
+#      a session's SSH routes, address and port, which frisket terminates:
+#      in `service` nothing else would steer a private address at all, and
+#      a route at an address the host owns is local too.
 #   3. frisket's service address next, because it is assigned to lo -- so it
 #      is "local", and the exemption below would otherwise let it through to
 #      nothing.
@@ -183,9 +186,10 @@ let
         meta mark != ${m} meta nfproto ipv4 ip daddr != 127.0.0.0/8 fib daddr type local tcp dport != ${tcp} ct state new dnat ip to 127.0.0.1
       }'';
 
-  # The relay's destinations, address and port, one set per family. Only
-  # TCP: a published Docker port is relayed as a stream, and a datagram to one
-  # is left to the sandbox's own loopback, where nothing answers it.
+  # The relay's destinations, address and port, one set per family: a Docker
+  # project's ports, and SSH routes. Only TCP: a published Docker port is
+  # relayed as a stream, and a datagram to one is left to the sandbox's own
+  # loopback, where nothing answers it.
   relaySets = ''
     set relay4 { type ipv4_addr . inet_service; }
       set relay6 { type ipv6_addr . inet_service; }'';

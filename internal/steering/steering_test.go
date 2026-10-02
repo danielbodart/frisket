@@ -135,6 +135,9 @@ type fakeRoot struct {
 	// ruleset the helper was given.
 	relay  []string
 	loaded string
+	// ssh is the SSH files the fake daemon answers open with: known_hosts,
+	// then ssh_config.
+	ssh [2][]byte
 }
 
 // The steps' names, as the tests below spell them.
@@ -205,7 +208,8 @@ func (f *fakeRoot) steerer() *Steerer {
 			if f.fail == "daemon "+req.Op {
 				return control.Response{}, errors.New("refused")
 			}
-			return control.Response{Sessions: f.held, Closed: true, CACert: []byte("the session's CA\n"), Relay: f.relay}, nil
+			return control.Response{Sessions: f.held, Closed: true, CACert: []byte("the session's CA\n"), Relay: f.relay,
+				SSHKnownHosts: f.ssh[0], SSHConfig: f.ssh[1]}, nil
 		},
 	}
 }
@@ -236,7 +240,7 @@ func TestSteerGivesTheSandboxItsCAAndTheRootsWithIt(t *testing.T) {
 	if string(f.mounted.CACert) != "the session's CA\n" || f.mounted.Roots != rootsPath {
 		t.Fatalf("asked to mount %q with the roots at %s", f.mounted.CACert, f.mounted.Roots)
 	}
-	files, err := caFiles(f.mounted.Roots, f.mounted.CACert)
+	files, err := caFiles(f.mounted.Roots, f.mounted.CACert, f.mounted.SSHKnownHosts, f.mounted.SSHConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,8 +269,76 @@ func TestSteerGivesTheSandboxItsCAAndTheRootsWithIt(t *testing.T) {
 	if err := os.WriteFile(empty, []byte("nothing\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := caFiles(empty, []byte("the session's CA\n")); err == nil {
+	if _, err := caFiles(empty, []byte("the session's CA\n"), nil, nil); err == nil {
 		t.Error("a bundle was made from roots with no certificates")
+	}
+}
+
+// A session with SSH routes is given their two files beside the CA, and one
+// without is given neither; half of the pair is refused, closing the session
+// rather than leaving ssh in it with a config and nothing to trust.
+func TestSteerGivesASessionWithSSHRoutesTheirFiles(t *testing.T) {
+	file := allFile()
+	file.Ruleset = relayRuleset
+	p, err := file.Plan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootsPath, _ := roots(t)
+	sess := Session{Name: "s", Policy: "/etc/frisket/policies/research.json", Mntns: "/proc/1/ns/mnt", Roots: rootsPath}
+	known := []byte("@cert-authority * ssh-ed25519 AAAA frisket\n")
+	config := []byte("Host server\n\tHostName 10.0.0.5\n\tPort 22\n\tUser core\n")
+	for _, tc := range []struct {
+		name  string
+		ssh   [2][]byte
+		files []string
+		fail  bool
+	}{
+		{"no SSH routes", [2][]byte{}, []string{CACertFile, CABundleFile}, false},
+		{"SSH routes", [2][]byte{known, config}, []string{CACertFile, CABundleFile, SSHKnownHostsFile, SSHConfigFile}, false},
+		{"known_hosts alone", [2][]byte{known, nil}, nil, true},
+		{"ssh_config alone", [2][]byte{nil, config}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRoot{ssh: tc.ssh, relay: []string{"10.0.0.5:22"}}
+			err := f.steerer().Steer(context.Background(), "/proc/1/ns/net", p, sess)
+			if tc.fail {
+				if err == nil || f.steps[len(f.steps)-1] != "daemon close" {
+					t.Fatalf("err = %v, steps %v: want the session closed", err, f.steps)
+				}
+				if _, err := caFiles(rootsPath, []byte("the session's CA\n"), tc.ssh[0], tc.ssh[1]); err == nil {
+					t.Error("caFiles made half the pair")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			files, err := caFiles(f.mounted.Roots, f.mounted.CACert, f.mounted.SSHKnownHosts, f.mounted.SSHConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, m := range files {
+				names = append(names, m.Name)
+				switch m.Name {
+				case SSHKnownHostsFile:
+					if string(m.Data) != string(known) {
+						t.Errorf("%s = %q", m.Name, m.Data)
+					}
+				case SSHConfigFile:
+					if string(m.Data) != string(config) {
+						t.Errorf("%s = %q", m.Name, m.Data)
+					}
+				}
+			}
+			if strings.Join(names, " ") != strings.Join(tc.files, " ") {
+				t.Errorf("mounted %v, want %v", names, tc.files)
+			}
+			if !strings.Contains(f.loaded, "add element inet frisket relay4 { 10.0.0.5 . 22 }") {
+				t.Errorf("the route's destination is not in the ruleset:\n%s", f.loaded)
+			}
+		})
 	}
 }
 

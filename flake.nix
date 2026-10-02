@@ -33,10 +33,12 @@
         # Pinned rather than null, because there are dependencies: x/sys for
         # setns, x/net for dns/dnsmessage, the one parser frisket points at
         # hostile DNS, vishvananda/netlink for the routing steer and connect
-        # make inside a sandbox, and go-jose for the JWTs a session key signs.
+        # make inside a sandbox, go-jose for the JWTs a session key signs, and
+        # x/crypto for ssh, both ends of an SSH route's connection, which is
+        # hostile input from the sandbox and from the machine alike.
         # vendorHash = null is a nice property
         # and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-Co9KrSQ/rLnlnlRTCdp/hnHAPzfm618jYqVrNpDXkSQ=";
+        vendorHash = "sha256-xlAC4rD0FXWIdqMr85L1SfzqlI/uzuUc4m9IiCZrIkY=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has

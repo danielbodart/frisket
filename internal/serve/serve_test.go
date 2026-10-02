@@ -169,7 +169,52 @@ type recorder struct {
 	// relay, if set, is the relay a session with a Docker project is given,
 	// built from what its policy says of the project now.
 	relay func(dk *Docker, log *slog.Logger) RelayHandler
+	// sshDests, if set, is the session's SSH destinations in place of its
+	// "ssh" param: a document changed while the daemon was down.
+	sshDests func(s control.Session) string
+	// noSSHHandler gives a session SSH routes and no handler for them, as
+	// a broken policy would.
+	noSSHHandler bool
 }
+
+// sshRoutes is a session's SSH routes, as a policy with some gives them:
+// the "ssh" param's destinations, comma-separated, with a handler that
+// steers exactly those. None without the param.
+func (r *recorder) sshRoutes(s control.Session) (SSHHandler, *SSHRoutes, error) {
+	dests := s.Params["ssh"]
+	if r.sshDests != nil {
+		dests = r.sshDests(s)
+	}
+	if dests == "" {
+		return nil, nil, nil
+	}
+	sr := &SSHRoutes{KnownHosts: []byte("@cert-authority * ssh-ed25519 AAAA frisket\n"), Config: []byte("Host server\n")}
+	for _, d := range strings.Split(dests, ",") {
+		ap, err := netip.ParseAddrPort(d)
+		if err != nil {
+			return nil, nil, err
+		}
+		sr.Destinations = append(sr.Destinations, ap)
+	}
+	if r.noSSHHandler {
+		return nil, sr, nil
+	}
+	return sshNoting{dests: sr.Destinations, serve: func(_ context.Context, c *steer.Conn) {
+		fmt.Fprintln(c, "ssh")
+		_ = c.Close()
+	}}, sr, nil
+}
+
+// sshNoting is an SSH handler for exactly dests, answering as serve does.
+type sshNoting struct {
+	dests []netip.AddrPort
+	serve steer.HandlerFunc
+}
+
+func (h sshNoting) Steers(orig netip.AddrPort) bool {
+	return slices.Contains(h.dests, netip.AddrPortFrom(orig.Addr().Unmap(), orig.Port()))
+}
+func (h sshNoting) ServeConn(ctx context.Context, c *steer.Conn) { h.serve(ctx, c) }
 
 // docker is a session's Docker project, as a policy with a Docker route
 // gives it: the one its "project" param names, with the "ports" param's
@@ -228,9 +273,15 @@ func (r *recorder) policy() Policy {
 		if dk != nil && r.relay != nil {
 			rl = r.relay(dk, log)
 		}
+		sh, sr, err := r.sshRoutes(s)
+		if err != nil {
+			return Handlers{}, err
+		}
 		return Handlers{
 			Docker:    dk,
 			Relay:     rl,
+			SSH:       sh,
+			SSHRoutes: sr,
 			Authority: authority,
 			CACert:    []byte("cert-of-" + string(authority)),
 			Egress: steer.HandlerFunc(func(ctx context.Context, c *steer.Conn) {

@@ -30,7 +30,7 @@ machine.
 
 ## Locked decisions
 
-**1. Go, standard library first, and four dependencies.** `CGO_ENABLED = 0`, so
+**1. Go, standard library first, and five dependencies.** `CGO_ENABLED = 0`, so
 the binary is static. The stdlib covers almost all of it: `httputil.ReverseProxy`
 for credential routes, `crypto/tls` and `crypto/x509` for interception, `net`
 and `io.Copy` for egress (splice on Linux — measured), and `crypto/rsa` for
@@ -71,6 +71,16 @@ below). Every such JWT is the workload's, so it is hostile input: a header
 choosing its own algorithm, claims to read, a signature to check. It is what
 Google's own Go libraries use, and it imports nothing outside the standard
 library.
+
+The fifth is `golang.org/x/crypto/ssh`, for SSH routes (below), where
+frisket is an SSH server to the sandbox and a client to the machine. Both
+sides parse hostile bytes -- the sandbox's handshake, channels and requests,
+and a machine's that may not be the one pinned until its key is checked --
+and the protocol is key exchange, signatures and a channel multiplexer with
+its own flow control: nothing to write by hand. It is the Go team's, what
+every Go SSH tool uses, and x/net already required it, so it was on the
+build list before its code was in the binary; behind it is x/sys, which
+frisket already has.
 
 `vendorHash` is therefore a pinned hash and not `null`. That is a cost, not a
 loss: `vendorHash = null` is a nice property, never a security one.
@@ -685,7 +695,13 @@ about forty lines.
   `net.Dialer.Control` against the address actually being dialled, so DNS
   rebinding cannot slip past, and so no allowlist can override it. ottergate's
   allowlist is consulted *before* its equivalent check, which is why its shipped
-  configuration allows the cloud metadata address.
+  configuration allows the cloud metadata address. A private address is
+  reachable in one way only: as an SSH route (below), whose exact address and
+  port the session's ruleset steers to frisket, which terminates the SSH and
+  dials the machine itself with a dialer pinned to that address. It is never
+  spliced as raw TCP: another port on the same machine, or the same port
+  dialled any other way, is refused here as before, and no allowlist or
+  route can change that.
 - **Allowlist:** a connection is accepted only to an address frisket resolved
   for an allowed name in that session, with a bounded TTL and a cap on the set.
 - **Names** come from frisket's own DNS answers to that session, with SNI or
@@ -825,7 +841,9 @@ holds nothing private to read out through them.
   every owner. The route's scope is the boundary; that stays a later option.
 - **Not SSH.** Agent forwarding, destination-constrained keys and GitHub's SSH
   CAs are all per-user, never per-repository or read-only; terminating SSH
-  would give what HTTPS already gives, with a second protocol to hold.
+  would give what HTTPS already gives, with a second protocol to hold. SSH
+  routes (below) do not reverse this: they are for machines on the LAN that
+  SSH is the only way into, and what they decide is a command, not git.
 
 ### GraphQL (decided)
 
@@ -1043,6 +1061,106 @@ the changes it makes to a request are decision 13's one other carve-out.
   from the name alone. Two projects at one address both run; each relay
   reaches only its own project's containers.
 
+### SSH (decided)
+
+An agent administering your own machines -- `ssh server sudo apt update`,
+`ssh gateway systemctl status x` -- with no key in the sandbox. Interactive
+shells are out of scope. How a route is written is in `docs/ssh.md`; why it
+is shaped so is below.
+
+- **Grants declare each host.** A route is a document's `ssh` entry: a name,
+  a literal address and port, a user, the host keys, a credential and rules.
+  A list of its own, not a `Route`, since every route is an HTTPS host its
+  DNS answers. Documents with SSH routes come from chase's grants, which
+  exist only in the trusted tier and which you approve each change of; that
+  is the whole gate, with no inventory of hosts in Nix beside it.
+- **frisket terminates SSH.** The session's ruleset steers each route's
+  address and port to frisket's existing listener on 15001, in the relay
+  sets Docker's ports use, with no change to the ruleset. frisket completes
+  the handshake as the route, with a host certificate signed by the
+  session's SSH CA, and asks the sandbox for no key. Only session channels
+  are accepted; pty, shell, subsystem, env and every forward --
+  `direct-tcpip`, `tcpip-forward`, agent, X11 -- are refused.
+- **Each command decided by its words.** frisket reads a small grammar every
+  login shell of the POSIX family, fish and csh reads alike: simple
+  commands joined by `&&`, `||`, `;` or `|`, of words that are plain --
+  every byte in a shell-inert alphabet, and not beginning `%`, which fish
+  expands there (`%self`), or `=`, which zsh does -- single-quoted, with no
+  `'`, `\` or `!` inside (fish and csh read those there), or double-quoted
+  with none of those nor `$`, a backtick or `"`, each byte left checked
+  against bash, dash, zsh, mksh, fish and tcsh. A simple command may end
+  `>/dev/null`, `</dev/null` or both, each once, a word of its own, and not
+  across a pipe, where csh calls them ambiguous: the forms all six read
+  alike, `2>/dev/null` not among them (csh's argument `2`). They are taken
+  off its words. A command is at most 8 KiB, which bounds the work of
+  deciding one. A route assumes the
+  machine's login shell is one of those: cmd.exe, Windows OpenSSH's, quotes
+  only with `"` and reads `'` and `;` as plain, so no grammar reads alike to
+  it and them. Anything else is unreadable, and so is a simple command whose
+  first word holds `=`, an assignment to a shell -- `PATH=/tmp/x ls` is not
+  `ls` and not a command named `PATH=/tmp/x` -- or is a reserved word of
+  bash, zsh or fish, since `not rm x` runs `rm`. What only says how a
+  command runs is taken off and the command after it decided: `exec`,
+  `command` or `builtin`, plain, first and with no option (`command -v`,
+  `exec -a` are unreadable, and so is one anywhere else, where some shell
+  runs the program of that name), `time` (the
+  keyword, or `/usr/bin/time`, and `time -p` only after `env`, since zsh's
+  keyword runs a command named `-p`), an assignment of a name the route's
+  `env` lists with a value that names no file of the session's (no leading
+  `/`, `.` or `:`, no `..` or `%`), and `env` with listed
+  assignments and no option, which is `env` alone with no command. Any
+  other name, any other option, and `time` beside an assignment -- `time
+  LANG=C ls` runs `LANG=C` under dash's `/usr/bin/time` -- are unreadable,
+  and names that change what any command runs (`PATH`, `LD_*`, `BASH_ENV`
+  and their kin) cannot be listed; arg rules see the assignments. So
+  taking them off never decides a command more loosely than the command
+  alone. Rules match a
+  simple command's words, literal, `*` or a final `**`, the most literal
+  winning and a tie going to the stricter; each simple command is decided on
+  its own and the strictest decides the whole, as a GraphQL request's fields
+  do, since every part may run whatever joins it. An unreadable command is
+  never matched by any rule, so no rule admits what a shell reads
+  differently: it is unmatched, asked about by default. A refuse rule is
+  therefore a convenience on readable commands -- one unreadable byte moves a
+  refused command to unmatched -- and only `unmatched = "refuse"` is a
+  boundary; the docs say so rather than claim more. Asked about, a command
+  goes to the asker as a question of `kind` `ssh`, with its stdin's first 4
+  KiB, or what it sent before half a second's silence -- ssh without `-n`
+  never closes stdin, so a preview waits for nothing longer -- and the
+  operation of the rule that decided, and of each part's where there are
+  several.
+- **Arg rules only tighten.** A rule with an `arg` glob, `*` any run of
+  characters but `/`, asks about or refuses a simple command with an
+  argument it matches -- the word whole, what follows its first `=`, or any
+  `/`-separated part of either -- after its command rule has decided, and
+  can only make that stricter; one that would admit is an error. That is
+  what lets a consumer's catalogue refuse `cat /root/.ssh/id_ed25519` while
+  admitting `cat`. It catches a secret's path spelt out; it does not catch a
+  command that finds one itself, `grep -r . /root`, and is no boundary
+  against a workload set on reading one: the remote user's own permissions
+  are.
+- **The host key is the trust.** The machine's key must match one the route
+  pins, byte for byte. Never trust on first use, never a person asked about
+  a key, certificates refused; frisket asks for the pinned types alone, so a
+  machine with a preferred key of another type presents the pinned one.
+- **The user's own key, by agent or file.** An agent socket, dialled per
+  login and closed after it, optionally narrowed to one identity, or an
+  unencrypted key file. Paths are written out: the daemon is a system unit
+  with no `SSH_AUTH_SOCK`, a private `/tmp` and a read-only home. One login
+  per sandbox connection, made on its first command that runs.
+- **A CA derived, not stored.** The SSH CA is ed25519 from HKDF over the
+  session's TLS CA key, so the session record does not change and a restored
+  session keeps the CA its sandbox trusts. `/etc/frisket` gains
+  `ssh_known_hosts`, the CA as `@cert-authority`, and `ssh_config`, a `Host`
+  block per route; the consumer points ssh at them.
+- **No sudo of its own.** A NOPASSWD sudo is an ordinary command, decided by
+  its words; anything more is an open question, below.
+- **The reading is public.** The grammar and the rules' matching are the
+  package `execrule`, beside `policy` and `docker`: `Compile(route)` and
+  `Rules.Decide(command)`, what frisket decides by. chase tests its
+  catalogue of commands with it, rather than with a copy that could drift
+  or through `frisket check -exec` alone.
+
 ---
 
 ## Build order
@@ -1079,6 +1197,9 @@ in strict, measured in both tiers.
 **Docker.** Built: a session's own project's containers, volumes and
 networks through the rootless daemon, and its published ports by the
 project's address ("Docker", below Google Cloud).
+
+**SSH.** Commands on your own machines, each decided by its words, over
+frisket's login with your key ("SSH", below Docker).
 
 **Integration.** The adapter against nix-config's tiers, and the mounts that
 target state removes.
@@ -1140,6 +1261,21 @@ this is a parser or a classifier facing hostile input:
   which is a bug ottergate has in both of its proxy paths.
 - Deadlines are idle deadlines, extended by activity, or long downloads, SSE and
   websockets die at the timeout.
+- SSH routes: properties that no unreadable command is ever admitted, run as
+  a fuzz target too, that joining a readable simple command to a command
+  never makes it less strict, that a word an arg rule refuses refuses
+  the command wherever it is, that an assignment of a name not listed never
+  admits (a fuzz target too), that taking off a precommand, time, listed
+  assignments and env never decides a command more loosely than the command
+  alone, that a readable command reads the same requoted, single or double,
+  and that a redirection to or from /dev/null decides nothing; the grammar
+  itself checked against bash, dash, zsh, mksh, fish and tcsh running a
+  program that logs its argv; and
+  the handler
+  end to end against an in-process sshd and an agent keyring -- admitted,
+  asked and refused commands, a pinned host key mismatched, forwarding,
+  pty and shell refused, stdin previewed then delivered whole, exit status
+  and signal forwarded.
 - Logs are asserted through an injected writer. A logger that silences itself
   under test cannot be tested, and then "exactly one line per connection" is a
   hope.
@@ -1175,6 +1311,12 @@ node's address can be used.
   streams. Each tool's route brings its own.
 - Lifecycle: a session survives a daemon restart; a SIGKILLed launcher leaves
   nothing behind.
+- SSH: an sshd on the upstream node's private address. An admitted command
+  returns its output and exit status, as does one with a listed assignment
+  before it, while one assigning `LD_PRELOAD` is unmatched; a refused one
+  never reaches sshd, an asked one is admitted and declined by the test
+  asker, a wrong pinned key fails, `-L` is refused, and raw TCP to another
+  port on that address is still refused.
 
 **Everywhere:** every connection and query produces exactly one log line.
 
@@ -1246,3 +1388,8 @@ inside, which the credential binds going away does not change.
    key, as chase's `docs/gcloud.md` sets out.)
 7. **QUIC's policy.** Whether a relay's per-address allowlist is enough, or the
    Initial's SNI must be read (see "Build order").
+8. **sudo on an SSH route.** Deferred. A command run under a NOPASSWD sudo
+   works as any other; there is no pty, so a sudo that asks for a
+   password fails. Whether frisket should answer sudo's prompt itself, from
+   a credential of its own or a person, and how a rule would say which
+   commands may run as root, is undecided.

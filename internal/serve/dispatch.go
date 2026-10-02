@@ -29,6 +29,10 @@ type Handlers struct {
 	// the session's Docker address: its Docker project's ports, relayed to
 	// the project's address on the host. Nil without a Docker route.
 	Relay RelayHandler
+	// SSH gets every steered connection to one of the session's SSH routes,
+	// its address and port: commands, decided one by one and run on the
+	// machine with the user's key. Nil without an SSH route.
+	SSH SSHHandler
 	// Authority is the session's CA as the policy serialises it: kept in the
 	// session's record, and given back to Handlers when the session is
 	// restored, so a restored session keeps the CA its sandbox trusts. It is
@@ -39,6 +43,23 @@ type Handlers struct {
 	// Docker is the session's Docker project, if its policy has a Docker
 	// route, and nil otherwise.
 	Docker *Docker
+	// SSHRoutes is what the daemon must know of the session's SSH routes,
+	// if its policy has any, and nil otherwise.
+	SSHRoutes *SSHRoutes
+}
+
+// SSHRoutes is what the daemon hands steer for a session's SSH routes: the
+// destinations its ruleset steers to frisket, in the relay's sets beside the
+// Docker project's, and the two files the sandbox's ssh reads them by.
+type SSHRoutes struct {
+	// Destinations are each route's address and port, in the routes' order.
+	Destinations []netip.AddrPort
+	// KnownHosts is the sandbox's ssh_known_hosts: the session's SSH CA,
+	// trusted for host certificates. Public; the CA's key is derived from
+	// the session's Authority and goes nowhere.
+	KnownHosts []byte
+	// Config is the sandbox's ssh_config fragment: a Host block per route.
+	Config []byte
 }
 
 // Docker is what the daemon must know of a session's Docker route: whose
@@ -58,6 +79,14 @@ type Docker struct {
 type RelayHandler interface {
 	steer.Handler
 	// Steers is whether a connection to orig is the relay's to judge.
+	Steers(orig netip.AddrPort) bool
+}
+
+// SSHHandler serves a session's SSH routes, and says which destinations are
+// its.
+type SSHHandler interface {
+	steer.Handler
+	// Steers is whether a connection to orig is one of the routes'.
 	Steers(orig netip.AddrPort) bool
 }
 
@@ -113,6 +142,7 @@ func (f PolicyFunc) Handlers(s control.Session, authority []byte, log *slog.Logg
 // its first bytes.
 //
 //   - port 53, any address                          -> DNS
+//   - an SSH route's address and port               -> SSH, if there is one
 //   - 127.0.0.1, ::1 or the Docker address, any port -> Relay, if there is one
 //   - the session's service address                 -> Intercept
 //   - anything else                                 -> Egress
@@ -121,11 +151,14 @@ func (f PolicyFunc) Handlers(s control.Session, authority []byte, log *slog.Logg
 // DNS first, as it is first in the ruleset: TCP DNS to the service address is
 // still DNS, and so is TCP DNS to 127.0.0.1, which reaches the TCP listener
 // with its own destination rather than a port nobody holds. The relay's sets
-// are the only other loopback destinations a ruleset steers, so what reaches
-// the relay's addresses is the relay's, and it judges the port: one the
-// document dropped since a restore is still steered, and refused there.
-// Without a Docker route the sets are empty, and loopback that arrived
-// anyway would go to Egress, whose classifier refuses it.
+// hold the Docker route's loopback destinations and the SSH routes' address
+// and port alike, and steer them all to frisket; SSH is asked first, by
+// address and port exactly, and what it does not claim is the relay's to
+// judge by port: one the document dropped since a restore is still steered,
+// and refused there. Loopback is never an SSH route's, so the two cannot
+// claim the same destination. With neither route the sets are empty, and
+// loopback that arrived anyway would go to Egress, whose classifier refuses
+// it.
 type Dispatch struct {
 	Service []netip.Addr
 	Handlers
@@ -136,6 +169,8 @@ func (d Dispatch) ServeConn(ctx context.Context, c *steer.Conn) {
 	switch {
 	case c.Orig.Port() == DNSPort:
 		d.DNS.ServeConn(ctx, c)
+	case d.SSH != nil && d.SSH.Steers(c.Orig):
+		d.SSH.ServeConn(ctx, c)
 	case d.Relay != nil && d.Relay.Steers(c.Orig):
 		d.Relay.ServeConn(ctx, c)
 	case d.IsService(c.Orig.Addr()):

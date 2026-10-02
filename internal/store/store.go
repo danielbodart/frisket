@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/internal/relay"
 	"github.com/danielbodart/frisket/internal/serve"
+	"github.com/danielbodart/frisket/internal/sshroute"
 	"golang.org/x/sys/unix"
 )
 
@@ -353,6 +355,11 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 	}
 	closers = append(closers, ic.Close)
 
+	shells, err := sshRoutes(p, hosts)
+	if err != nil {
+		return nil, closers, err
+	}
+
 	// What the daemon keeps apart and steer steers: the same for every
 	// session under this document.
 	dr := p.DockerRoute()
@@ -428,6 +435,16 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 				Log:        log,
 			}
 		}
+		// The SSH routes too, as the document reads now: one a restored
+		// session has gained since its launch is served, but its sandbox
+		// has no Host block for it, and in `service` its destination is
+		// not steered, until it is relaunched; one it has lost falls to
+		// Egress, which refuses a private address structurally.
+		if len(shells) > 0 {
+			if h.SSH, h.SSHRoutes, err = sessionSSH(shells, ca, d.Asker, name, s.Params["workspace"], log); err != nil {
+				return serve.Handlers{}, err
+			}
+		}
 		return h, nil
 	}), closers, nil
 }
@@ -461,6 +478,75 @@ func dockerNames(p policy.Policy, hosts []string) error {
 		}
 	}
 	return nil
+}
+
+// steeredAddrs are frisket's service and dummy addresses as lib.steering
+// makes them unless told otherwise: no SSH route may be at one, for each is
+// steered to frisket, or is the sandbox's own, for something else. The
+// session's real service addresses are checked again when it opens
+// (serve.Daemon.Open), which is the only place they are known. Its real
+// dummy addresses are not: no session tells the daemon them, so one moved
+// off its default is kept clear of routes only by whoever moved it. A route
+// there hides only whatever the sandbox serves at that address and port:
+// steer.Classify rests on no listener's address and no loopback being
+// steered, and the dummy is neither.
+var steeredAddrs = []netip.Addr{
+	netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1"), // the dummy's
+	netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2"), // the service's
+}
+
+// sshRoutes checks a document's SSH routes against the rest of it: clear of
+// frisket's own addresses and the Docker project's, and their names clear of
+// every intercepted host and the Docker route's names. Nothing is opened --
+// the agent and the key file are read at each login -- so `frisket check`
+// holds a document to all of this where neither exists.
+func sshRoutes(p policy.Policy, hosts []string) ([]*sshroute.Route, error) {
+	if len(p.SSH) == 0 {
+		return nil, nil
+	}
+	reserved := sshroute.Reserved{Addrs: steeredAddrs, Hosts: hosts}
+	if dr := p.DockerRoute(); dr != nil {
+		reserved.Addrs = append(slices.Clone(reserved.Addrs), docker.Address(dr.Project))
+		reserved.Hosts = append(slices.Clone(reserved.Hosts), dr.Names...)
+	}
+	return sshroute.Compile(p.SSH, reserved)
+}
+
+// sessionSSH is a session's SSH handler and what the daemon hands steer for
+// it. The SSH CA is derived from the session's TLS CA -- its key, as the
+// record holds it -- so a session restored from its record has the SSH CA
+// its sandbox's known_hosts names, with nothing added to the record; the host
+// key under it is new each time, and trusted all the same.
+func sessionSSH(routes []*sshroute.Route, ca *intercept.CA, asker intercept.Asker, policyName, workspace string, log *slog.Logger) (serve.SSHHandler, *serve.SSHRoutes, error) {
+	key, err := ca.KeyPKCS8()
+	if err != nil {
+		return nil, nil, fmt.Errorf("ssh: the session's CA key: %w", err)
+	}
+	sshCA, err := sshroute.DeriveCA(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	h, err := sshroute.New(sshroute.Config{
+		Routes:    routes,
+		CA:        sshCA,
+		Expiry:    ca.Certificate().NotAfter,
+		Asker:     asker,
+		Policy:    policyName,
+		Workspace: workspace,
+		Log:       log,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	dests := make([]netip.AddrPort, len(routes))
+	for i, r := range routes {
+		dests[i] = r.Address
+	}
+	return h, &serve.SSHRoutes{
+		Destinations: dests,
+		KnownHosts:   sshroute.KnownHosts(sshCA.PublicKey()),
+		Config:       sshroute.SSHConfig(routes),
+	}, nil
 }
 
 // sessionCA is a new session's CA, constrained to hosts, or a restored

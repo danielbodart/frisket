@@ -14,6 +14,10 @@
 # The policy under test is generic: one allowed name spliced through, and one
 # intercepted name whose route adds a bearer token read from a file on the
 # host. No tool's route is here; each is designed on its own.
+#
+# The upstream's VLAN address, 192.168.1.2, is private, and is used for one
+# thing: an sshd, reached only as an SSH route frisket terminates, with
+# raw TCP to it refused as ever.
 { self, flong }:
 { lib, hostPkgs, ... }:
 
@@ -39,6 +43,20 @@ let
     openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
       -days 3650 -extfile ext -out server.crt
   '';
+
+  # The SSH route's keys, in the store: the upstream's host key, a key no
+  # machine has to pin in its place, and the user's key, which only her
+  # agent holds. A test's, trusted by nothing but this test.
+  sshKeys = pkgs.runCommand "frisket-test-ssh-keys" { nativeBuildInputs = [ pkgs.openssh ]; } ''
+    mkdir $out
+    ssh-keygen -q -t ed25519 -N "" -C upstream -f $out/host
+    ssh-keygen -q -t ed25519 -N "" -C impostor -f $out/other
+    ssh-keygen -q -t ed25519 -N "" -C alice -f $out/client
+  '';
+  # Her agent's socket, under her runtime directory as gcr's is: not /tmp,
+  # which the daemon's PrivateTmp hides, and reachable through its
+  # ProtectHome=read-only, which connecting to a socket needs no more than.
+  agentSocket = "/run/user/1000/ssh-agent.sock";
 
   # Says what it was asked, and with which Authorization, in its own journal
   # -- never in its answer, which goes back into the sandbox.
@@ -241,6 +259,30 @@ in
       after = [ "network.target" ];
       serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 ${https}";
     };
+    # The machine an SSH route reaches, by its private VLAN address: its own
+    # host key from the store, a copy only root reads, as sshd insists; a
+    # user whose one authorized key is alice's; and a command that says who
+    # ran it and exits with the status it is given. On 2222 too, where a
+    # route pins a key the machine does not have.
+    services.openssh = {
+      enable = true;
+      ports = [ 22 2222 ];
+      hostKeys = [{ path = "/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }];
+      settings.PasswordAuthentication = false;
+      settings.KbdInteractiveAuthentication = false;
+    };
+    environment.etc."ssh/ssh_host_ed25519_key" = { source = "${sshKeys}/host"; mode = "0600"; };
+    # Copied at activation rather than read at evaluation, which keyFiles
+    # would do: the key is built, and a check that imports from a build
+    # cannot be evaluated where builds are not allowed.
+    environment.etc."ssh/authorized_keys.d/ops" = { source = "${sshKeys}/client.pub"; mode = "0444"; };
+    users.users.ops.isNormalUser = true;
+    environment.systemPackages = [
+      (pkgs.writeShellScriptBin "greet" ''
+        echo "greetings from $(${pkgs.coreutils}/bin/cat /proc/sys/kernel/hostname) as $(${pkgs.coreutils}/bin/id -un): $*"
+        exit "$1"
+      '')
+    ];
     systemd.services.upstream = {
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
@@ -320,7 +362,10 @@ in
       asker = "${pkgs.writeShellScript "asker" ''
         q=$(${pkgs.coreutils}/bin/cat)
         printf '%s\n' "$q" | ${pkgs.util-linux}/bin/logger -t frisket-asker
-        case $q in *'"path":"/v1/things/yes"'*) exit 0 ;; esac
+        case $q in
+          *'"path":"/v1/things/yes"'*) exit 0 ;;
+          *'"kind":"ssh"'*'"command":"touch /home/ops/asked-yes"'*) exit 0 ;;
+        esac
         exit 1
       ''}";
       # The trusted shape: every name, and the same route still intercepted.
@@ -382,6 +427,29 @@ in
       };
     };
 
+    # Her ssh-agent, holding her key, on the socket the SSH route names, as
+    # a desktop's agent would be: the daemon has no SSH_AUTH_SOCK, so the
+    # document says where it is. The key goes in on stdin, which ssh-add
+    # takes from a store path that its permission check would refuse.
+    systemd.services.test-ssh-agent = {
+      wantedBy = [ "multi-user.target" ];
+      requires = [ "user-runtime-dir@1000.service" ];
+      after = [ "user-runtime-dir@1000.service" ];
+      serviceConfig = {
+        User = "alice";
+        Group = "users";
+        ExecStartPre = "${pkgs.coreutils}/bin/rm -f ${agentSocket}";
+        ExecStart = "${pkgs.openssh}/bin/ssh-agent -D -a ${agentSocket}";
+        ExecStartPost = script "ssh-add" ''
+          for _ in $(${pkgs.coreutils}/bin/seq 100); do
+            [ -S ${agentSocket} ] && break
+            ${pkgs.coreutils}/bin/sleep 0.1
+          done
+          SSH_AUTH_SOCK=${agentSocket} ${pkgs.openssh}/bin/ssh-add -q - < ${sshKeys}/client
+        '';
+      };
+    };
+
     # What a workload tries against what the hook installed. In the store, which
     # every session can read, rather than quoted through three shells.
     environment.etc."frisket-tamper".source = pkgs.writeText "tamper.sh" ''
@@ -425,7 +493,7 @@ in
         system.stateVersion = "24.05";
         users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; home = "/home/alice"; };
         users.groups.users.gid = 100;
-        environment.systemPackages = [ pkgs.curl pkgs.nftables pkgs.netcat pkgs.dnsutils ];
+        environment.systemPackages = [ pkgs.curl pkgs.nftables pkgs.netcat pkgs.dnsutils pkgs.openssh ];
         # A CONSUMER'S, not frisket's. frisket says where the bundle is and
         # stops there; which of a runtime's CA variables point at it is a fact
         # about the tools, so it belongs to whoever chose to run them. The
@@ -602,6 +670,19 @@ in
       postStart = mark;
     };
     services.frisket.flong.forwarded = { policy = "test"; set = "service"; };
+
+    # A session with SSH routes, in the `all` set, where everything is
+    # steered: what shows the route's private address reached as SSH and
+    # nothing else. Its document is written by the test, which reads the
+    # pinned keys from the store, as a launcher writes a grant's.
+    flong.ssh = {
+      container = "strict";
+      user = "alice";
+      inherit workspace;
+      command = [ "bash" "-c" ];
+      postStart = mark;
+    };
+    services.frisket.flong.ssh = { policy = "test"; policyFile = "/srv/policies/ssh.json"; };
   };
 
   testScript = { nodes, ... }:
@@ -614,6 +695,8 @@ in
       gapi = lib.getExe nodes.machine.flong.gapi.launcher;
       docker = lib.getExe nodes.machine.flong.docker.launcher;
       forwarded = lib.getExe nodes.machine.flong.forwarded.launcher;
+      sshLauncher = lib.getExe nodes.machine.flong.ssh.launcher;
+      sshAddr = nodes.upstream.networking.primaryIPAddress;
       frisket = lib.getExe nodes.machine.services.frisket.package;
       roots = nodes.machine.security.pki.caBundle;
     in
@@ -1404,6 +1487,154 @@ in
           assert all(m["reason"] == "no owned container publishes it" and m["to"] == f"{address}:64320" for m in refused), refused
           assert len(engine_saw("agent=frisket").splitlines()) == lookups + 8
           machine.succeed("systemctl stop echo-wild")
+
+      release(name)
+
+      # SSH routes, end to end: a session whose document names two routes to
+      # the upstream's private address -- one pinning its real host key, one
+      # a key it does not have -- logging in with alice's key, which only her
+      # agent holds. The sandbox's ssh reads the files frisket mounted, and
+      # nothing else: no key, no agent, no known_hosts of its own.
+      ssh_ip = "${sshAddr}"
+      host_pub = machine.succeed("cat ${sshKeys}/host.pub").strip()
+      other_pub = machine.succeed("cat ${sshKeys}/other.pub").strip()
+      ssh_doc = {
+          "name": "ssh",
+          "allow": ["allowed.test"],
+          "ssh": [
+              {"name": "server", "address": ssh_ip, "user": "ops", "hostKeys": [host_pub], "agent": "${agentSocket}",
+               "exec": [{"command": "greet *"}, {"command": "touch **", "ask": True}, {"command": "rm **", "refuse": True},
+                        {"command": "cd *"}, {"command": "ls **"},
+                        {"arg": ".ssh", "refuse": True, "operation": {"id": "secrets", "summary": "Read a secret", "class": "guarded"}}],
+               "env": ["LANG", "LC_*"]},
+              {"name": "wrongkey", "address": f"{ssh_ip}:2222", "user": "ops", "hostKeys": [other_pub], "agent": "${agentSocket}",
+               "exec": [{"command": "greet *"}], "unmatched": "refuse"},
+          ],
+      }
+      machine.succeed(f"printf '%s' {shlex.quote(json.dumps(ssh_doc))} > /srv/policies/ssh.json && chmod 0644 /srv/policies/ssh.json")
+      upstream.wait_for_unit("sshd.service")
+      machine.wait_for_unit("test-ssh-agent.service")
+      machine.wait_until_succeeds(f"nc -z -w 2 {ssh_ip} 22")
+      name, leader = hold("${sshLauncher}", "ip link show frisket0")
+      inside = f"/proc/{leader}/root/etc/frisket"
+      ssh = ("ssh -F /etc/frisket/ssh_config -o GlobalKnownHostsFile=/etc/frisket/ssh_known_hosts "
+             "-o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR")
+
+      # A command by ssh as the workload: its exit status, and what it said
+      # on stdout and stderr together. stdin is empty unless given.
+      def run_ssh(args, stdin=None):
+          cmd = f"{ssh} {args}"
+          cmd = f"{cmd} </dev/null" if stdin is None else f"printf %s {shlex.quote(stdin)} | {cmd}"
+          _, out = machine.execute(as_workload(leader, f"{cmd} 2>&1; echo \"exit=$?\""))
+          out, _, code = out.rpartition("exit=")
+          return int(code), out
+
+      # How many times the upstream's sshd let alice's key in.
+      def logins():
+          return int(upstream.succeed("journalctl -u sshd -o cat | grep -c 'Accepted publickey for ops' || true").strip())
+
+      def ssh_line(pred, what):
+          [l] = wait_log("ssh", name, pred, what)[-1:]
+          return l
+
+      with subtest("a session with SSH routes is given their ssh_config and the SSH CA beside its CA"):
+          assert machine.succeed(f"ls -A {inside}").split() == ["ca-bundle.crt", "ca.crt", "ssh_config", "ssh_known_hosts"]
+          assert machine.succeed(f"cat {inside}/ssh_config") == (
+              f"Host server\n\tHostName {ssh_ip}\n\tPort 22\n\tUser ops\n\n"
+              f"Host wrongkey\n\tHostName {ssh_ip}\n\tPort 2222\n\tUser ops\n")
+          known = machine.succeed(f"cat {inside}/ssh_known_hosts")
+          assert re.fullmatch(r"@cert-authority \* ssh-ed25519 \S+ frisket\n", known), known
+          # The CA's public half only; the machine's own key is nowhere in
+          # the sandbox, and neither is the user's.
+          for pub in [host_pub, machine.succeed("cat ${sshKeys}/client.pub").strip()]:
+              assert pub.split()[1] not in known, known
+
+      with subtest("an allowed command runs on the machine as the route's user, and its output and exit status come back"):
+          before = logins()
+          code, out = run_ssh("server greet 3")
+          assert (code, out) == (3, "greetings from upstream as ops: 3\n"), (code, out)
+          assert logins() == before + 1
+          l = ssh_line(lambda m: m.get("command") == "greet 3", "the allowed command")
+          assert (l["decision"], l["rule"], l["route"], l["user"], l["dst"], l["exit_status"]) == \
+              ("allowed", "greet *", "server", "ops", f"{ssh_ip}:22", 3), l
+          assert l["stdout_bytes"] == len(out), l
+
+      with subtest("a refused command is answered with why, and never reaches the machine"):
+          upstream.succeed("runuser -u ops -- touch /home/ops/kept")
+          before = logins()
+          code, out = run_ssh("server rm /home/ops/kept")
+          assert code == 126 and "frisket: server: refused by rule" in out, (code, out)
+          upstream.succeed("test -e /home/ops/kept")
+          # Not so much as a login: the command was decided before one.
+          assert logins() == before, (logins(), before)
+          l = ssh_line(lambda m: m.get("command") == "rm /home/ops/kept", "the refused command")
+          assert (l["decision"], l["rule"], l["reason"], l["exit_status"]) == ("refused", "rm **", "refused by rule", 126), l
+
+      with subtest("a command of several, each admitted, runs as one; an argument an arg rule refuses refuses it"):
+          code, out = run_ssh("server 'cd /etc && ls -d ssh'")
+          assert (code, out) == (0, "ssh\n"), (code, out)
+          l = ssh_line(lambda m: m.get("command") == "cd /etc && ls -d ssh", "the compound command")
+          assert (l["decision"], l["rule"]) == ("allowed", "cd *"), l
+          before = logins()
+          code, out = run_ssh("server 'cd /etc && ls /home/ops/.ssh'")
+          assert code == 126 and "frisket: server: refused by rule" in out, (code, out)
+          assert logins() == before, (logins(), before)
+          l = ssh_line(lambda m: m.get("command") == "cd /etc && ls /home/ops/.ssh", "the arg-refused command")
+          assert (l["decision"], l["rule"], l["operation"]) == ("refused", "[arg .ssh]", "secrets"), l
+
+      with subtest("a command the route asks about is put to the asker with its stdin, and its answer stands"):
+          code, out = run_ssh("server touch /home/ops/asked-yes", stdin="from the sandbox")
+          assert (code, out) == (0, ""), (code, out)
+          upstream.succeed("test -e /home/ops/asked-yes && test \"$(stat -c %U /home/ops/asked-yes)\" = ops")
+          code, out = run_ssh("server touch /home/ops/asked-no")
+          assert code == 126 and "frisket: server: declined" in out, (code, out)
+          upstream.fail("test -e /home/ops/asked-no")
+          asked = [q for q in (json.loads(l) for l in machine.succeed("journalctl -t frisket-asker -o cat --no-pager").splitlines())
+                   if q.get("kind") == "ssh"]
+          assert [(q["session"], q["policy"], q["route"], q["host"], q["address"], q["user"], q["command"], q.get("body"), q["bodyMore"])
+                  for q in asked] == [
+              (name, "ssh", "server", "server", f"{ssh_ip}:22", "ops", "touch /home/ops/asked-yes", "from the sandbox", False),
+              (name, "ssh", "server", "server", f"{ssh_ip}:22", "ops", "touch /home/ops/asked-no", None, False),
+          ], asked
+          yes = ssh_line(lambda m: m.get("command") == "touch /home/ops/asked-yes", "the admitted command")
+          assert (yes["decision"], yes["rule"], yes.get("asked"), yes["exit_status"], yes["stdin_bytes"]) == \
+              ("allowed", "touch **", True, 0, len("from the sandbox")), yes
+          no = ssh_line(lambda m: m.get("command") == "touch /home/ops/asked-no", "the declined command")
+          assert (no["decision"], no["reason"], no["exit_status"]) == ("refused", "declined", 126), no
+
+      with subtest("a listed assignment is taken off and the command decided, and any other is unmatched"):
+          code, out = run_ssh("server 'LANG=C LC_ALL=C ls -d /etc'")
+          assert (code, out) == (0, "/etc\n"), (code, out)
+          l = ssh_line(lambda m: m.get("command") == "LANG=C LC_ALL=C ls -d /etc", "the listed assignment")
+          assert (l["decision"], l["rule"]) == ("allowed", "ls **"), l
+          before = logins()
+          code, out = run_ssh("server 'LD_PRELOAD=/tmp/x.so ls -d /etc'")
+          assert code == 126 and "frisket: server: declined" in out, (code, out)
+          assert logins() == before, (logins(), before)
+          l = ssh_line(lambda m: m.get("command") == "LD_PRELOAD=/tmp/x.so ls -d /etc", "the unlisted assignment")
+          assert (l["decision"], l["rule"], l.get("asked"), l["reason"]) == ("refused", "unmatched", True, "declined"), l
+
+      with subtest("a machine that does not present the pinned host key is refused, and never logged in to"):
+          before = logins()
+          code, out = run_ssh("wrongkey greet 0")
+          assert code == 255 and "host key" in out and "greetings" not in out, (code, out)
+          assert logins() == before
+          l = ssh_line(lambda m: m.get("route") == "wrongkey", "the wrong host key")
+          assert l["decision"] == "failed" and l["reason"] == "host key not pinned" and l["dst"] == f"{ssh_ip}:2222", l
+
+      with subtest("raw TCP to another port of the machine's private address is still refused"):
+          _, out = machine.execute(as_workload(leader, f"curl -sS -m 5 http://{ssh_ip}/ 2>&1"))
+          assert "upstream-body" not in out, out
+          [e] = wait_log("egress", name, lambda m: m["dst"] == f"{ssh_ip}:80", "raw TCP to the private address")
+          assert e["decision"] == "refused" and e["reason"].startswith("structural"), e
+
+      with subtest("a port forward through a route is refused where it is asked for"):
+          script = (f"{ssh} -N -L 127.0.0.1:15999:{ssh_ip}:80 server </dev/null >/dev/null 2>&1 & pid=$!; "
+                    "sleep 2; curl -sS -m 5 http://127.0.0.1:15999/ 2>&1; kill $pid")
+          _, out = machine.execute(as_workload(leader, script))
+          assert "upstream-body" not in out, out
+          l = ssh_line(lambda m: m.get("channel_type") == "direct-tcpip", "the forward")
+          assert l["decision"] == "refused" and l["reason"] == "not a session channel" and l["route"] == "server", l
 
       release(name)
 

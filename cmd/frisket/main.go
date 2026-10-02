@@ -60,7 +60,9 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         listeners inside the network namespace, hand them to the daemon, then
         install the policy routing and load the ruleset that steers to them.
         Then mount the session's CA read-only at /etc/frisket in the mount
-        namespace: ca.crt, and ca-bundle.crt, BUNDLE with the CA after it.
+        namespace: ca.crt, and ca-bundle.crt, BUNDLE with the CA after it;
+        and for a session with SSH routes, ssh_known_hosts, its SSH CA, and
+        ssh_config, a Host block per route.
         {machine} in DOCUMENT is the session's name, and no other brace may
         appear. Provisions NO egress.
 
@@ -91,6 +93,10 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
   frisket check DOCUMENT...
         Check policy documents as a session opening one would: everything but
         whether its credential files exist yet.
+
+  frisket check -exec ROUTE DOCUMENT
+        Check the document, then answer each line of stdin, a command, as its
+        SSH route ROUTE decides it: allow, ask or refuse, a tab, and the rule.
 
   frisket dns [-listen ADDR:PORT]
         Answer a Docker project's name, <repo>.<owner>.internal, on the host
@@ -320,8 +326,17 @@ func root(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 func runCheck(argv []string) error {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	route := fs.String("exec", "", "an SSH route of the one document named, whose answer to each command on stdin is printed")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	argv = fs.Args()
 	if len(argv) == 0 {
 		return errors.New("name at least one policy document")
+	}
+	if *route != "" && len(argv) != 1 {
+		return errors.New("-exec answers by one document's route: name one document")
 	}
 	// Nothing is dialled and nothing resolved: the host's addresses and its
 	// resolver are no part of whether a document holds together, and a build
@@ -342,6 +357,9 @@ func runCheck(argv []string) error {
 		if err := store.Check(path, deps); err != nil {
 			return err
 		}
+	}
+	if *route != "" {
+		return decideCommands(argv[0], *route, os.Stdin, os.Stdout)
 	}
 	return nil
 }
@@ -545,9 +563,9 @@ func runSteering(argv []string) error {
 	fmt.Printf("service %v\n", p.Service)
 	fmt.Printf("mark %#x, route table %d\n", p.Mark, p.RouteTable)
 	if p.HasRelaySets() {
-		fmt.Printf("relay sets inet %s relay4, relay6, filled by steer from a Docker route\n", p.Table)
+		fmt.Printf("relay sets inet %s relay4, relay6, filled by steer from a Docker route and SSH routes\n", p.Table)
 	} else {
-		fmt.Println("no relay sets: a session with a Docker route is refused; rebuild the file with this frisket")
+		fmt.Println("no relay sets: a session with a Docker route or an SSH route is refused; rebuild the file with this frisket")
 	}
 	for _, part := range []struct {
 		name  string

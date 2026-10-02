@@ -177,14 +177,16 @@ func (d *Daemon) handle(c *net.UnixConn) {
 			resp.Error = "open without a session"
 			break
 		}
-		cert, relay, err := d.Open(*req.Session, files)
+		opened, err := d.Open(*req.Session, files)
 		if err != nil {
 			resp.Error = err.Error()
 		}
-		resp.CACert = cert
-		for _, r := range relay {
+		resp.CACert = opened.CACert
+		for _, r := range opened.Relay {
 			resp.Relay = append(resp.Relay, r.String())
 		}
+		resp.SSHKnownHosts = opened.SSHKnownHosts
+		resp.SSHConfig = opened.SSHConfig
 	case control.OpClose:
 		control.CloseAll(files)
 		closed, err := d.Close(req.Name)
@@ -212,10 +214,8 @@ func (d *Daemon) handle(c *net.UnixConn) {
 // exists -- so the caller's next step, the rules, never lands on a session a
 // crash could lose.
 //
-// Returns the certificate of the session's CA, made here, for the caller to
-// put in the sandbox, and the destinations its ruleset is to steer to frisket
-// for its Docker project's ports, which are none without a Docker route.
-func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, relay []netip.AddrPort, err error) {
+// Returns what steer puts in the sandbox and its ruleset: see Opened.
+func (d *Daemon) Open(info control.Session, files []*os.File) (_ Opened, err error) {
 	defer func() {
 		if err != nil {
 			control.CloseAll(files)
@@ -223,11 +223,11 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, re
 		}
 	}()
 	if err := info.Validate(); err != nil {
-		return nil, nil, err
+		return Opened{}, err
 	}
 	policy, release, err := d.Policies.Open(info.Policy)
 	if err != nil {
-		return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
+		return Opened{}, fmt.Errorf("session %s: %w", info.Name, err)
 	}
 	// Released here unless a session came to hold it.
 	held := false
@@ -238,20 +238,20 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, re
 	}()
 	specs, err := parseSpecs(info.Listeners)
 	if err != nil {
-		return nil, nil, err
+		return Opened{}, err
 	}
 	if len(files) != len(specs) {
-		return nil, nil, fmt.Errorf("session %s: %d descriptors for %d listeners", info.Name, len(files), len(specs))
+		return Opened{}, fmt.Errorf("session %s: %d descriptors for %d listeners", info.Name, len(files), len(specs))
 	}
 
 	d.mu.Lock()
 	if d.sessions == nil {
 		d.mu.Unlock()
-		return nil, nil, errors.New("frisket is stopping")
+		return Opened{}, errors.New("frisket is stopping")
 	}
 	if _, dup := d.sessions[info.Name]; dup {
 		d.mu.Unlock()
-		return nil, nil, fmt.Errorf("session %s is already open", info.Name)
+		return Opened{}, fmt.Errorf("session %s is already open", info.Name)
 	}
 	// Reserved while it is being built, so two opens of one name cannot both
 	// get past the check above.
@@ -273,35 +273,35 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, re
 	infos := make([]sockInfo, len(specs))
 	for i, spec := range specs {
 		if infos[i], err = inspect(files[i]); err != nil {
-			return nil, nil, fmt.Errorf("session %s: %s: %w", info.Name, spec, err)
+			return Opened{}, fmt.Errorf("session %s: %s: %w", info.Name, spec, err)
 		}
 		if err := infos[i].matches(spec); err != nil {
-			return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
+			return Opened{}, fmt.Errorf("session %s: %w", info.Name, err)
 		}
 	}
 	if err := sameForeignNamespace(specs, infos, d.own); err != nil {
-		return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
+		return Opened{}, fmt.Errorf("session %s: %w", info.Name, err)
 	}
 
 	// The handlers before the record, because the record carries the CA the
 	// policy makes with them.
 	h, err := d.handlers(info, policy, nil)
 	if err != nil {
-		return nil, nil, err
+		return Opened{}, err
 	}
 	// Refused before anything is stored, as everything above is.
-	if err := relayPorts(info.Name, specs, h.Docker); err != nil {
-		return nil, nil, err
+	if err := steered(info, specs, h); err != nil {
+		return Opened{}, err
 	}
 	meta, err := newRecord(info, h.Authority)
 	if err != nil {
-		return nil, nil, err
+		return Opened{}, err
 	}
 	stored := false
 	if d.Notify != nil {
 		if err := d.Notify.Store(info.Name, append(append([]*os.File{}, files...), meta)...); err != nil {
 			meta.Close()
-			return nil, nil, fmt.Errorf("session %s: storing its listeners with systemd: %w", info.Name, err)
+			return Opened{}, fmt.Errorf("session %s: storing its listeners with systemd: %w", info.Name, err)
 		}
 		stored = true
 	}
@@ -313,7 +313,7 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, re
 		if stored {
 			_ = d.Notify.Remove(info.Name)
 		}
-		return nil, nil, fmt.Errorf("session %s: %w", info.Name, err)
+		return Opened{}, fmt.Errorf("session %s: %w", info.Name, err)
 	}
 	s := &session{info: info, log: d.Log, socks: socks, meta: meta, release: release}
 	held = true
@@ -322,7 +322,7 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, re
 		if stored {
 			_ = d.Notify.Remove(info.Name)
 		}
-		return nil, nil, err
+		return Opened{}, err
 	}
 	d.Log.Info("session opened",
 		"session", info.Name,
@@ -332,7 +332,7 @@ func (d *Daemon) Open(info control.Session, files []*os.File) (caCert []byte, re
 		"listeners", info.Listeners,
 		"stored", stored,
 	)
-	return h.CACert, relayOf(h.Docker), nil
+	return opened(h), nil
 }
 
 // handlers asks the policy for the session's handlers and its CA.
@@ -347,15 +347,53 @@ func (d *Daemon) handlers(info control.Session, policy Policy, authority []byte)
 	if len(h.Authority) == 0 || len(h.CACert) == 0 {
 		return Handlers{}, fmt.Errorf("session %s: policy %s gave the session no CA", info.Name, info.Policy)
 	}
+	// Destinations steered with nothing to serve them would reach Egress,
+	// which refuses a private address; a handler with nothing steered to it
+	// would be unreachable. Either is the policy's mistake, said here.
+	if (h.SSH == nil) != (h.SSHRoutes == nil) {
+		return Handlers{}, fmt.Errorf("session %s: policy %s gave the session SSH routes without their handler, or a handler without them", info.Name, info.Policy)
+	}
+	if sr := h.SSHRoutes; sr != nil && (len(sr.Destinations) == 0 || len(sr.KnownHosts) == 0 || len(sr.Config) == 0) {
+		return Handlers{}, fmt.Errorf("session %s: policy %s gave the session SSH routes with no destinations or no files for the sandbox", info.Name, info.Policy)
+	}
 	return h, nil
 }
 
-// relayOf is how Open answers with a session's relay destinations.
-func relayOf(dk *Docker) []netip.AddrPort {
-	if dk == nil {
-		return nil
+// Opened is what Open answers a session with, for steer to put in the
+// sandbox and its ruleset.
+type Opened struct {
+	// CACert is the certificate of the session's CA, made here.
+	CACert []byte
+	// Relay are the destinations its ruleset is to steer to frisket: its
+	// Docker project's ports, then its SSH routes'. None without either.
+	Relay []netip.AddrPort
+	// SSHKnownHosts and SSHConfig are the sandbox's files for its SSH
+	// routes, and nil without one.
+	SSHKnownHosts []byte
+	SSHConfig     []byte
+}
+
+// opened is how Open answers with a session's handlers.
+func opened(h Handlers) Opened {
+	o := Opened{CACert: h.CACert}
+	if h.Docker != nil {
+		o.Relay = append(o.Relay, h.Docker.Relay...)
 	}
-	return dk.Relay
+	if sr := h.SSHRoutes; sr != nil {
+		o.Relay = append(o.Relay, sr.Destinations...)
+		o.SSHKnownHosts, o.SSHConfig = sr.KnownHosts, sr.Config
+	}
+	return o
+}
+
+// steered refuses a session whose ruleset would steer, for its relay or its
+// SSH routes, what the session's own listeners or DNS or frisket's service
+// address already are.
+func steered(info control.Session, specs []nsnet.Spec, h Handlers) error {
+	if err := relayPorts(info.Name, specs, h.Docker); err != nil {
+		return err
+	}
+	return sshDestinations(info, specs, h.SSHRoutes)
 }
 
 // relayPorts refuses a relay destination on a port the session's own
@@ -375,6 +413,36 @@ func relayPorts(name string, specs []nsnet.Spec, dk *Docker) error {
 		for _, spec := range specs {
 			if spec.Addr.Port() == r.Port() {
 				return fmt.Errorf("session %s: docker port %d is the port of its listener %s", name, r.Port(), spec)
+			}
+		}
+	}
+	return nil
+}
+
+// sshDestinations refuses an SSH route at DNS's port, at one of the
+// session's listeners, or at its service address: the store already keeps a
+// route off loopback and off the default service address, and this is the
+// same check against the addresses the session was really given. A route
+// there would be taken by DNS or Intercept, whose cases come first, or be a
+// connection steer.Classify refuses as frisket's own -- and Classify's
+// soundness rests on no listener's address being steered.
+func sshDestinations(info control.Session, specs []nsnet.Spec, sr *SSHRoutes) error {
+	if sr == nil {
+		return nil
+	}
+	for _, r := range sr.Destinations {
+		a := r.Addr().Unmap().WithZone("")
+		if r.Port() == DNSPort {
+			return fmt.Errorf("session %s: ssh route %s is at DNS's port, which every session steers to frisket's resolver", info.Name, r)
+		}
+		for _, spec := range specs {
+			if spec.Addr.Port() == r.Port() && spec.Addr.Addr().Unmap().WithZone("") == a {
+				return fmt.Errorf("session %s: ssh route %s is its listener %s", info.Name, r, spec)
+			}
+		}
+		for _, svc := range info.Service {
+			if svc.Unmap().WithZone("") == a {
+				return fmt.Errorf("session %s: ssh route %s is at frisket's service address", info.Name, r)
 			}
 		}
 	}
@@ -569,7 +637,7 @@ func (d *Daemon) adoptOne(name string, files []*os.File) (err error) {
 		meta.Close()
 		return err
 	}
-	if err := relayPorts(name, specs, h.Docker); err != nil {
+	if err := steered(info, specs, h); err != nil {
 		control.CloseAll(ordered)
 		meta.Close()
 		return err

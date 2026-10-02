@@ -56,8 +56,10 @@ const (
 // believes were delivered.
 const MaxDescriptors = 8
 
-// maxMessage bounds a request. Parameters are a handful of short strings.
-const maxMessage = 64 << 10
+// MaxMessage bounds a request, and an answer. Parameters are a handful of
+// short strings; the largest answer is Open's, whose SSH files and relay grow
+// with a document's SSH routes, which the document's own check bounds to fit.
+const MaxMessage = 64 << 10
 
 // Session is everything a session is, fixed at creation by root. AUTHORISATION
 // IS BY LISTENER (PLAN.md decision 8): which socket a connection arrived on is
@@ -117,10 +119,16 @@ type Response struct {
 	// the sandbox for it to trust. Public; the key never leaves the daemon.
 	CACert []byte `json:"caCert,omitempty"`
 	// Relay are the destinations the session's ruleset is to steer to
-	// frisket for its Docker project's ports (OpOpen), each "addr:port" as
-	// netip.AddrPort spells it: "127.0.0.1:64320", "[::1]:64320". Empty for a
-	// session with no Docker route.
+	// frisket (OpOpen) for its Docker project's ports and its SSH routes,
+	// each "addr:port" as netip.AddrPort spells it: "127.0.0.1:64320",
+	// "[::1]:64320", "10.0.0.5:22". Empty for a session with neither.
 	Relay []string `json:"relay,omitempty"`
+	// SSHKnownHosts and SSHConfig are the sandbox's ssh_known_hosts -- the
+	// session's SSH CA, public -- and its ssh_config fragment, a Host block
+	// per route (OpOpen): what root puts beside the CA. Empty for a session
+	// with no SSH route.
+	SSHKnownHosts []byte `json:"sshKnownHosts,omitempty"`
+	SSHConfig     []byte `json:"sshConfig,omitempty"`
 }
 
 // ValidName refuses a name that cannot be an fd store name or a log field:
@@ -233,10 +241,16 @@ func Call(ctx context.Context, path string, req Request, files []*os.File) (Resp
 		return Response{}, fmt.Errorf("sending %s to frisket: %w", req.Op, err)
 	}
 
-	buf := make([]byte, maxMessage)
+	// A byte more than an answer may be: a seqpacket read cuts a longer
+	// message to the buffer and says nothing, and an answer cut short would
+	// otherwise fail as JSON, saying nothing of why.
+	buf := make([]byte, MaxMessage+1)
 	n, err := uc.Read(buf)
 	if err != nil {
 		return Response{}, fmt.Errorf("reading frisket's answer to %s: %w", req.Op, err)
+	}
+	if n > MaxMessage {
+		return Response{}, fmt.Errorf("frisket's answer to %s is larger than %d bytes", req.Op, MaxMessage)
 	}
 	var resp Response
 	if err := json.Unmarshal(buf[:n], &resp); err != nil {
@@ -260,7 +274,7 @@ func ReadRequest(uc *net.UnixConn) (Request, []*os.File, error) {
 	if err != nil {
 		return Request{}, nil, err
 	}
-	buf := make([]byte, maxMessage)
+	buf := make([]byte, MaxMessage)
 	oob := make([]byte, unix.CmsgSpace(4*MaxDescriptors))
 	var n, oobn, flags int
 	var recvErr error
@@ -304,7 +318,7 @@ func ReadRequest(uc *net.UnixConn) (Request, []*os.File, error) {
 		return fail(fmt.Errorf("more than %d descriptors on one request", MaxDescriptors))
 	}
 	if flags&unix.MSG_TRUNC != 0 {
-		return fail(fmt.Errorf("request larger than %d bytes", maxMessage))
+		return fail(fmt.Errorf("request larger than %d bytes", MaxMessage))
 	}
 	var req Request
 	if err := json.Unmarshal(buf[:n], &req); err != nil {

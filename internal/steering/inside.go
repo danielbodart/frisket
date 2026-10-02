@@ -142,7 +142,7 @@ func ipNet(p netip.Prefix) *net.IPNet {
 const (
 	opApply   = "apply"   // make Steps, in order, stopping at the first that fails
 	opRuleset = "ruleset" // load Ruleset with the nft at Nft
-	opMount   = "mount"   // put CACert, and a bundle of Roots with it, at Dir in the mount namespace at Mntns
+	opMount   = "mount"   // put CACert, a bundle of Roots with it and any SSH files, at Dir in the mount namespace at Mntns
 	opTable   = "table"   // is table inet Name loaded?
 	opRules   = "rules"   // V6's family's rules, as []ruleInfo
 	opRoutes  = "routes"  // V6's family's routes in Table, as []routeInfo
@@ -163,6 +163,10 @@ type request struct {
 	// Roots is the host's bundle by its path, read by the helper: it is half
 	// a megabyte, and sent as JSON, decoding it was 6 ms (measured).
 	Roots string `json:"roots,omitempty"`
+	// SSHKnownHosts and SSHConfig are the session's SSH files, put beside the
+	// CA only when it has SSH routes.
+	SSHKnownHosts []byte `json:"sshKnownHosts,omitempty"`
+	SSHConfig     []byte `json:"sshConfig,omitempty"`
 	// Entered is a helper that nsenter put in the sandbox's user namespace,
 	// whose tmpfs is made after entering the mount namespace
 	// (nsmount.AttachEntered); root's is made before.
@@ -202,7 +206,7 @@ func Serve(raw json.RawMessage) (any, error) {
 	case opRuleset:
 		return nil, loadRuleset(r.Nft, r.Ruleset)
 	case opMount:
-		files, err := caFiles(r.Roots, r.CACert)
+		files, err := caFiles(r.Roots, r.CACert, r.SSHKnownHosts, r.SSHConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -223,8 +227,10 @@ func Serve(raw json.RawMessage) (any, error) {
 }
 
 // caFiles are what the sandbox is given: the session's CA, and the bundle of
-// the host's roots with it.
-func caFiles(roots string, cert []byte) ([]nsmount.File, error) {
+// the host's roots with it, and its SSH routes' two files if it has any. A
+// session without them gets neither file, so ssh in it finds nothing to
+// include and nothing to trust, rather than an empty pair.
+func caFiles(roots string, cert, knownHosts, sshConfig []byte) ([]nsmount.File, error) {
 	pem, err := os.ReadFile(roots)
 	if err != nil {
 		return nil, fmt.Errorf("the host's roots: %w", err)
@@ -233,7 +239,14 @@ func caFiles(roots string, cert []byte) ([]nsmount.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", roots, err)
 	}
-	return []nsmount.File{{Name: CACertFile, Data: cert}, {Name: CABundleFile, Data: bundle}}, nil
+	files := []nsmount.File{{Name: CACertFile, Data: cert}, {Name: CABundleFile, Data: bundle}}
+	if len(knownHosts) > 0 || len(sshConfig) > 0 {
+		if len(knownHosts) == 0 || len(sshConfig) == 0 {
+			return nil, errors.New("an SSH route's known_hosts without its ssh_config, or the other way round")
+		}
+		files = append(files, nsmount.File{Name: SSHKnownHostsFile, Data: knownHosts}, nsmount.File{Name: SSHConfigFile, Data: sshConfig})
+	}
+	return files, nil
 }
 
 // loadRuleset runs nft from inside, where the helper is: a child of this

@@ -10,6 +10,7 @@ go 1.26.0
 require (
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/vishvananda/netlink v1.3.1
+	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0
 	pgregory.net/rapid v1.3.0

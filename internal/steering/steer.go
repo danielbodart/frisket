@@ -17,11 +17,15 @@ import (
 )
 
 // Where a session's CA is, inside the sandbox: a read-only tmpfs of its own
-// at CADir, holding the certificate and the bundle.
+// at CADir, holding the certificate and the bundle -- and, for a session with
+// SSH routes, the SSH CA as ssh_known_hosts reads it and an ssh_config
+// fragment naming the routes.
 const (
-	CADir        = "/etc/frisket"
-	CACertFile   = "ca.crt"
-	CABundleFile = "ca-bundle.crt"
+	CADir             = "/etc/frisket"
+	CACertFile        = "ca.crt"
+	CABundleFile      = "ca-bundle.crt"
+	SSHKnownHostsFile = "ssh_known_hosts"
+	SSHConfigFile     = "ssh_config"
 )
 
 // Steerer runs the launcher's steps. The zero value's seams are the real ones; tests
@@ -184,23 +188,35 @@ func (s *Steerer) Steer(ctx context.Context, netns string, p *Plan, sess Session
 	}
 
 	// 4. The session's CA, in the sandbox: the certificate the daemon made
-	// for it, and the host's roots with it, on a read-only tmpfs of their own.
-	// Before the payload starts, which waits for this hook; a sandbox that
-	// cannot be given its CA is closed rather than run distrusting it.
+	// for it, and the host's roots with it, on a read-only tmpfs of their own
+	// -- with the SSH CA and the routes' ssh_config beside them when the
+	// session has SSH routes. Before the payload starts, which waits for this
+	// hook; a sandbox that cannot be given its CA is closed rather than run
+	// distrusting it.
 	if len(opened.CACert) == 0 {
 		return closeOnFailure("putting the CA in the sandbox", errors.New("frisket made the session no CA"))
 	}
-	if err := in.Do(ctx, request{Op: opMount, Mntns: sess.Mntns, Dir: CADir, Entered: s.Helper.Rootless(), CACert: opened.CACert, Roots: sess.Roots}, nil); err != nil {
+	if (len(opened.SSHKnownHosts) == 0) != (len(opened.SSHConfig) == 0) {
+		return closeOnFailure("putting the CA in the sandbox", errors.New("frisket gave the session's SSH routes one of their two files"))
+	}
+	mount := request{
+		Op: opMount, Mntns: sess.Mntns, Dir: CADir, Entered: s.Helper.Rootless(),
+		CACert: opened.CACert, Roots: sess.Roots,
+		SSHKnownHosts: opened.SSHKnownHosts, SSHConfig: opened.SSHConfig,
+	}
+	if err := in.Do(ctx, mount, nil); err != nil {
 		return closeOnFailure("putting the CA in the sandbox", err)
 	}
 	return nil
 }
 
 // ErrNoRelaySets is a steering file from before the relay, asked to steer a
-// session that has one.
+// session that has a Docker or an SSH route.
 var ErrNoRelaySets = errors.New("the steering file has no relay sets; rebuild it with this frisket")
 
-// WithRelay is the ruleset with the relay's destinations added to its sets,
+// WithRelay is the ruleset with the relay's destinations added to its sets --
+// a Docker project's ports and SSH routes' addresses alike, which the sets
+// only steer to frisket and Dispatch tells apart --
 // so one `nft -f` loads the rules and what they steer together, and nothing
 // is ever loaded that steers half of it. With no destinations it is the
 // ruleset, byte for byte. Each destination is parsed, not pasted: it goes
@@ -244,7 +260,8 @@ func (p *Plan) WithRelay(relay []string) (string, error) {
 
 // HasRelaySets is whether the ruleset declares the relay's two sets, as
 // lib.steering has since the relay: a file built before it steers no Docker
-// port, and a session that has some is refused rather than left without them.
+// port or SSH route, and a session with either is refused rather than left
+// without them.
 func (p *Plan) HasRelaySets() bool {
 	return relay4Set.MatchString(p.Ruleset) && relay6Set.MatchString(p.Ruleset)
 }

@@ -75,3 +75,21 @@ func TestAPreviewStopsWhenTheClientDoes(t *testing.T) {
 		t.Fatal("no error when the client went")
 	}
 }
+
+// From the start, a stream that sends nothing at all is previewed empty once
+// it has been idle -- ssh's stdin, held open and silent -- and what it sends
+// later still follows in the rest.
+func TestAPreviewFromTheStartEndsOnAStreamThatNeverSends(t *testing.T) {
+	pr, pw := io.Pipe()
+	head, more, rest, err := Preview(context.Background(), pr, 20*time.Millisecond, true)
+	if err != nil || len(head) != 0 || !more {
+		t.Fatalf("head %q, more %v, %v", head, more, err)
+	}
+	go func() {
+		_, _ = pw.Write([]byte("late"))
+		_ = pw.Close()
+	}()
+	if b, err := io.ReadAll(rest); err != nil || string(b) != "late" {
+		t.Fatalf("rest %q, %v", b, err)
+	}
+}

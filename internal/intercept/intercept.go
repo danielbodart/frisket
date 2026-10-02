@@ -134,10 +134,22 @@ type Question struct {
 	// in which case nothing is borrowed to describe it.
 	Operation *Operation `json:"operation,omitempty"`
 	// Operations are every operation the request holds, where it holds more
-	// than one: a GraphQL request with several fields at its root. Operation
-	// is the one that decided, the strictest; a field no rule names is in the
-	// body, and in none of these.
+	// than one: a GraphQL request with several fields at its root, or an SSH
+	// command with several simple commands. Operation is the one that
+	// decided, the strictest; a field no rule names is in the body, and a
+	// simple command no rule names in Command, and neither in these.
 	Operations []*Operation `json:"operations,omitempty"`
+	// Kind is what is asked about: empty for an HTTP request, as every
+	// question was before there was anything else, and "ssh" for a command
+	// on an SSH route -- whose Host is the route's name, with no Method or
+	// Path, and whose Body is the start of the command's stdin.
+	Kind string `json:"kind,omitempty"`
+	// Address is the SSH route's upstream, ip:port, and User who the
+	// command runs as there.
+	Address string `json:"address,omitempty"`
+	User    string `json:"user,omitempty"`
+	// Command is the command exactly as the workload sent it.
+	Command string `json:"command,omitempty"`
 }
 
 // Config is everything an Interceptor needs.
@@ -806,23 +818,38 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 		q.BodyLength = max(r.ContentLength, 0)
 		r.Body = rest
 	}
-	ok, err := i.asker.Ask(r.Context(), q)
-	switch {
-	case r.Context().Err() != nil:
-		// Nobody is waiting for the answer, so there is nothing to admit and
-		// nothing wrong with the asker.
-		return ReasonStoppedWaiting
-	case errors.Is(err, ErrBusy):
-		return ReasonBusy
-	case err != nil:
+	reason, err := AskAbout(r.Context(), i.asker, q)
+	if err != nil {
 		// Said in the log where it happened, not in the request's line: the
 		// error is the asker's, and may quote whatever it was sent.
 		i.log.Error("ask", "session", ic.session, "conn", ic.id, "route", ic.route.Name, "error", err.Error())
-		return ReasonAskFailed
-	case !ok:
-		return ReasonDeclined
 	}
-	return ""
+	return reason
+}
+
+// AskAbout puts q to a, and returns why what it asks about is refused, or ""
+// if it was admitted: the one reading of an Asker's answer, for everything
+// that asks. err is the asker's own failure, set only with ReasonAskFailed,
+// for the caller to log on a line of its own -- it may quote whatever the
+// asker was sent. ctx is the asking side's lifetime.
+func AskAbout(ctx context.Context, a Asker, q Question) (reason string, err error) {
+	if a == nil {
+		return ReasonNobodyToAsk, nil
+	}
+	ok, err := a.Ask(ctx, q)
+	switch {
+	case ctx.Err() != nil:
+		// Nobody is waiting for the answer, so there is nothing to admit and
+		// nothing wrong with the asker.
+		return ReasonStoppedWaiting, nil
+	case errors.Is(err, ErrBusy):
+		return ReasonBusy, nil
+	case err != nil:
+		return ReasonAskFailed, err
+	case !ok:
+		return ReasonDeclined, nil
+	}
+	return "", nil
 }
 
 // rewrite is the only place a credential is put on a request.

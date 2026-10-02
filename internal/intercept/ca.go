@@ -130,11 +130,18 @@ func newCA(cert *x509.Certificate, key crypto.Signer) *CA {
 // It is the key, so it goes where the key may go -- the session's record --
 // and nowhere else.
 func (ca *CA) Marshal() ([]byte, error) {
-	der, err := x509.MarshalPKCS8PrivateKey(ca.key)
+	der, err := ca.KeyPKCS8()
 	if err != nil {
 		return nil, err
 	}
 	return append(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), ca.certPEM...), nil
+}
+
+// KeyPKCS8 is the CA's key, PKCS#8 DER: the key block of what Marshal
+// writes, the same bytes for a CA made here and for one ParseCA read back,
+// for whatever is derived from the key. Like Marshal, it is the key.
+func (ca *CA) KeyPKCS8() ([]byte, error) {
+	return x509.MarshalPKCS8PrivateKey(ca.key)
 }
 
 // ParseCA reads back what Marshal wrote, for a session restored across a
