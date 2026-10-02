@@ -754,7 +754,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			// put on it if it carries the placeholder, since the person
 			// recording is driving.
 			v.Outcome, v.Reason = Admit, RuleRecorded
-		} else if v.Outcome == Refuse {
+		} else if v.Outcome == Refuse && hard(v.Reason) {
 			i.recorder.Hard(httpLine(ic, r, v), httpKey(ic.route.Name, r.Method, r.URL.EscapedPath(), v), v.Reason)
 		}
 	}

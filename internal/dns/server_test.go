@@ -921,3 +921,45 @@ func TestARecordingSessionResolvesANameNotAllowedApart(t *testing.T) {
 		t.Fatalf("a name not allowed was intercepted: %v", line)
 	}
 }
+
+// A name that resolved to nothing -- an NXDOMAIN, every search-list
+// expansion and typo -- is no name to write down, though it was looked up.
+func TestARecordingSessionIsToldOnlyOfANameThatResolved(t *testing.T) {
+	var told []string
+	f := newFixture(t, func(c *Config) {
+		c.Unlisted = &fakeRecorder{}
+		c.OnUnlisted = func(n string) { told = append(told, n) }
+	})
+	_, line := f.ask(t, query(t, 9, "typo.example.", dnsmessage.TypeA, false))
+	if line["decision"] != DecisionUnlisted {
+		t.Fatalf("line %v", line)
+	}
+	if len(told) != 0 {
+		t.Fatalf("told %v", told)
+	}
+}
+
+// A recording session that refuses what its policy refuses looks nothing
+// up that its policy would not, and is told the name refused.
+func TestARecordingSessionRefusingLooksNothingUp(t *testing.T) {
+	var told []string
+	f := newFixture(t, func(c *Config) {
+		c.OnRefused = func(n string) { told = append(told, n) }
+	})
+	f.up.answers["unlisted.example"] = func(q dnsmessage.Question) []dnsmessage.Resource {
+		return []dnsmessage.Resource{rrA(q.Name, "198.51.100.7", 60)}
+	}
+	m, _ := f.ask(t, query(t, 9, "unlisted.example.", dnsmessage.TypeA, false))
+	if m.RCode != dnsmessage.RCodeNameError {
+		t.Fatalf("reply = %+v", m)
+	}
+	f.up.mu.Lock()
+	asked := len(f.up.asked)
+	f.up.mu.Unlock()
+	if asked != 0 {
+		t.Fatalf("looked up %d names", asked)
+	}
+	if len(told) != 1 || told[0] != "unlisted.example" {
+		t.Fatalf("told %v", told)
+	}
+}

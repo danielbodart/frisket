@@ -430,8 +430,16 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 			// policy does not allow is never in the allowlist egress
 			// admits by, only in what the recording decides about.
 			unlisted := egress.NewResolved(egress.ResolvedConfig{})
-			dc.Unlisted = unlisted
-			dc.OnUnlisted = func(n string) { rec.Resolved(s.Name, n) }
+			if rec.Default() == record.Refuse {
+				// Refusing whatever the policy refuses, nothing is
+				// looked up that the policy would not look up: a name
+				// off the allowlist is written down and stays on the
+				// host, and DNS is no channel out.
+				dc.OnRefused = func(n string) { rec.Unresolved(s.Name, n) }
+			} else {
+				dc.Unlisted = unlisted
+				dc.OnUnlisted = func(n string) { rec.Resolved(s.Name, n) }
+			}
 			eg.Record = &egress.Recording{Recorder: rec, Unlisted: unlisted, Asker: d.Asker, Workspace: s.Params["workspace"]}
 		}
 		srv, err := dns.New(dc)
@@ -948,9 +956,10 @@ func Dialer() (*egress.Classifier, *egress.Dialer, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// The host's routers, which a recording session's destination on the
-	// local network may never be.
-	c = c.WithGateways(egress.NewGateways(0))
+	// The host's routers, and the networks only the host is on -- its
+	// containers' bridges, its tunnels -- which a recording session's
+	// destination on the local network may never be.
+	c = c.WithGateways(egress.NewGateways(0)).WithHostNetworks(egress.NewHostNetworks(0))
 	// The default resolver, which in a static binary is Go's own, reading the
 	// host's resolv.conf: an upstream named in a route is the operator's
 	// choice, resolved as the host resolves it, and Control checks whatever

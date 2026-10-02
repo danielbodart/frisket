@@ -23,8 +23,8 @@ otherwise; nothing in a project's own files can ask for it.
 }
 ```
 
-- `default` is `allow`, `ask` or `refuse`: the answer to every subject, with
-  nobody asked. `allow` and `ask` both let it through now and differ only in
+- `default` is `allow`, `ask` or `refuse`: the answer to every subject but
+  the local network's (below), with nobody asked. `allow` and `ask` both let it through now and differ only in
   what is recorded -- a grant entry that allows, or one that asks. `refuse`
   refuses it, as the policy would have, and records that. Absent or empty,
   each subject is put to the asker (below), and the person's answer does the
@@ -33,8 +33,9 @@ otherwise; nothing in a project's own files can ask for it.
 - `sink` is a file the lines are appended to as well as the journal, which
   rate-limits: by its absolute path, directly in the daemon's
   `-record-dir` -- `/var/lib/frisket/records` under the NixOS module. It is
-  created 0600, not followed if it is a link, and bounded at 64 MiB, after
-  which one `{"truncated": true}` line ends it. Absent, the journal alone.
+  created 0600, not followed if it is a link, refused if it has another name
+  (a hard link), and bounded at 64 MiB, after which one `{"truncated": true}`
+  line ends it. Absent, the journal alone.
 
 ## What a recording decides
 
@@ -44,18 +45,34 @@ Everything a policy decides by its rules:
   refusal or question, a request no rule matches, a git push, a GraphQL
   field, and what a GraphQL request does that frisket cannot see. Guarded
   operations included: recording is manual mode.
-- **an SSH route's command** the rules refuse or ask about.
-- **a connection to a name off the allowlist.** The session's DNS resolves
-  every name while recording -- the answer kept apart from the allowlist's,
-  in a set of its own -- so that a connection to one can be decided by the
-  name and port it was for.
+- **an SSH route's command** the rules refuse or ask about, where they can
+  read it.
+- **a connection to a name off the allowlist.** With a default of `allow` or
+  `ask`, or none, the session's DNS resolves every name while recording --
+  the answer kept apart from the allowlist's, in a set of its own -- so that
+  a connection to one can be decided by the name and port it was for. That
+  is DNS out of the host for every name the sandbox asks for, whatever is
+  then answered: a person refusing everything has still let the names leave.
+  With a default of `refuse` nothing is looked up that the policy would not
+  look up: a name off the allowlist is refused at DNS, as in any session,
+  and written down as `telemetry`, `answer` `refuse`, `reason` `not looked
+  up`.
 - **a connection to the local network, by name**: a private (RFC 1918),
   unique-local or link-local address that the session's DNS gave for any
-  name, allowed or not. Not the host's own addresses, not a router the host's
-  routing tables name, not a cloud's metadata service, and never loopback,
-  CGNAT, multicast or an address written inside a v6 one: those stay
-  structural refusals. A v6 link-local address resolved by name has no zone,
-  and so cannot be dialled.
+  name, allowed or not. Never by the default: each is put to a person, with
+  a default as without one, and with nobody to ask it is refused for want
+  of an answer. A name is no boundary -- a public wildcard DNS service gives
+  one for any address -- so a default would be an answer for whatever the
+  sandbox chose. Not the host's own addresses, not a router the host's
+  routing tables name (a route's gateway, each of a multipath route's), not
+  a network only the host is on -- the destination of a route by an
+  interface with no device behind it: a Docker, podman or libvirt bridge,
+  a veth, a tunnel or VPN, a bond or VLAN too, failing closed -- not a
+  cloud's metadata service, and never loopback, CGNAT, multicast or an
+  address written inside a v6 one: those stay structural refusals. A host
+  whose routes cannot be read, or that routes by nexthop objects alone,
+  reaches no LAN address. A v6 link-local address resolved by name has no
+  zone, and so cannot be dialled.
 
 What the policy allows is served as ever, silently, and logged as ever.
 
@@ -76,14 +93,27 @@ stands for the rest of the session, a refusal as much as an admission: a
 second request for the same operation, the same command, or the same name and
 port is answered the same, with nothing asked and nothing written. Two at
 once wait for one answer. The want of an answer -- the asker failing, the
-client gone -- is not remembered, and the next time asks again. Answers are
+client gone, a connection closed while its question is open -- is not
+remembered, and the next time asks again.
+
+Except where a person answered `ask`, which is what it says: each later
+request of the subject is put to them again, as a grant's ask would be, with
+what that one carries. And except where the subject does not hold all that
+was decided -- an exec route's command, whose stdin is no part of it, and a
+GraphQL request frisket could not read whole, keyed by its path and why --
+which is put to the person every time, whatever they answered. An answer
+then that differs from the remembered one replaces it and is written down,
+so a subject's last line is its answer. A default answers each the same. Answers are
 kept in the daemon's memory alone: a session restored after a restart starts
 with none, and its sink goes on.
 
 ## What a recording never overrides
 
 Each is refused as in any session, and written down with `source` `hard`
-where there is a subject to name:
+where there is a subject to name. A refusal for want of something that may
+be there next time -- a body the client stopped sending, a Docker daemon
+that could not say whose an object is, an object that does not exist -- is
+not written down at all: it says nothing of what a grant could change.
 
 - every structural refusal but the local network's above, and every address
   dialled by itself: a literal IP, or an answer held past its life, has no
@@ -93,8 +123,14 @@ where there is a subject to name:
   method, a path that is not canonical;
 - anything on a Docker route: its refusals keep a session to its own
   project, and its questions go to the asker as in any session;
+- a git request git would never send -- a POST with a query, a ref
+  advertisement whose `service` is missing, doubled or unknown -- which can
+  only be one the upstream reads otherwise;
 - a command a shell route cannot read -- a line break, an operator, a quote
-  -- which would be typed into a device's CLI byte for byte;
+  -- which would be typed into a device's CLI byte for byte; and on an exec
+  route, one its rules cannot read, which no rule could name: decided by the
+  route's `unmatched` as in any session, and written down as `hard` where
+  that refuses;
 - the CA: still constrained to the routes' hosts, so a name that is not a
   route's is spliced, never intercepted, and never carries a credential.
 
@@ -110,11 +146,19 @@ and `source`:
 - `unanswered`: put to the asker and refused for want of an answer, with
   `reason` saying why; never remembered;
 - `hard`: refused as in any session, with `reason`;
-- `telemetry`: a name resolved off the allowlist; nothing was decided at DNS.
+- `telemetry`: a name off the allowlist, resolved to an address -- or, with
+  a default of `refuse`, refused unlooked-up; nothing was decided at DNS. A
+  name that resolved to nothing is not written.
+
+`hard` and `telemetry` lines are bounded apart from the rest: 4096 a session,
+then to the journal alone, and never past half the sink, so a sandbox
+resolving random names or dialling every address in a range cannot crowd
+out the lines a grant is made from.
 
 `rule` is what decided for the policy: a path rule's reason (`path`,
 `refused by rule`, `out of scope`, `unmatched`, `git`, `graphql`, `push not
-allowed`), an SSH rule's pattern or `unmatched`, `not allowed` for a name off
+allowed`, `GraphQL request not classified`), an SSH rule's pattern or
+`unmatched`, `not allowed` for a name off
 the allowlist, or `structural: private` (`unique-local`, `link-local`) for
 the local network. The rest depends on `kind`:
 
@@ -129,7 +173,7 @@ the local network. The rest depends on `kind`:
  "address":"104.16.1.34:443","would":"refuse","rule":"not allowed","answer":"allow","source":"default"}
 {"time":"...","session":"...","policy":"...","kind":"egress","name":"nas.lan","port":445,
  "address":"192.168.1.20:445","lan":true,"would":"refuse","rule":"structural: private",
- "answer":"allow","source":"default"}
+ "answer":"allow","source":"human"}
 {"time":"...","session":"...","policy":"...","kind":"egress","address":"203.0.113.9:443",
  "would":"refuse","rule":"not resolved by this session","answer":"refuse","source":"hard",
  "reason":"not resolved by this session"}
@@ -148,6 +192,10 @@ the local network. The rest depends on `kind`:
 - `egress`: `name` and `port`, `address` the ip:port dialled, and `lan` for
   the local network. The subject is the name and port.
 - `dns`: `name`. Once a session per name.
+
+A subject's line is written when it is first answered, and again only when a
+later answer differs (see above): the last line for a subject is its
+answer.
 
 Only metadata: never a body, a header, a query string or a command's stdin.
 
@@ -168,6 +216,7 @@ With no default, each subject is put to `services.frisket.asker` as any
 question is, with `record` set, and an `id` naming the subject within its
 session -- the same for a second asking, different for any other. A
 connection is asked about with `kind` `egress`, `host` the name and `address`
-the ip:port. The asker's answer is one of three: see
+the ip:port; its question is withdrawn when the connection's client closes
+its side, as an HTTP or SSH one is when its client goes. The asker's answer is one of three: see
 [routes.md](routes.md#asking) for how it says which. A recording session's
 questions are never refused for being busy: each waits its turn.

@@ -233,6 +233,16 @@ type Verdict struct {
 	// the daemon has answered it.
 	release func()
 
+	// structural is a refusal that is about how a request is spelled, not
+	// what it asks for -- a disagreement between frisket and the upstream
+	// about what it is -- which nothing a document says could admit, and
+	// so no recording either.
+	structural bool
+	// unseen is a GraphQL request that may run what frisket could not see:
+	// what it hides, or the whole of one frisket could not read. An answer
+	// for one is never an answer for the next.
+	unseen bool
+
 	// deferred is what decides from the request's body, before it is read:
 	// a GraphQL endpoint, say. Such a verdict refuses until deferred.decide
 	// replaces it.
@@ -751,7 +761,9 @@ func (g *GitScope) decide(method string, segs []string, rawQuery string) (Verdic
 		return Verdict{}, false
 	}
 	admit := Verdict{Outcome: Admit, Reason: "git"}
-	outOfScope := Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}
+	// Out of scope, here, whatever Unmatched says: a request git would never
+	// send, which could only be one the upstream reads otherwise.
+	outOfScope := Verdict{Outcome: Refuse, Reason: ReasonOutOfScope, structural: true}
 	rest := segs[2:]
 	switch {
 	case method == http.MethodGet && len(rest) == 2 && rest[0] == "info" && rest[1] == "refs":

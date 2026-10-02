@@ -114,7 +114,9 @@ func TestARecordingSessionRefusesByItsDefault(t *testing.T) {
 
 // With no default each subject is put to a person, the question marked as
 // a recording's; their answer is what is done and what is written down, and
-// the session does not ask about the same subject twice.
+// the session does not ask about the same subject twice -- unless the answer
+// was ask, which is a question each time, as a grant's ask would be, though
+// written down once.
 func TestARecordingSessionPutsEachSubjectToAPersonOnce(t *testing.T) {
 	j := &journal{}
 	up := newUpstream(t, nil)
@@ -138,8 +140,11 @@ func TestARecordingSessionPutsEachSubjectToAPersonOnce(t *testing.T) {
 	asker.mu.Lock()
 	questions := append([]Question(nil), asker.questions...)
 	asker.mu.Unlock()
-	if len(questions) != 3 {
-		t.Fatalf("asked %d times, want once for each of three subjects", len(questions))
+	if len(questions) != 4 {
+		t.Fatalf("asked %d times, want once for each of three subjects and again for the one answered ask", len(questions))
+	}
+	if questions[0].ID != questions[1].ID || questions[1].Path != "/v1/things/b" {
+		t.Errorf("the ask's second question %+v", questions[1])
 	}
 	for _, q := range questions {
 		if !q.Record || q.ID == "" {
@@ -147,10 +152,40 @@ func TestARecordingSessionPutsEachSubjectToAPersonOnce(t *testing.T) {
 		}
 	}
 	lines := f.journal.waitLines(t, "record", 3)
+	if len(lines) != 3 {
+		t.Fatalf("%d record lines: %v", len(lines), lines)
+	}
 	for i, w := range []string{"ask", "refuse", "allow"} {
 		if lines[i]["answer"] != w || lines[i]["source"] != "human" {
 			t.Errorf("record line %d: %v, want %s from a person", i, lines[i], w)
 		}
+	}
+}
+
+// A GraphQL request frisket could not read is keyed by its path and why, not
+// by what it would run: a person's answer for one is never one for the
+// next, though the subject is written down once.
+func TestARecordingSessionAsksAboutEachUnreadGraphQLRequest(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	asker := &answering{byMethod: map[string]recording.Answer{"POST": recording.Allow}}
+	f := newRecordingFixture(t, j, "", asker, graphqlRoute(up, t, j, Ask))
+	c := f.client(t, true)
+	for _, body := range []string{`[{"query":"{a}"}]`, `[{"query":"mutation { b }"}]`} {
+		req := newRequest(t, "POST", "https://"+apiHost+"/graphql", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if res, b := get(t, c, req); res.StatusCode != http.StatusOK {
+			t.Fatalf("%s: %d %s", body, res.StatusCode, b)
+		}
+	}
+	asker.mu.Lock()
+	n := len(asker.questions)
+	asker.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("asked %d times, want each", n)
+	}
+	if l := f.journal.waitLines(t, "record", 1); len(l) != 1 || l[0]["graphql"] != "unread: not a JSON object" {
+		t.Fatalf("record lines %v", l)
 	}
 }
 
@@ -188,6 +223,54 @@ func TestARecordingSessionStillRefusesWhatNoPolicyDecides(t *testing.T) {
 	}
 	if l := f.journal.waitLines(t, "record", 1)[0]; l["source"] != "hard" || l["reason"] != ReasonBadPath {
 		t.Fatalf("record line %v", l)
+	}
+}
+
+// A git request git would never send -- a POST with a query, a ref
+// advertisement whose service is missing, doubled or unknown -- is refused
+// before Unmatched is consulted, and no document could admit it: nor can a
+// recording, which writes it down as hard.
+func TestARecordingSessionStillRefusesAGitRequestGitWouldNotSend(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	cred, _ := tokenFile(t, j, realToken)
+	r := apiRoute(up, cred)
+	r.Scope = Scope{Git: &GitScope{Repos: []Repo{ownerRepo}, Push: Ask}}
+	f := newRecordingFixture(t, j, recording.Allow, nil, r)
+	c := f.client(t, false)
+	for _, tc := range []struct{ method, target string }{
+		{"POST", "/owner/repo.git/git-receive-pack?service=git-upload-pack"},
+		{"GET", "/owner/repo.git/info/refs?service=git-upload-pack&service=git-receive-pack"},
+		{"GET", "/owner/repo.git/info/refs?service=other"},
+	} {
+		if res, _ := get(t, c, newRequest(t, tc.method, "https://"+apiHost+tc.target, nil)); res.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s %s: %d", tc.method, tc.target, res.StatusCode)
+		}
+	}
+	if len(up.requests()) != 0 {
+		t.Fatal("sent upstream")
+	}
+	if l := f.journal.waitLines(t, "record", 1)[0]; l["source"] != "hard" || l["reason"] != ReasonOutOfScope {
+		t.Fatalf("record line %v", l)
+	}
+	// While one Unmatched refuses is the recording's.
+	if res, _ := get(t, c, newRequest(t, "GET", "https://"+apiHost+"/owner/repo/elsewhere", nil)); res.StatusCode != http.StatusOK {
+		t.Fatalf("an unmatched request: %d", res.StatusCode)
+	}
+}
+
+// What is refused for want of something that may be there next time is not
+// written down as hard: no grant is said to be unable to change it.
+func TestTransientRefusalsAreNotHard(t *testing.T) {
+	for _, r := range []string{ReasonStoppedWaiting, ReasonLookup, ReasonAbsent} {
+		if hard(r) {
+			t.Errorf("%q is hard", r)
+		}
+	}
+	for _, r := range []string{ReasonBadPath, ReasonNotOwned, ReasonOutOfScope} {
+		if !hard(r) {
+			t.Errorf("%q is not hard", r)
+		}
 	}
 }
 

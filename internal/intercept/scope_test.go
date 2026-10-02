@@ -156,7 +156,7 @@ func TestAPushCanBeAskedAbout(t *testing.T) {
 		{"POST", "/owner/repo.git/git-receive-pack", Verdict{Outcome: Ask, Reason: "git", Operation: ReceivePack}},
 		{"GET", "/owner/repo.git/info/refs?service=git-upload-pack", Verdict{Outcome: Admit, Reason: "git"}},
 		{"POST", "/owner/repo.git/git-upload-pack", Verdict{Outcome: Admit, Reason: "git"}},
-		{"POST", "/owner/repo.git/git-receive-pack?service=git-receive-pack", Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}},
+		{"POST", "/owner/repo.git/git-receive-pack?service=git-receive-pack", Verdict{Outcome: Refuse, Reason: ReasonOutOfScope, structural: true}},
 		{"POST", "/owner/repo-evil.git/git-receive-pack", Verdict{Outcome: Refuse, Reason: ReasonOutOfScope}},
 	} {
 		u, ok := parseTarget(tc.target)

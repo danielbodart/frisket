@@ -35,7 +35,9 @@ const (
 	ReasonMalformed   = "malformed exec"
 	// ReasonUnreadable is a command on a Shell route that is not one line
 	// of plain words: refused, never asked about, since it would be typed
-	// into the device byte for byte.
+	// into the device byte for byte. A recording session gives it too for a
+	// command an exec route's rules cannot read, which it refuses as the
+	// route's unmatched does, not as a recording would.
 	ReasonUnreadable = "not one line of plain words, which is all a shell route types"
 )
 
@@ -202,10 +204,16 @@ func (c *channel) exec(r *ssh.Request) {
 	line.rule, line.operation = d.Rule, d.operationIDs()
 	var stdin io.Reader = c.ch
 	if c.s.h.recorder != nil && d.Outcome != intercept.Admit {
-		if rt.shell && !rt.rules.Readable(p.Command) {
-			// Typed byte for byte into a CLI frisket cannot read: refused
-			// below as in any session, and written down as that.
-			c.s.h.recorder.Hard(c.recordLine(p.Command, d), c.recordKey(p.Command), ReasonUnreadable)
+		if !rt.rules.Readable(p.Command) {
+			// A command the rules cannot read is one no rule could name, so
+			// no grant comes of it, and it is decided as in any session:
+			// on a shell route, typed byte for byte into a CLI frisket
+			// cannot read, refused; on an exec route, as its unmatched
+			// says, a person asked each time where that is ask. A refusal
+			// is written down as that.
+			if rt.shell || d.Outcome == intercept.Refuse {
+				c.s.h.recorder.Hard(c.recordLine(p.Command, d), c.recordKey(p.Command), ReasonUnreadable)
+			}
 		} else {
 			reason, rest := c.record(p.Command, d)
 			if reason != "" {
@@ -225,7 +233,7 @@ func (c *channel) exec(r *ssh.Request) {
 		line.decision, line.reason = intercept.DecisionRefused, intercept.ReasonRefused
 		if d.Rule == intercept.RuleUnmatched {
 			line.reason = intercept.ReasonOutOfScope
-			if rt.shell && !rt.rules.Readable(p.Command) {
+			if (rt.shell || c.s.h.recorder != nil) && !rt.rules.Readable(p.Command) {
 				line.reason = ReasonUnreadable
 			}
 		}
@@ -441,7 +449,14 @@ func (c *channel) ask(command string, d Decision, recorded bool) (record.Answer,
 // to send, the preview first.
 func (c *channel) record(command string, d Decision) (string, io.Reader) {
 	var rest io.Reader
-	res := c.s.h.recorder.Decide(c.ctx, c.recordLine(command, d), c.recordKey(command), func(context.Context) (record.Answer, string, error) {
+	decide := c.s.h.recorder.Decide
+	if !c.s.route.shell {
+		// What an exec route's command is given on its stdin is no part of
+		// its key, and a person shown one stdin has said nothing of the
+		// next: each is put to them.
+		decide = c.s.h.recorder.DecideEach
+	}
+	res := decide(c.ctx, c.recordLine(command, d), c.recordKey(command), func(context.Context) (record.Answer, string, error) {
 		a, reason, r := c.ask(command, d, true)
 		rest = r
 		a, reason = intercept.RecordAnswer(a, reason)

@@ -86,10 +86,17 @@ type Config struct {
 	// Unlisted makes the session a recording one: a name the policy does
 	// not allow is resolved anyway, its answer kept here, apart from
 	// Resolved, and OnUnlisted told the name -- so that egress can put a
-	// connection to it to the recording, by name. Nil for every other
-	// session, whose names off the allowlist never leave the host.
+	// connection to it to the recording, by name. OnUnlisted is told only
+	// of a name that resolved to an address: an NXDOMAIN is no name. Nil
+	// for every other session, whose names off the allowlist never leave
+	// the host.
 	Unlisted   Recorder
 	OnUnlisted func(name string)
+	// OnRefused is told each name refused as not allowed, with no lookup:
+	// a recording session that refuses whatever its policy does, which
+	// keeps its names on the host as any other session does, and writes
+	// them down. Nil for every other session.
+	OnRefused func(name string)
 
 	// Log is injected and required. A logger that silences itself under test
 	// -- ottergate's does, by sniffing os.Args -- makes "one line per query"
@@ -417,6 +424,9 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 	unlisted := !s.cfg.Allow.Match(name)
 	if unlisted && s.cfg.Unlisted == nil {
 		l.refuse("not allowed", dnsmessage.RCodeNameError)
+		if s.cfg.OnRefused != nil {
+			s.cfg.OnRefused(name)
+		}
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
 	// NOTIMP: frisket is not a zone's server and has no transfer to give.
@@ -442,13 +452,15 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 	set := s.cfg.Resolved
 	if unlisted {
 		l.decision, set = DecisionUnlisted, s.cfg.Unlisted
-		if s.cfg.OnUnlisted != nil {
-			s.cfg.OnUnlisted(name)
-		}
 	}
 	for _, a := range chainAddrs(q.Name, m.Answers) {
 		set.Record(name, a.addr, time.Duration(a.ttl)*time.Second, l.id)
 		l.answers = append(l.answers, a.addr.String())
+	}
+	// Written down only as a name that gave an address: an NXDOMAIN, every
+	// search-list expansion and typo, resolved nothing to connect to.
+	if unlisted && s.cfg.OnUnlisted != nil && m.RCode == dnsmessage.RCodeSuccess && len(l.answers) > 0 {
+		s.cfg.OnUnlisted(name)
 	}
 	return s.reply(h, &q, l, m.Answers, m.Authorities, edns, limit)
 }

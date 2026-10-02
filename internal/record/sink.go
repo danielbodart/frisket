@@ -63,7 +63,8 @@ type Sink struct {
 }
 
 // OpenSink opens path for appending, creating it 0600: a regular file, not
-// followed if it is a link, owned by this process's user. One that has
+// followed if it is a link, owned by this process's user, with no other
+// name. One that has
 // already reached the bound is opened truncated, and written no more.
 func OpenSink(path string) (*Sink, error) {
 	return openSink(path, MaxSink)
@@ -92,6 +93,12 @@ func openSink(path string, max int64) (*Sink, error) {
 	case st.Mode&0o077 != 0:
 		f.Close()
 		return nil, fmt.Errorf("record sink %s: readable or writable by others", path)
+	case st.Nlink != 1:
+		// A hard link planted in the records directory to some other file
+		// of this user's -- its authorized_keys, say -- passes every check
+		// above, and would be appended to.
+		f.Close()
+		return nil, fmt.Errorf("record sink %s: %d links, not one", path, st.Nlink)
 	}
 	full, err := endsTruncated(f, st.Size)
 	if err != nil {
@@ -116,7 +123,10 @@ func endsTruncated(f *os.File, size int64) (bool, error) {
 }
 
 // Write appends one line, unless the sink is full; the first line past the
-// bound is a line saying so, instead.
+// bound is a line saying so, instead. A line no grant comes of -- a hard
+// refusal, DNS telemetry -- is appended only while the sink is under half
+// its bound, and dropped past it, so that it never fills what an answered
+// subject's line needs.
 func (s *Sink) Write(l Line) error {
 	b, err := json.Marshal(l)
 	if err != nil {
@@ -126,6 +136,9 @@ func (s *Sink) Write(l Line) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.truncated || s.f == nil {
+		return nil
+	}
+	if noise(l) && s.size+int64(len(b)) > s.max/2 {
 		return nil
 	}
 	if s.size+int64(len(b)) > s.max {
@@ -141,6 +154,9 @@ func (s *Sink) Write(l Line) error {
 	s.size += int64(n)
 	return err
 }
+
+// noise is whether a line is one no grant comes of.
+func noise(l Line) bool { return l.Source == SourceHard || l.Source == SourceTelemetry }
 
 // Close closes the file.
 func (s *Sink) Close() error {

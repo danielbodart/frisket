@@ -179,6 +179,9 @@ type Classifier struct {
 	host   *HostAddrs
 	// gateways are the host's routers, which only ClassifyLAN consults.
 	gateways *HostAddrs
+	// inner are the networks only the host is on, which only ClassifyLAN
+	// consults.
+	inner *HostAddrs
 }
 
 // NewClassifier builds a classifier over ranges (DefaultRanges when nil) and

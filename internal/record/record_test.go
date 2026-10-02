@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -171,6 +172,155 @@ func TestHardRefusalsAndNamesAreWrittenOnce(t *testing.T) {
 	}
 }
 
+// answers is a person answering in turn, counting the questions.
+func answers(asked *atomic.Int32, as ...Answer) Asking {
+	return func(context.Context) (Answer, string, error) {
+		n := asked.Add(1)
+		return as[min(int(n), len(as))-1], "", nil
+	}
+}
+
+// A person's ask is a question each time, as a grant's would be; an answer
+// that differs from the one remembered replaces it and is written down, and
+// a person's allow then stands.
+func TestAnAskIsAskedAgainAndAChangedAnswerIsWritten(t *testing.T) {
+	r, j := newRecorder(t, "", nil)
+	var asked atomic.Int32
+	ask := answers(&asked, Ask, Ask, Allow)
+	for i, want := range []Answer{Ask, Ask, Allow, Allow} {
+		if res := r.Decide(context.Background(), subject("s"), "k", ask); res.Answer != want {
+			t.Fatalf("%d: %+v, want %s", i, res, want)
+		}
+	}
+	if asked.Load() != 3 {
+		t.Fatalf("asked %d times, want 3", asked.Load())
+	}
+	lines := j.lines(t)
+	if len(lines) != 2 || lines[0]["answer"] != "ask" || lines[1]["answer"] != "allow" || lines[1]["source"] != SourceHuman {
+		t.Fatalf("lines %v", lines)
+	}
+}
+
+// DecideEach puts every one to a person, whatever the last answer, and
+// writes the subject down once while the answer does not change; a default
+// still answers each, unasked.
+func TestDecideEachAsksAPersonEveryTime(t *testing.T) {
+	r, j := newRecorder(t, "", nil)
+	var asked atomic.Int32
+	for range 3 {
+		if res := r.DecideEach(context.Background(), subject("s"), "k", answers(&asked, Allow)); res.Answer != Allow {
+			t.Fatalf("%+v", res)
+		}
+	}
+	if asked.Load() != 3 || len(j.lines(t)) != 1 {
+		t.Fatalf("asked %d times, %d lines", asked.Load(), len(j.lines(t)))
+	}
+	d, dj := newRecorder(t, Allow, nil)
+	for range 2 {
+		if res := d.DecideEach(context.Background(), subject("s"), "k", never(t)); res.Answer != Allow {
+			t.Fatalf("%+v", res)
+		}
+	}
+	if len(dj.lines(t)) != 1 {
+		t.Fatalf("%d lines", len(dj.lines(t)))
+	}
+}
+
+// A subject on the local network is never the default's: a person is
+// asked, and with nobody there it is refused for want of an answer.
+func TestTheLocalNetworkIsPutToAPersonWhateverTheDefault(t *testing.T) {
+	r, j := newRecorder(t, Allow, nil)
+	lan := Line{Session: "s", Kind: KindEgress, Name: "nas.lan", Port: 445, LAN: true, Would: "refuse", Rule: "structural: private"}
+	var asked atomic.Int32
+	if res := r.Decide(context.Background(), lan, "nas.lan:445 lan", answers(&asked, Refuse)); res.Answer != Refuse || res.Source != SourceHuman {
+		t.Fatalf("%+v", res)
+	}
+	if asked.Load() != 1 {
+		t.Fatalf("asked %d times", asked.Load())
+	}
+	if l := j.lines(t); len(l) != 1 || l[0]["source"] != SourceHuman || l[0]["lan"] != true {
+		t.Fatalf("lines %v", l)
+	}
+}
+
+// A name refused at DNS, unlooked-up, is written once, as telemetry.
+func TestAnUnresolvedNameIsWrittenOnce(t *testing.T) {
+	r, j := newRecorder(t, Refuse, nil)
+	for range 2 {
+		r.Unresolved("s", "unlisted.example.test")
+	}
+	if l := j.lines(t); len(l) != 1 || l[0]["kind"] != KindDNS || l[0]["answer"] != "refuse" || l[0]["source"] != SourceTelemetry ||
+		l[0]["reason"] != ReasonNotLookedUp {
+		t.Fatalf("lines %v", l)
+	}
+}
+
+// A session's hard refusals and DNS names are bounded apart from what it
+// decides: past maxNoise they reach the journal alone, and a subject
+// decided after them is in the sink all the same.
+func TestNoiseIsBoundedApartFromWhatIsDecided(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	sink, err := OpenSink(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, j := newRecorder(t, Allow, sink)
+	for i := range maxNoise + 10 {
+		r.Resolved("s", fmt.Sprintf("n%d.example.test", i))
+	}
+	r.Decide(context.Background(), subject("s"), "k", never(t))
+	if got := len(j.lines(t)); got != maxNoise+11 {
+		t.Fatalf("%d journal lines", got)
+	}
+	in := sinkLines(t, path)
+	if len(in) != maxNoise+1 || in[len(in)-1]["source"] != SourceDefault {
+		t.Fatalf("%d sink lines, last %v", len(in), in[len(in)-1])
+	}
+}
+
+// Nor do they fill the sink past half its bound, which is kept for
+// answered subjects' lines.
+func TestNoiseFillsHalfTheSinkAtMost(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	sink, err := openSink(path, 4000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := newRecorder(t, Allow, sink)
+	for i := range 100 {
+		r.Hard(Line{Session: "s", Kind: KindEgress, Address: fmt.Sprintf("192.0.2.%d:443", i)}, fmt.Sprint(i), "not resolved by this session")
+	}
+	if fi, _ := os.Stat(path); fi.Size() > 2000 {
+		t.Fatalf("noise filled %d bytes of 4000", fi.Size())
+	}
+	r.Decide(context.Background(), subject("s"), "k", never(t))
+	in := sinkLines(t, path)
+	if in[len(in)-1]["source"] != SourceDefault {
+		t.Fatalf("last line %v", in[len(in)-1])
+	}
+}
+
+func sinkLines(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var out []map[string]any
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+			t.Fatalf("not JSON: %q", sc.Text())
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func TestAnswersAreReadInAnyCase(t *testing.T) {
 	for in, want := range map[string]Answer{"Allow": Allow, " ASK\n": Ask, "refuse": Refuse} {
 		if a, ok := ParseAnswer(in); !ok || a != want {
@@ -279,5 +429,16 @@ func TestASinkIsAFileOfItsOwnInTheRecordDir(t *testing.T) {
 	}
 	if _, err := OpenSink(open); err == nil {
 		t.Error("opened a file others can read")
+	}
+	// Nor another name for a file of the daemon's user's own.
+	elsewhere := filepath.Join(t.TempDir(), "authorized_keys")
+	if err := os.WriteFile(elsewhere, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(elsewhere, filepath.Join(dir, "linked.jsonl")); err != nil {
+		t.Skipf("no hard link across temp dirs here: %v", err)
+	}
+	if _, err := OpenSink(filepath.Join(dir, "linked.jsonl")); err == nil {
+		t.Error("opened a hard link")
 	}
 }

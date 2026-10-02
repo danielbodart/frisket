@@ -3,9 +3,12 @@ package egress
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/netip"
 	"strconv"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/danielbodart/frisket/internal/intercept"
 	recording "github.com/danielbodart/frisket/internal/record"
@@ -252,6 +255,12 @@ func (h *Handler) record(ctx context.Context, c *steer.Conn, d Decision) (reason
 		key += " lan"
 	}
 	res := rc.Recorder.Decide(ctx, l, key, func(ctx context.Context) (recording.Answer, string, error) {
+		// Nothing reads the workload's side while it waits, so nothing
+		// would notice it go: a question about a connection nobody holds
+		// any more would stay open, and hold the asker's turn, until
+		// somebody answered it.
+		ctx, stop := whileOpen(ctx, c.TCPConn)
+		defer stop()
 		q := intercept.Question{
 			Session:   c.Session,
 			Workspace: rc.Workspace,
@@ -277,3 +286,45 @@ func (h *Handler) record(ctx context.Context, c *steer.Conn, d Decision) (reason
 	}
 	return intercept.ReasonRecordRefused, lanDst
 }
+
+// whileOpen is ctx, cancelled too once the workload has closed its side of
+// c -- shut down its writing, or gone, which a socket cannot tell apart --
+// as net/http's request context is once its client's side ends. Nothing is
+// read: what the workload sent waits in the socket for the splice. Stop it
+// before c is closed, which waits for the watch to let go.
+func whileOpen(ctx context.Context, c *net.TCPConn) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	if c == nil {
+		return ctx, cancel
+	}
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return ctx, cancel
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = rc.Control(func(fd uintptr) {
+			fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLRDHUP}}
+			for ctx.Err() == nil {
+				n, err := unix.Poll(fds, int(closeWatch/time.Millisecond))
+				switch {
+				case err == unix.EINTR:
+				case err != nil:
+					return
+				case n > 0 && fds[0].Revents&(unix.POLLRDHUP|unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0:
+					cancel()
+					return
+				}
+			}
+		})
+	}()
+	return ctx, func() {
+		cancel()
+		<-done
+	}
+}
+
+// closeWatch is how often whileOpen looks up from its poll to see whether
+// it is still wanted.
+const closeWatch = 100 * time.Millisecond

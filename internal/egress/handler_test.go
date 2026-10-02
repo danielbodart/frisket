@@ -87,6 +87,24 @@ func (f *egressFixture) roundTrip(t *testing.T, msg string) string {
 	return string(b)
 }
 
+// refused sends msg and reads to EOF, without half-closing: a connection put
+// to a person, which a half-close would withdraw, and refused, so that the
+// handler closes it.
+func (f *egressFixture) refused(t *testing.T, msg string) string {
+	t.Helper()
+	c, err := net.DialTimeout("tcp4", f.ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.WriteString(c, msg); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(c)
+	return string(b)
+}
+
 func (f *egressFixture) line(t *testing.T) map[string]any {
 	t.Helper()
 	waitFor(t, "the egress line", func() bool { return len(f.journal.lines(t, "egress")) >= 1 })

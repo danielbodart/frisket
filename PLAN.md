@@ -705,7 +705,8 @@ about forty lines.
   a person runs and answers for: there, a private, unique-local or
   link-local address its DNS gave for a name is the recording's to decide,
   and dialled through `ClassifyLAN`, which still refuses the host's own
-  addresses, its routers and a metadata service ("Recording", below).
+  addresses, its routers, the networks only it is on and a metadata service
+  ("Recording", below).
 - **Allowlist:** a connection is accepted only to an address frisket resolved
   for an allowed name in that session, with a bounded TTL and a cap on the set.
 - **Names** come from frisket's own DNS answers to that session, with SNI or
@@ -1214,8 +1215,10 @@ shaped so is below.
   admitted request, for the same reason.
 - **What no policy decides stays decided.** Structural refusals, credential
   and placeholder checks, a Host that is not the SNI, method overrides, a
-  path that is not canonical, a command a shell route cannot read, anything
-  on a Docker route, and an address dialled by itself are refused as ever,
+  path that is not canonical, a git request git would never send, a command
+  a shell route's or an exec route's rules cannot read (the exec route's
+  decided by its `unmatched`, as ever), anything on a Docker route, and an
+  address dialled by itself are refused as ever,
   and written down as `hard`: nothing a grant could change becomes a
   person's to wave through, and a literal address has no name to grant.
 - **DNS resolves every name while recording, apart.** A name off the
@@ -1224,19 +1227,28 @@ shaped so is below.
   egress admits by is unchanged, and a connection to such an address is the
   recording's to decide, by the name and port it was for. DNS itself decides
   nothing: it is telemetry. A name leaves the host while recording; that is
-  what recording is.
-- **The local network, by name.** A private, unique-local or link-local
-  address the session's DNS gave is a recording's subject like any other,
+  what recording is -- but not with a default of refuse, which keeps a name
+  off the allowlist on the host as any session does, and writes it down.
+- **The local network, by name, and by a person.** A private, unique-local
+  or link-local address the session's DNS gave is a recording's subject,
   dialled through `ClassifyLAN` at the dial as `Classify` is: never the
-  host's own addresses, a router its routing tables name, a metadata
-  service, loopback, CGNAT, or a v4 address spelt inside a v6 one. A
-  router's management address is the one LAN host a sandbox has no business
-  with, and the routing tables say which it is, read live as the host's own
-  addresses are, failing closed. Only in recording sessions: the structural
-  table is unchanged for every other.
+  host's own addresses, a router its routing tables name, a network only
+  the host is on, a metadata service, loopback, CGNAT, or a v4 address spelt
+  inside a v6 one. A router's management address is the one LAN host a
+  sandbox has no business with; a network only the host is on -- a route by
+  an interface with no device behind it, a container bridge, a tunnel --
+  holds other projects' containers and machines, not the LAN. The routing
+  tables say which is which, read live as the host's own addresses are,
+  failing closed. And never the default's: a public wildcard DNS service
+  names any address, so a name is no boundary, and only a person answers
+  for a LAN host. Only in recording sessions: the structural table is
+  unchanged for every other.
 - **Each subject once a session.** The first answer is remembered in memory
   for the rest of the session and written down; later ones are answered
-  silently. Two at once wait for one answer. No learned rule outlives the
+  silently. Two at once wait for one answer. A person's ask is asked again
+  each time, as a grant's would be, and a subject whose key does not hold
+  all that is decided -- an exec command's stdin, an unread GraphQL request
+  -- is put to the person every time; a changed answer is written again. No learned rule outlives the
   session: Nix and the grant stay the only source of truth.
 - **A sink beside the journal.** The journal rate-limits, so each line also
   goes to a file directly in `-record-dir`, which the module makes

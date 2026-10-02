@@ -212,6 +212,8 @@ func (g *compiledGraphQL) classify(req graphql.Request) Verdict {
 	if len(ops) > 1 {
 		v.Operations = ops
 	}
+	// Whatever decided, between equals: what is unseen is in the request.
+	v.unseen = v.unseen || req.Unseen != ""
 	if len(unnamed) > 0 {
 		read = append(read, "unnamed "+strings.Join(unnamed, ","))
 	}
@@ -244,9 +246,9 @@ func (g *compiledGraphQL) unknown() Verdict {
 // whatever the sandbox chose to hide.
 func (g *compiledGraphQL) unseen() Verdict {
 	if g.unmatched == Refuse {
-		return Verdict{Outcome: Refuse, Reason: ReasonUnclassified}
+		return Verdict{Outcome: Refuse, Reason: ReasonUnclassified, unseen: true}
 	}
-	return Verdict{Outcome: Ask, Reason: RuleUnmatched}
+	return Verdict{Outcome: Ask, Reason: RuleUnmatched, unseen: true}
 }
 
 // unclassified is the verdict for a request frisket cannot read at all.
