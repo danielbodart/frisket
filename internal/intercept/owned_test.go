@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielbodart/frisket/docker"
 	"github.com/danielbodart/frisket/internal/dockerapi"
+	"github.com/danielbodart/frisket/project"
 )
 
 const (
@@ -666,8 +666,8 @@ func TestAContainerJoinsTheNetworkThatWasCheckedNotAnotherOfItsName(t *testing.T
 	fa, d, _ := dockerFixture(t)
 	rb := newUnixUpstream(t, d.socket)
 	rb.Docker.Project = otherProject
-	rb.Docker.Address = docker.Address(otherProject)
-	rb.Docker.Names = docker.Names(otherProject)
+	rb.Docker.Address = project.Address(otherProject)
+	rb.Docker.Names = project.Names(otherProject)
 	fb, _ := dockerFixtureOn(t, rb)
 
 	const theirs = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"

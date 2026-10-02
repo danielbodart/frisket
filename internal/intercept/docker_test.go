@@ -18,9 +18,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/danielbodart/frisket/docker"
 	"github.com/danielbodart/frisket/internal/credential"
 	"github.com/danielbodart/frisket/internal/dockerapi"
+	"github.com/danielbodart/frisket/project"
 )
 
 const (
@@ -120,9 +120,9 @@ func newUnixUpstream(t testing.TB, socket string) Route {
 			Project:     dockerProject,
 			APIVersions: APIVersions{Min: "1.55", Max: "1.56", Unversioned: []string{"/_ping"}},
 			Images:      []string{"postgres:18", "library/postgres:18", "docker.io/postgres:18", "docker.io/library/postgres:18"},
-			Address:     docker.Address(dockerProject),
+			Address:     project.Address(dockerProject),
 			Ports:       []uint16{64320, 64321},
-			Names:       docker.Names(dockerProject),
+			Names:       project.Names(dockerProject),
 			MaxBody:     256 << 10,
 			Bodies:      engineTables(t),
 		},
@@ -841,7 +841,7 @@ func TestNewRefusesBadDockerRoutes(t *testing.T) {
 			return []Route{other}
 		},
 		"another project's address": func(r *Route) []Route {
-			r.Docker.Address = docker.Address("example/billing")
+			r.Docker.Address = project.Address("example/billing")
 			return nil
 		},
 		"names that are not the project's": func(r *Route) []Route {
@@ -850,11 +850,11 @@ func TestNewRefusesBadDockerRoutes(t *testing.T) {
 		},
 		"no names": func(r *Route) []Route { r.Docker.Names = nil; return nil },
 		"a project that is not owner/repo": func(r *Route) []Route {
-			r.Docker.Project, r.Docker.Address, r.Docker.Names = "shop", docker.Address("shop"), docker.Names("shop")
+			r.Docker.Project, r.Docker.Address, r.Docker.Names = "shop", project.Address("shop"), project.Names("shop")
 			return nil
 		},
 		"a project of dots": func(r *Route) []Route {
-			r.Docker.Project, r.Docker.Address, r.Docker.Names = "a/..", docker.Address("a/.."), docker.Names("a/..")
+			r.Docker.Project, r.Docker.Address, r.Docker.Names = "a/..", project.Address("a/.."), project.Names("a/..")
 			return nil
 		},
 		"a version with a leading zero": func(r *Route) []Route { r.Docker.APIVersions.Min = "1.055"; return nil },

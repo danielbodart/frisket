@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"github.com/danielbodart/frisket/docker"
+	"github.com/danielbodart/frisket/project"
 )
 
 // Document is a policy as its file holds it: the policy, and a name for the
@@ -276,7 +276,7 @@ func (p Policy) RelayDestinations() []netip.AddrPort {
 	if d == nil {
 		return nil
 	}
-	addr := docker.Address(d.Project)
+	addr := project.Address(d.Project)
 	out := make([]netip.AddrPort, 0, 3*len(d.Ports))
 	for _, port := range d.Ports {
 		if port < 0 || port > 65535 {

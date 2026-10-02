@@ -23,7 +23,7 @@ const HostTTL = time.Hour
 const hostMaxConns = 64
 
 // Host answers a project's name under .internal on the host, from the name
-// alone: Lookup is a pure function (docker.Project, then docker.Address),
+// alone: Lookup is a pure function (project.FromName, then project.Address),
 // so there is nothing to register, nothing kept and nothing that could be
 // out of date. It forwards nothing. A name outside .internal is REFUSED, as
 // the host's resolver sends it only .internal; one under it that is not a

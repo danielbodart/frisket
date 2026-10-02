@@ -12,9 +12,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/danielbodart/frisket/docker"
 	"github.com/danielbodart/frisket/internal/dns"
 	"github.com/danielbodart/frisket/internal/sdnotify"
+	"github.com/danielbodart/frisket/project"
 )
 
 // runDNS is `frisket dns`: a project's name under .internal answered on the
@@ -90,9 +90,9 @@ func runDNS(argv []string) error {
 
 // projectAddress is the address of the project a name is, if it is one.
 func projectAddress(name string) (netip.Addr, bool) {
-	p, ok := docker.Project(name)
+	p, ok := project.FromName(name)
 	if !ok {
 		return netip.Addr{}, false
 	}
-	return docker.Address(p), true
+	return project.Address(p), true
 }

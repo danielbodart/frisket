@@ -170,6 +170,54 @@ private (RFC 1918), unique-local or link-local address their DNS gives:
 
 The connection's `egress` line has `reason` `lan`.
 
+## Project addresses
+
+Every project -- a checkout, by its origin's slug, `owner/repo` -- has a
+name and a loopback address of its own on the machine, so that what it
+serves can be bound where no other project's is, and reached by a name:
+
+- **The name** is `<repo>.<owner>.internal`, lower-cased and otherwise as
+  the slug spells it: `bodar/bodar.ts` is `bodar.ts.bodar.internal`. An
+  owner has no dots, so the name reads back as its slug. A repo glibc could
+  not resolve (an empty label, as `.github`'s, a `-` first, a label over 63
+  bytes) gets no name, nor does an owner whose name would be or fall under
+  `frisket.internal` or `google.internal`; the address is still the
+  project's.
+- **The address** is `127.b1.b2.b3`, from the first three bytes of the
+  SHA-256 of the slug. One that would fall in `127.0.0.0/16`, where
+  `127.0.0.1` and the resolver stubs are, or be the broadcast, hashes
+  again. Two projects can hash to one address, one in about 16 million
+  pairs; what binds there must tell its own apart, as the Docker route
+  does by its containers' project label.
+- **In a session**, frisket's DNS answers the session's own project's name
+  with its address, before the allowlist: logged `decision=local`, never
+  asked upstream, never in the set egress admits by. The rest of
+  `.internal`, such as `metadata.google.internal`, resolves as before. A
+  session has a project when its document has a Docker route, which names
+  it ([docs/docker.md](docs/docker.md)).
+- **On the host**, `frisket dns` (`services.frisket.hostDNS.enable`)
+  answers every project's name, so a browser reaches a project's dev
+  servers and containers by name. The name is the whole lookup, so there is
+  no registry, nothing to keep in step with the projects a machine has, and
+  a project cloned a minute ago resolves. It forwards nothing: anything else
+  under `.internal` is NXDOMAIN and anything outside it REFUSED. systemd
+  binds its socket, `127.0.0.153:53` by default, and it runs as a
+  DynamicUser that can open no socket of its own. `hostDNS.resolved`, on by
+  default, has systemd-resolved send it `.internal` alone, by a dummy link,
+  `frisket-dns`, with `~internal` as its routing domain and DefaultRoute
+  off: resolved's global `DNS=` would be a default route, asked every name
+  the host looks up.
+- **For other programs**, the Go package
+  `github.com/danielbodart/frisket/project` is the one derivation:
+  `project.Address(slug)`, `project.Names(slug)`, `project.FromName(name)`,
+  `project.Valid(slug)` and `project.Reserved(name)`. A launcher that binds
+  a session's dev-server forwards, or its containers' published ports, to
+  the project's address calls these rather than deriving it again; the
+  flake exports the reserved names as `lib.project.reserved`.
+
+The Docker route is one user of the project address: it binds what the
+project publishes there, and relays a session's connections to it.
+
 ## Routes
 
 A route can do more than add a bearer token. Each is in
@@ -206,7 +254,7 @@ A route can do more than add a bearer token. Each is in
 | `services.frisket.logLevel` | `info` | `debug` adds request headers and error bodies; credentials are described, never shown. |
 | `services.frisket.maxSessions` | `256` | Sessions kept across a restart. |
 | `services.frisket.maxConnections` | built in | Concurrent connections per session. |
-| `services.frisket.hostDNS.enable` | `false` | Answer `<repo>.<owner>.internal` on the host, from the name alone. See [docs/docker.md](docs/docker.md#on-the-host). |
+| `services.frisket.hostDNS.enable` | `false` | Answer `<repo>.<owner>.internal` on the host, from the name alone. See [Project addresses](#project-addresses). |
 | `services.frisket.hostDNS.address` / `port` | `127.0.0.153` / `53` | Where it answers, UDP and TCP; systemd binds it. |
 | `services.frisket.hostDNS.resolved` | `true` | Turn on systemd-resolved and send it `.internal` alone, by a dummy link with no default route. |
 | `services.frisket.flong.<launcher>.policy` | *required* | The launcher's policy. |

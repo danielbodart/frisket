@@ -391,11 +391,12 @@ allowlist, and leaves the rest of `.internal` alone, so
 now; `frisket dns` answers every project's on the host, from the name alone.
 A name equal to or under a reserved suffix (`frisket.internal`,
 `google.internal`) is never generated. The suffixes live in
-`docker/reserved.json`, which the Go code embeds and the flake exports
-as `lib.docker.reserved`, for chase and nix-config to read rather than copy. A
+`project/reserved.json`, which the Go code embeds and the flake exports
+as `lib.project.reserved`, for any Nix to read rather than copy. A
 document whose names equal or fall under one of its own route hosts is refused
 when it loads. The names say `internal` and not `docker` because the address
-will later also carry the session's own dev servers.
+also carries the session's own dev servers: the name and address are the
+project address (package `project`), and the Docker route is one user of it.
 
 ---
 

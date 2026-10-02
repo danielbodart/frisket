@@ -25,7 +25,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/danielbodart/frisket/docker"
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/credential"
 	"github.com/danielbodart/frisket/internal/dns"
@@ -36,6 +35,7 @@ import (
 	"github.com/danielbodart/frisket/internal/relay"
 	"github.com/danielbodart/frisket/internal/serve"
 	"github.com/danielbodart/frisket/internal/sshroute"
+	"github.com/danielbodart/frisket/project"
 	"golang.org/x/sys/unix"
 )
 
@@ -385,7 +385,7 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 	var ports []uint16
 	var names map[string]netip.Addr
 	if dr != nil {
-		dock = &serve.Docker{Project: dr.Project, Address: docker.Address(dr.Project), Relay: p.RelayDestinations()}
+		dock = &serve.Docker{Project: dr.Project, Address: project.Address(dr.Project), Relay: p.RelayDestinations()}
 		// The session's own names, answered with the project's address --
 		// frisket's derivation, which build has already held the document's
 		// to.
@@ -647,7 +647,7 @@ func sshRoutes(p policy.Policy, hosts []string) ([]*sshroute.Route, error) {
 	}
 	reserved := sshroute.Reserved{Addrs: steeredAddrs, Hosts: hosts}
 	if dr := p.DockerRoute(); dr != nil {
-		reserved.Addrs = append(slices.Clone(reserved.Addrs), docker.Address(dr.Project))
+		reserved.Addrs = append(slices.Clone(reserved.Addrs), project.Address(dr.Project))
 		reserved.Hosts = append(slices.Clone(reserved.Hosts), dr.Names...)
 	}
 	return sshroute.Compile(p.SSH, reserved)

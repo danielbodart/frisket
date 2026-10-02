@@ -15,7 +15,7 @@ import (
 )
 
 // testHost answers shop.example.internal alone, as a stand-in for
-// docker.Project and docker.Address, which this package cannot import.
+// project.FromName and project.Address, which this package cannot import.
 func testHost(t *testing.T) (*Host, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer

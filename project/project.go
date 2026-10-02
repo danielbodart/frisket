@@ -1,4 +1,22 @@
-package docker
+// Package project is frisket's project address: the name and the loopback
+// address every project -- a checkout, by its origin's slug, owner/repo --
+// is known by on the machine. Its name is `<repo>.<owner>.internal` and its
+// address 127.b1.b2.b3, from the SHA-256 of the slug, so that a project's
+// dev servers, its containers' published ports and anything else of its own
+// can be bound to an address no other project has, and reached by a name.
+//
+// Both are pure functions of the slug, and the name reads back as its slug
+// (FromName), so nothing has to be registered or kept in step: a session's
+// DNS answers a project's name with its address, the host's `frisket dns`
+// answers any project's name with its, and a program that binds or forwards
+// to a project's address -- chase, for a session's dev-server forwards and
+// its Docker project's ports -- calls Address and Names here rather than
+// deriving them again. The Docker route (package docker, and the route's
+// relay) is one user of the address; it is not the address's owner.
+//
+// The names no project may take are reserved.json's, which the flake also
+// exports as lib.project.reserved.
+package project
 
 import (
 	"crypto/sha256"
@@ -17,9 +35,10 @@ import (
 // publishes is bound to: 127.b1.b2.b3 from the first three bytes of the
 // SHA-256 of the slug, lower-cased. A b1 of 0 would be in 127.0.0.0/16, where
 // 127.0.0.1 and 127.0.0.53 are, and 255.255.255 is the broadcast; either
-// hashes the hash's own 64 hex digits again. chase and nix-config derive it
-// the same way, and the three must agree byte
-// for byte.
+// hashes the hash's own 64 hex digits again. This is the one derivation:
+// frisket's session DNS, its relay and `frisket dns` call it, and so does
+// any program that binds to a project's address, rather than keep a copy
+// that could drift.
 func Address(project string) netip.Addr {
 	h := hexSum(lowerASCII(project))
 	for {
@@ -41,8 +60,8 @@ func hexSum(s string) string {
 // the cloud's metadata.google.internal. GCE's own per-VM names have four labels
 // or more and no project's name can be one, so they need no entry. The list is
 // part of the derivation and frisket owns it: the flake exports this same file
-// as lib.docker.reserved, and chase and nix-config read it from there rather
-// than keep a copy that could drift.
+// as lib.project.reserved, for any Nix that needs it, rather than a copy that
+// could drift.
 //
 //go:embed reserved.json
 var reservedJSON []byte
@@ -56,7 +75,7 @@ var reserved = mustParseReserved(reservedJSON)
 func mustParseReserved(b []byte) []string {
 	names, err := parseReserved(b)
 	if err != nil {
-		panic("docker/reserved.json: " + err.Error())
+		panic("project/reserved.json: " + err.Error())
 	}
 	return names
 }
@@ -84,12 +103,11 @@ func parseReserved(b []byte) ([]string, error) {
 // and a repository name.
 var projectRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}$`)
 
-// ValidProject is whether a route may name a project: owner/repo, already
-// lower-cased, and a repository that is a name rather than . or .., which no
-// repository can be. frisket refuses a route whose project is not, and chase
-// refuses to approve one, so a checkout that would name one is refused when
-// it is approved rather than when its session fails to start.
-func ValidProject(project string) bool {
+// Valid is whether a slug names a project: owner/repo, already lower-cased,
+// and a repository that is a name rather than . or .., which no repository
+// can be. frisket refuses a Docker route whose project is not, so a program
+// that launches sessions refuses one before it gets that far.
+func Valid(project string) bool {
 	return projectRE.MatchString(project) && !strings.HasSuffix(project, "/.") && !strings.HasSuffix(project, "/..")
 }
 
@@ -107,7 +125,7 @@ var labelRE = regexp.MustCompile(`^[a-z0-9_-]{1,63}$`)
 // Names are the names the project's address is known by: one,
 // `<repo>.<owner>.internal`, lower-cased and otherwise as the slug spells it,
 // so bodar/bodar.ts is bodar.ts.bodar.internal and has four labels. Nothing
-// is folded, so no two projects share a name, and Project reads one back:
+// is folded, so no two projects share a name, and FromName reads one back:
 // an owner has no dots, so the label before .internal is the owner and
 // everything before that the repo. A repo that does not make labels glibc
 // resolves -- an empty one, as .github's first is, a label over 63 bytes, a
@@ -134,13 +152,13 @@ func Names(project string) []string {
 	return []string{name}
 }
 
-// Project is the project a name is, as Names gives it: the slug, and
+// FromName is the project a name is, as Names gives it: the slug, and
 // whether the name is one at all. A name is read normalised, lower-case and
 // without a trailing dot, and is one only if it is exactly the name Names
 // gives the slug it reads as -- so a reserved name, or a label no repo's
 // name could give, is none, and frisket answers for no name it would not
 // give a project.
-func Project(name string) (string, bool) {
+func FromName(name string) (string, bool) {
 	rest, ok := strings.CutSuffix(dns.Normalize(name), ".internal")
 	if !ok {
 		return "", false
@@ -150,7 +168,7 @@ func Project(name string) (string, bool) {
 		return "", false
 	}
 	p := rest[i+1:] + "/" + rest[:i]
-	if !ValidProject(p) {
+	if !Valid(p) {
 		return "", false
 	}
 	if n := Names(p); len(n) != 1 || n[0] != dns.Normalize(name) {

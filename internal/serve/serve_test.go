@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielbodart/frisket/docker"
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/sdnotify"
 	"github.com/danielbodart/frisket/internal/steer"
+	"github.com/danielbodart/frisket/project"
 	"golang.org/x/sys/unix"
 	"pgregory.net/rapid"
 )
@@ -161,7 +161,7 @@ type recorder struct {
 	// session, the stored CA for a restored one.
 	authorities [][]byte
 	// derive is the Docker project's address, for a session whose params
-	// name a project: docker.Address unless a test makes two collide.
+	// name a project: project.Address unless a test makes two collide.
 	derive func(project string) netip.Addr
 	// ports, if set, is the session's Docker ports in place of its "ports"
 	// param: a document changed while the daemon was down.
@@ -221,15 +221,15 @@ func (h sshNoting) ServeConn(ctx context.Context, c *steer.Conn) { h.serve(ctx, 
 // ports, relayed on both loopbacks and the project's address. None without
 // the param.
 func (r *recorder) docker(s control.Session) (*Docker, error) {
-	project := s.Params["project"]
-	if project == "" {
+	slug := s.Params["project"]
+	if slug == "" {
 		return nil, nil
 	}
 	derive := r.derive
 	if derive == nil {
-		derive = docker.Address
+		derive = project.Address
 	}
-	dk := &Docker{Project: project, Address: derive(project)}
+	dk := &Docker{Project: slug, Address: derive(slug)}
 	ports := s.Params["ports"]
 	if r.ports != nil {
 		ports = r.ports(s)

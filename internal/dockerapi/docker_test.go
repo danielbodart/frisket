@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/danielbodart/frisket/docker"
+	projaddr "github.com/danielbodart/frisket/project"
 )
 
 const project = "example/shop"
@@ -290,7 +290,7 @@ func binding(ip any, port string) map[string]any {
 // really sent, so that each case differs from an admitted body in one thing.
 func TestWhatReachesTheHostIsRefused(t *testing.T) {
 	tabs := tables(t)
-	other := docker.Address("example/billing").String()
+	other := projaddr.Address("example/billing").String()
 	containerCases := []struct {
 		name   string
 		change func(map[string]any)

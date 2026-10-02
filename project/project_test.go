@@ -1,4 +1,4 @@
-package docker
+package project
 
 import (
 	"fmt"
@@ -50,7 +50,7 @@ func TestTheDerivationGivesTheContractsVectors(t *testing.T) {
 }
 
 func TestTheEmbeddedReservedListIsExactlyFrisketsAndGooglesInternalApexes(t *testing.T) {
-	// The flake's docker-reserved check pins lib.docker.reserved to the same
+	// The flake's project-reserved check pins lib.project.reserved to the same
 	// literal, so neither side of the one file can change without a test failing.
 	if want := []string{"frisket.internal", "google.internal"}; !slices.Equal(reserved, want) {
 		t.Fatalf("reserved.json gives %q, want %q", reserved, want)
@@ -94,12 +94,12 @@ func Example() {
 
 func TestAProjectIsAnOwnerAndARepositoryAsARouteMayNameThem(t *testing.T) {
 	for _, p := range []string{"example/shop", "o/r", "bodar/bodar.ts", "a-b/_", strings.Repeat("o", 39) + "/" + strings.Repeat("r", 100), "o/.x", "o/..."} {
-		if !ValidProject(p) {
+		if !Valid(p) {
 			t.Errorf("%q was refused", p)
 		}
 	}
 	for _, p := range []string{"", "o", "o/", "/r", "O/r", "o/R", "-o/r", "o/r/x", "o/.", "o/..", "o/r ", strings.Repeat("o", 40) + "/r", "o/" + strings.Repeat("r", 101), "o_x/r"} {
-		if ValidProject(p) {
+		if Valid(p) {
 			t.Errorf("%q was accepted", p)
 		}
 	}
@@ -113,7 +113,7 @@ func TestANameIsReadBackAsTheProjectItNames(t *testing.T) {
 		"my_repo.test.internal":   "test/my_repo",
 		"a.b.c.owner-1.internal":  "owner-1/a.b.c",
 	} {
-		if got, ok := Project(name); !ok || got != want {
+		if got, ok := FromName(name); !ok || got != want {
 			t.Errorf("%s: %q %v, want %q", name, got, ok, want)
 		}
 	}
@@ -124,7 +124,7 @@ func TestANameIsReadBackAsTheProjectItNames(t *testing.T) {
 		"shop.-example.internal", "a..b.test.internal", strings.Repeat("a", 64) + ".test.internal",
 		"shop." + strings.Repeat("o", 40) + ".internal",
 	} {
-		if got, ok := Project(name); ok {
+		if got, ok := FromName(name); ok {
 			t.Errorf("%q read as %q", name, got)
 		}
 	}

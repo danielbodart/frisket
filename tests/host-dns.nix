@@ -1,7 +1,7 @@
 # `frisket dns` as a host runs it: socket-activated on 127.0.0.153:53 under
 # a DynamicUser, with systemd-resolved sending it .internal and nothing else,
 # by the frisket-dns link services.frisket.hostDNS.resolved makes.
-# A project's name resolves through glibc to the address docker.Address
+# A project's name resolves through glibc to the address project.Address
 # gives, with no registry and nothing configured per project; a name under
 # .internal that is no project's does not resolve; and frisket refuses a
 # name outside .internal when asked directly, which resolved never does.

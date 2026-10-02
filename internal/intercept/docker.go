@@ -18,6 +18,7 @@ import (
 
 	"github.com/danielbodart/frisket/docker"
 	"github.com/danielbodart/frisket/internal/dockerapi"
+	"github.com/danielbodart/frisket/project"
 )
 
 // DockerRoute makes a route a Docker Engine's: its upstream is the daemon's
@@ -36,12 +37,12 @@ type DockerRoute struct {
 	// each by its exact string.
 	Images []string
 	// Address is the project's loopback address, and must be
-	// docker.Address(Project).
+	// project.Address(Project).
 	Address netip.Addr
 	// Ports are the host ports its containers may publish.
 	Ports []uint16
 	// Names are what the address is known by, and must be
-	// docker.Names(Project).
+	// project.Names(Project).
 	Names []string
 	// MaxBody bounds a JSON body.
 	MaxBody int64
@@ -156,7 +157,7 @@ func (r *Route) validateDocker(u *url.URL, wild bool) error {
 	if s.Unmatched != UnmatchedRefuse || s.Git != nil || len(s.GraphQL) > 0 || s.GitHubAPI != nil {
 		return fmt.Errorf("route %s: a Docker route has path rules only, and refuses what they do not match", r.Name)
 	}
-	if !docker.ValidProject(d.Project) {
+	if !project.Valid(d.Project) {
 		return fmt.Errorf("route %s: project %q is not owner/repo", r.Name, d.Project)
 	}
 	lo, err := apiMinor(d.APIVersions.Min)
@@ -183,7 +184,7 @@ func (r *Route) validateDocker(u *url.URL, wild bool) error {
 			return fmt.Errorf("route %s: image %q: %w", r.Name, img, err)
 		}
 	}
-	if want := docker.Address(d.Project); d.Address != want {
+	if want := project.Address(d.Project); d.Address != want {
 		return fmt.Errorf("route %s: address %s is not %s, the project's own", r.Name, d.Address, want)
 	}
 	if len(d.Ports) > maxDockerPorts {
@@ -197,7 +198,7 @@ func (r *Route) validateDocker(u *url.URL, wild bool) error {
 			return fmt.Errorf("route %s: port %d twice", r.Name, p)
 		}
 	}
-	if want := docker.Names(d.Project); !slices.Equal(d.Names, want) {
+	if want := project.Names(d.Project); !slices.Equal(d.Names, want) {
 		return fmt.Errorf("route %s: names %q are not %q, the project's own", r.Name, d.Names, want)
 	}
 	if d.MaxBody < 1 || d.MaxBody > maxDockerBody {

@@ -75,9 +75,9 @@
 
       # The names no project's .internal name may equal or fall under: the very
       # file the Go code embeds, and so the list Names() uses. Pure data, for
-      # chase and nix-config to read rather than copy. frisket exports only the
-      # list; the address and the names are chase's lib.docker to derive.
-      lib.docker.reserved = builtins.fromJSON (builtins.readFile ./docker/reserved.json);
+      # any Nix that needs it to read rather than copy. frisket exports only the
+      # list; the address and the names are package project's, in Go.
+      lib.project.reserved = builtins.fromJSON (builtins.readFile ./project/reserved.json);
 
       # The daemon, and the adapter that maps its sessions onto flong's hooks.
       # Keyed, so the module system can tell it is one module however many
@@ -277,17 +277,17 @@
           # `frisket dns` on a host, behind systemd-resolved, in a VM.
           host-dns = pkgs.testers.runNixOSTest (import ./tests/host-dns.nix { inherit self; });
 
-          # lib.docker.reserved is exactly the list the Go test pins, so the
+          # lib.project.reserved is exactly the list the Go test pins, so the
           # file cannot change under a consumer without a test failing here and
           # one failing there.
-          docker-reserved =
+          project-reserved =
             let
-              got = builtins.toJSON self.lib.docker.reserved;
+              got = builtins.toJSON self.lib.project.reserved;
               want = builtins.toJSON [ "frisket.internal" "google.internal" ];
             in
-            pkgs.runCommand "docker-reserved" { inherit got want; } ''
+            pkgs.runCommand "project-reserved" { inherit got want; } ''
               if [ "$got" != "$want" ]; then
-                echo "lib.docker.reserved is $got, want $want" >&2
+                echo "lib.project.reserved is $got, want $want" >&2
                 exit 1
               fi
               touch $out

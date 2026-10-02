@@ -1,4 +1,4 @@
-package docker
+package project
 
 import (
 	"net/netip"
@@ -58,7 +58,7 @@ func TestEveryNameReadsBackAsItsProject(t *testing.T) {
 		repo := rapid.StringMatching(`[a-zA-Z0-9._-]{1,100}`).Draw(rt, "repo")
 		p := lowerASCII(owner + "/" + repo)
 		for _, n := range Names(p) {
-			if got, ok := Project(n); !ok || got != p {
+			if got, ok := FromName(n); !ok || got != p {
 				rt.Fatalf("%s: %q read back as %q %v", p, n, got, ok)
 			}
 		}

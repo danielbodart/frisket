@@ -20,35 +20,19 @@ the project's address `:P`, for each port P the project names. Its ruleset
 steers those to frisket's existing listener on 15001, and frisket relays each
 connection only to the project's address on that port, and only while one of
 the project's own running containers publishes it there. The project's
-name, `<repo>.<owner>.internal` -- lower-cased and otherwise as the slug
-spells it, so `bodar/bodar.ts` is `bodar.ts.bodar.internal` -- resolves to
-that address in the session's DNS, before the allowlist; the rest of
-`.internal`, such as `metadata.google.internal` and
-`docker.frisket.internal`, resolves as before. It is logged
-`decision=local`, never asked upstream and never recorded for egress. Under
+address and its name, `<repo>.<owner>.internal`, are the
+[project address](../README.md#project-addresses), which the Docker route
+uses rather than owns: the route's `address` and `names` must be what
+`project.Address` and `project.Names` give for its `project`, and with the
+route the session's DNS answers that name with that address. Under
 `allow = ["*"]`, another project's name may be answered by the host's
 resolver, but its address is not steered and egress refuses loopback, so the
-session cannot reach it. An owner whose name would be or fall under
-`frisket.internal` or `google.internal` gets no name, nor does a repo
-glibc could not resolve (an empty label, as `.github`'s, or a `-` first),
-and a document whose name equals or falls under one of its own route hosts
-does not load. The name says `internal`, not `docker`, because the address
-carries the session's own dev servers too.
+session cannot reach it. A document whose project's name equals or falls
+under one of its own route hosts does not load.
 
 Two projects whose slugs hash to one address both run: each session's relay
 reaches only what a container with its own project's label publishes there.
 
-## On the host
-
-`frisket dns` (`services.frisket.hostDNS.enable`) answers the same names on
-the host, so a browser reaches a project's containers by name. The name is
-the whole lookup: `<repo>.<owner>.internal` reads back as `owner/repo`,
-since an owner has no dots, and its address is the hash -- so there is no
-registry, nothing to keep in step with the projects a machine has, and a
-project cloned a minute ago resolves. It forwards nothing: anything else
-under `.internal` is NXDOMAIN and anything outside it REFUSED. systemd binds
-its socket, 127.0.0.153:53 by default, and it runs as a DynamicUser that can
-open no socket of its own. `hostDNS.resolved`, on by default, has
-systemd-resolved send it `.internal` alone, by a dummy link, `frisket-dns`,
-with `~internal` as its routing domain and DefaultRoute off: resolved's
-global `DNS=` would be a default route, asked every name the host looks up.
+On the host, `frisket dns` answers the same names, so a browser reaches a
+project's containers by name: see
+[Project addresses](../README.md#project-addresses).
