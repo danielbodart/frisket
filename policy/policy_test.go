@@ -15,6 +15,7 @@ func TestDecodeRefusesAnUnknownFieldAndATrailingValue(t *testing.T) {
 		`{"name":"p","alow":["a.test"]}`,
 		`{"name":"p","routes":[{"name":"r","host":"a.test","pathz":[]}]}`,
 		`{"name":"p"} {"name":"q"}`,
+		`{"name":"p","record":{"default":"allow","always":true}}`,
 	} {
 		var d Document
 		if err := Decode([]byte(b), &d); err == nil {
@@ -26,7 +27,8 @@ func TestDecodeRefusesAnUnknownFieldAndATrailingValue(t *testing.T) {
 // What a writer marshals from these types is what Decode reads back.
 func TestADocumentRoundTrips(t *testing.T) {
 	want := Document{Name: "p", Policy: Policy{
-		Allow: []string{"api.test"},
+		Allow:  []string{"api.test"},
+		Record: &Record{Default: "allow", Sink: "/var/lib/frisket/records/s.jsonl"},
 		Routes: []Route{{Name: "api", Host: "api.test", Paths: []PathRule{
 			{Methods: []string{"GET"}, Prefix: "/"},
 		}}},

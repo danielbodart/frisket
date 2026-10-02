@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/record"
 )
 
 // script writes an asker. Tests run it with /bin/sh, which the Nix build
@@ -34,7 +35,7 @@ func script(t *testing.T, body string) string {
 
 func mustCommand(t *testing.T, path string) *Command {
 	t.Helper()
-	c, err := NewCommand(path)
+	c, err := NewCommand(path, Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +53,7 @@ var question = intercept.Question{
 func TestTheQuestionIsJSONOnStdinAndTheAnswerIsTheExitStatus(t *testing.T) {
 	dir := t.TempDir()
 	got := filepath.Join(dir, "question.json")
-	for status, want := range map[string]bool{"0": true, "1": false} {
+	for status, want := range map[string]record.Answer{"0": record.Allow, "1": record.Refuse} {
 		c := mustCommand(t, script(t, `cat > `+got+`; exit `+status))
 		ok, err := c.Ask(context.Background(), question)
 		if err != nil || ok != want {
@@ -77,7 +78,7 @@ func TestTheQuestionIsJSONOnStdinAndTheAnswerIsTheExitStatus(t *testing.T) {
 func TestAnAskerThatFailsRefusesAndSaysSo(t *testing.T) {
 	c := mustCommand(t, script(t, `echo "no display" >&2; exit 5`))
 	ok, err := c.Ask(context.Background(), question)
-	if ok || err == nil || !strings.Contains(err.Error(), "no display") {
+	if ok != record.Refuse || err == nil || !strings.Contains(err.Error(), "no display") {
 		t.Fatalf("(%v, %v)", ok, err)
 	}
 }
@@ -88,7 +89,7 @@ func TestAnAskerMustBeAnExecutableAbsolutePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range []string{"asker", notExec, t.TempDir(), "/nonexistent/asker"} {
-		if _, err := NewCommand(p); err == nil {
+		if _, err := NewCommand(p, Limits{}); err == nil {
 			t.Errorf("%s: accepted", p)
 		}
 	}
@@ -111,7 +112,7 @@ func TestOneQuestionAtATime(t *testing.T) {
 			if err != nil {
 				t.Errorf("two questions were open at once: %v", err)
 			}
-			if ok {
+			if ok.Admits() {
 				admitted.Add(1)
 			}
 		})
@@ -179,7 +180,133 @@ func TestOneQuestionPerSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Answered, the session may ask again.
-	if ok, err := c.Ask(context.Background(), question); !ok || err != nil {
+	if ok, err := c.Ask(context.Background(), question); ok != record.Allow || err != nil {
 		t.Fatalf("after its question was answered: (%v, %v)", ok, err)
+	}
+}
+
+// On an exit of 0 or 1 the asker may say its answer on stdout, which stands
+// in place of the status: ask, as zenity's extra button prints its label
+// and exits 1, admits. Anything else there, or an answer beside any other
+// status, is the asker failing, never a yes.
+func TestAnAskerMaySayItsAnswerOnStdout(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want record.Answer
+		fail bool
+	}{
+		{`exit 0`, record.Allow, false},
+		{`exit 1`, record.Refuse, false},
+		{`echo Ask; exit 1`, record.Ask, false},
+		{`echo ALLOW; exit 1`, record.Allow, false},
+		{`printf ' refuse \n'; exit 0`, record.Refuse, false},
+		{`echo; exit 1`, record.Refuse, false},
+		{`echo always; exit 0`, record.Refuse, true},
+		{`printf 'allow\nask\n'; exit 0`, record.Refuse, true},
+		{`head -c 100 /dev/zero | tr '\0' ' '; echo allow; exit 0`, record.Refuse, true},
+		{`echo allow; exit 2`, record.Refuse, true},
+	} {
+		c := mustCommand(t, script(t, `cat >/dev/null; `+tc.body))
+		got, err := c.Ask(context.Background(), question)
+		if got != tc.want || (err != nil) != tc.fail {
+			t.Errorf("%s: (%v, %v), want %v, failing %v", tc.body, got, err, tc.want, tc.fail)
+		}
+	}
+}
+
+// -asker-concurrent: as many questions open at once as it says, and no more.
+func TestAsManyQuestionsOpenAsTheDaemonSays(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewCommand(script(t, `
+		touch `+dir+`/open.$$
+		n=$(ls `+dir+` | grep -c '^open')
+		[ "$n" -le 2 ] || touch `+dir+`/over
+		while [ ! -e `+dir+`/go ]; do sleep 0.01; done
+		rm `+dir+`/open.$$`), Limits{Concurrent: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() {
+			q := question
+			q.Session = fmt.Sprintf("s%d", i)
+			if a, err := c.Ask(context.Background(), q); a != record.Allow || err != nil {
+				t.Errorf("(%v, %v)", a, err)
+			}
+		})
+	}
+	waitFor(t, func() bool { m, _ := filepath.Glob(dir + "/open.*"); return len(m) == 2 })
+	time.Sleep(50 * time.Millisecond)
+	if m, _ := filepath.Glob(dir + "/open.*"); len(m) != 2 {
+		t.Fatalf("%d open, want 2", len(m))
+	}
+	if err := os.WriteFile(dir+"/go", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	if _, err := os.Stat(dir + "/over"); err == nil {
+		t.Fatal("more than two were open at once")
+	}
+}
+
+// A recording session's second question waits its turn rather than being
+// refused: someone is there to answer each, and in order.
+func TestARecordingSessionsQuestionsQueue(t *testing.T) {
+	dir := t.TempDir()
+	c := mustCommand(t, script(t, `touch `+dir+`/asked.$$; while [ ! -e `+dir+`/go ]; do sleep 0.01; done; echo ask`))
+	q := question
+	q.Record = true
+	done := make(chan record.Answer, 2)
+	go func() { a, _ := c.Ask(context.Background(), q); done <- a }()
+	waitFor(t, func() bool { m, _ := filepath.Glob(dir + "/asked.*"); return len(m) == 1 })
+	go func() { a, _ := c.Ask(context.Background(), q); done <- a }()
+	// Not refused: still waiting.
+	select {
+	case a := <-done:
+		t.Fatalf("the second question was answered %v while the first was open", a)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// The same session without record is still refused at once.
+	plain := question
+	if _, err := c.Ask(context.Background(), plain); !errors.Is(err, intercept.ErrBusy) {
+		t.Fatalf("%v, want ErrBusy", err)
+	}
+	if err := os.WriteFile(dir+"/go", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if a := <-done; a != record.Ask {
+			t.Fatalf("%v, want ask", a)
+		}
+	}
+	if m, _ := filepath.Glob(dir + "/asked.*"); len(m) != 2 {
+		t.Fatalf("%d asked, want both", len(m))
+	}
+}
+
+// -asker-per-session lets a session have more than one question waiting.
+func TestASessionMayHaveAsManyWaitingAsTheDaemonSays(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewCommand(script(t, `touch `+dir+`/asked.$$; while [ ! -e `+dir+`/go ]; do sleep 0.01; done`),
+		Limits{Concurrent: 2, PerSession: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 2)
+	for range 2 {
+		go func() { _, err := c.Ask(context.Background(), question); done <- err }()
+	}
+	waitFor(t, func() bool { m, _ := filepath.Glob(dir + "/asked.*"); return len(m) == 2 })
+	if _, err := c.Ask(context.Background(), question); !errors.Is(err, intercept.ErrBusy) {
+		t.Fatalf("a third: %v, want ErrBusy", err)
+	}
+	if err := os.WriteFile(dir+"/go", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

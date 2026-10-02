@@ -4,8 +4,11 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
+	"strconv"
 	"time"
 
+	"github.com/danielbodart/frisket/internal/intercept"
+	recording "github.com/danielbodart/frisket/internal/record"
 	"github.com/danielbodart/frisket/internal/steer"
 )
 
@@ -78,7 +81,26 @@ type Handler struct {
 	Log *slog.Logger
 	// Idle is the splice's idle limit; zero means DefaultIdle.
 	Idle time.Duration
+	// Record makes the session a recording one. Nil without a record block.
+	Record *Recording
 }
+
+// Recording is what a recording session's egress decides with: the names
+// its DNS resolved that the policy does not allow, kept apart from the
+// resolved set, and who decides a connection to one.
+type Recording struct {
+	Recorder *recording.Recorder
+	// Unlisted are the addresses the session's DNS resolved for names the
+	// policy does not allow.
+	Unlisted *Resolved
+	// Asker is put a connection to when the recorder has no default.
+	Asker     intercept.Asker
+	Workspace string
+}
+
+// RuleRecorded is the reason on an egress line for a connection a recording
+// session admitted that its policy would have refused.
+const RuleRecorded = "recorded"
 
 var _ steer.Handler = (*Handler)(nil)
 
@@ -91,13 +113,34 @@ func (h *Handler) ServeConn(ctx context.Context, c *steer.Conn) {
 	d := h.Policy.Decide(dst.Addr())
 	line := egressLine{conn: c, policy: h.PolicyName, decision: d}
 
-	if !d.Allowed {
+	lanDst := false
+	if !d.Allowed && h.Record != nil {
+		if e, ok := h.Record.Unlisted.Lookup(dst.Addr()); ok && !d.Resolved {
+			// Named on the line as the session's DNS named it, though the
+			// policy does not allow it.
+			line.decision.Entry = e
+		}
+		var reason string
+		reason, lanDst = h.record(ctx, c, d)
+		switch reason {
+		case "":
+			line.decision.Allowed, line.decision.Reason = true, RuleRecorded
+		case d.Reason:
+		default:
+			line.decision.Reason += "; " + reason
+		}
+	}
+	if !line.decision.Allowed {
 		line.outcome = DecisionRefused
 		h.log(line, start)
 		return
 	}
 
-	up, err := h.Dialer.DialTCP(ctx, dst)
+	dial := h.Dialer.DialTCP
+	if lanDst {
+		dial = h.Dialer.DialLAN
+	}
+	up, err := dial(ctx, dst)
 	if err != nil {
 		if re, ok := AsRefused(err); ok {
 			// Classify said yes a moment ago and Control, looking at the
@@ -142,7 +185,7 @@ func (h *Handler) log(l egressLine, start time.Time) {
 		"peer", l.conn.Peer.String(),
 		"dst", l.conn.Orig.String(),
 	}
-	if l.decision.Resolved {
+	if l.decision.Resolved || l.decision.Entry.Name != "" {
 		attrs = append(attrs, "name", l.decision.Entry.Name, "dns_query", l.decision.Entry.Query)
 	}
 	attrs = append(attrs, "decision", l.outcome)
@@ -161,4 +204,76 @@ func (h *Handler) log(l egressLine, start time.Time) {
 		attrs = append(attrs, "error", l.err.Error())
 	}
 	h.Log.Info("egress", attrs...)
+}
+
+// record decides, in a recording session, a connection the policy refused:
+// one to an address the session's DNS resolved for a name off the
+// allowlist, or for any name to an address on the local network. It
+// returns why it stays refused, or "" if it is admitted, and whether the
+// destination is on the local network, to be dialled as such. A connection
+// to an address nobody resolved, and every other structural refusal, stays
+// refused, and is written down as that.
+func (h *Handler) record(ctx context.Context, c *steer.Conn, d Decision) (reason string, lanDst bool) {
+	rc := h.Record
+	dst := c.Orig
+	l := recording.Line{
+		Session: c.Session,
+		Kind:    recording.KindEgress,
+		Port:    dst.Port(),
+		Address: dst.String(),
+		Would:   string(recording.Refuse),
+		Rule:    d.Reason,
+	}
+	name := d.Entry.Name
+	unlisted, listed := rc.Unlisted.Lookup(dst.Addr())
+	if !d.Resolved && listed {
+		name = unlisted.Name
+	}
+	resolved := d.Resolved || listed
+	switch {
+	case !resolved:
+		// A literal address, or an answer held past its life: there is no
+		// name to grant, and no address is granted by itself.
+		rc.Recorder.Hard(l, "address "+dst.String(), d.Reason)
+		return d.Reason, false
+	case d.Refusal.Refused():
+		if r := h.Policy.Classifier.ClassifyLAN(dst.Addr()); r.Refused() {
+			l.Name = name
+			rc.Recorder.Hard(l, "address "+dst.String(), "structural: "+r.String())
+			return "structural: " + r.String(), false
+		}
+		lanDst = true
+	default:
+		l.Rule = recording.RuleNotAllowed
+	}
+	l.Name, l.LAN = name, lanDst
+	key := name + ":" + strconv.Itoa(int(dst.Port()))
+	if lanDst {
+		key += " lan"
+	}
+	res := rc.Recorder.Decide(ctx, l, key, func(ctx context.Context) (recording.Answer, string, error) {
+		q := intercept.Question{
+			Session:   c.Session,
+			Workspace: rc.Workspace,
+			Policy:    h.PolicyName,
+			Kind:      intercept.KindEgress,
+			Host:      name,
+			Address:   dst.String(),
+			Record:    true,
+			ID:        recording.ID(c.Session, recording.KindEgress, key),
+		}
+		a, reason, err := intercept.AskAbout(ctx, rc.Asker, q)
+		if err != nil {
+			h.Log.Error("ask", "session", c.Session, "conn", c.ID, "dst", dst.String(), "error", err.Error())
+		}
+		a, reason = intercept.RecordAnswer(a, reason)
+		return a, reason, nil
+	})
+	switch {
+	case res.Answer.Admits():
+		return "", lanDst
+	case res.Reason != "":
+		return res.Reason, lanDst
+	}
+	return intercept.ReasonRecordRefused, lanDst
 }

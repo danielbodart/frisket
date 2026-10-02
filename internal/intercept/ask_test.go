@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	recording "github.com/danielbodart/frisket/internal/record"
 )
 
 // answers is an Asker that says what it was told to, and keeps the questions.
@@ -24,11 +26,12 @@ type answers struct {
 	answer    func(Question) (bool, error)
 }
 
-func (a *answers) Ask(_ context.Context, q Question) (bool, error) {
+func (a *answers) Ask(_ context.Context, q Question) (recording.Answer, error) {
 	a.mu.Lock()
 	a.questions = append(a.questions, q)
 	a.mu.Unlock()
-	return a.answer(q)
+	ok, err := a.answer(q)
+	return recording.AllowIf(ok), err
 }
 
 var deleteThing = &Operation{ID: "delete-thing", Summary: "Delete Thing", Description: "Removes the thing."}
@@ -88,6 +91,20 @@ func TestAPersonDecidesWhatTheScopeAsksAbout(t *testing.T) {
 				Path: "/v1/things/a%3Ab", Query: "force=true", Operation: deleteThing},
 			{Session: "sess-test", Workspace: "/work/test", Policy: "test-policy", Route: "api", Method: "PUT", Host: apiHost, Path: "/v1/things/a"},
 			{Session: "sess-test", Workspace: "/work/test", Policy: "test-policy", Route: "api", Method: "POST", Host: apiHost, Path: "/v2/other"},
+		}
+		// Each names its subject: the operation where a rule matched, the
+		// path where none did.
+		for i, id := range []string{
+			recording.ID("sess-test", recording.KindHTTP, "api\x00DELETE\x00operation delete-thing\x00"),
+			recording.ID("sess-test", recording.KindHTTP, "api\x00PUT\x00path /v1/things/a\x00"),
+			recording.ID("sess-test", recording.KindHTTP, "api\x00POST\x00path /v2/other\x00"),
+		} {
+			if i < len(asker.questions) {
+				if asker.questions[i].ID != id {
+					t.Errorf("question %d: id %q, want %q", i, asker.questions[i].ID, id)
+				}
+				asker.questions[i].ID = ""
+			}
 		}
 		if !reflect.DeepEqual(asker.questions, want) {
 			t.Errorf("questions:\n got %+v\nwant %+v", asker.questions, want)

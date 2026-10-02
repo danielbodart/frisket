@@ -109,7 +109,8 @@ In the `agent` container:
   that sandbox. Loopback, private ranges, link-local, CGNAT, ULA and the
   host's own addresses are always refused, checked at connect time so DNS
   rebinding can't get round it. frisket reaches a private address only for
-  an SSH route, which it terminates, and never relays one as raw TCP.
+  an SSH route, which it terminates, or for a recording session, by a name,
+  when someone recording says so.
 - **Interception.** Each session gets its own CA, name-constrained to its
   routes' hosts, mounted read-only at `/etc/frisket` (`ca.crt`, and
   `ca-bundle.crt`, the system bundle plus the CA). The key never leaves the
@@ -119,6 +120,10 @@ In the `agent` container:
   included.
 - **Restarts.** Sessions survive a daemon restart. A changed policy restarts
   the daemon, so tightening a policy tightens running sandboxes.
+- **Recording.** A session whose document has a `record` block lets through
+  what its policy would refuse or ask about -- by a default, or by asking --
+  and writes each down as one JSON line, for a grant to be made from. What no
+  policy decides stays refused. See [docs/record.md](docs/record.md).
 
 ### Modes
 
@@ -164,6 +169,7 @@ A route can do more than add a bearer token. Each is in
 | `services.frisket.policies.<name>.allow` | `[ ]` | Names a sandbox may resolve: `name`, `*.name` (any depth below) or `*`. |
 | `services.frisket.policies.<name>.routes.<route>` | `{ }` | An intercepted host: `host`, `upstream`, `credentialFile`, `placeholder`, `paths`, … See [docs/routes.md](docs/routes.md). |
 | `services.frisket.asker` | `null` | The program a question goes to; `null` refuses every question. |
+| `services.frisket.askerConcurrent` / `askerPerSession` | `1` / `1` | Questions open at once, and per session; a recording session's wait rather than being refused. |
 | `services.frisket.dns` | host's `resolv.conf` | Where frisket resolves allowed names. |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | The daemon's control socket; never bound into a sandbox. |
 | `services.frisket.logLevel` | `info` | `debug` adds request headers and error bodies; credentials are described, never shown. |

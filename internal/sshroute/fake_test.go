@@ -26,6 +26,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/record"
 	"github.com/danielbodart/frisket/internal/steer"
 	"github.com/danielbodart/frisket/policy"
 )
@@ -349,7 +350,7 @@ type answers struct {
 	gone  chan struct{}
 }
 
-func (a *answers) Ask(ctx context.Context, q intercept.Question) (bool, error) {
+func (a *answers) Ask(ctx context.Context, q intercept.Question) (record.Answer, error) {
 	a.mu.Lock()
 	a.asked = append(a.asked, q)
 	block, yes, err := a.block, a.yes, a.err
@@ -359,9 +360,9 @@ func (a *answers) Ask(ctx context.Context, q intercept.Question) (bool, error) {
 		if a.gone != nil {
 			close(a.gone)
 		}
-		return false, ctx.Err()
+		return record.Refuse, ctx.Err()
 	}
-	return yes, err
+	return record.AllowIf(yes), err
 }
 
 func (a *answers) questions() []intercept.Question {
@@ -385,6 +386,7 @@ type fixture struct {
 type options struct {
 	route    func(*policy.SSHRoute)
 	asker    intercept.Asker
+	recorder *record.Recorder
 	hostKeys []ssh.Signer
 	// userKey is the user's key, in the agent and on the machine; nil is a
 	// new one.
@@ -440,12 +442,13 @@ func newFixture(t *testing.T, o options) *fixture {
 	}
 	j := &journal{}
 	h, err := New(Config{
-		Routes: routes,
-		CA:     ca,
-		Expiry: time.Now().Add(time.Hour),
-		Asker:  o.asker,
-		Policy: "p",
-		Log:    slog.New(slog.NewJSONHandler(j, nil)),
+		Routes:   routes,
+		CA:       ca,
+		Expiry:   time.Now().Add(time.Hour),
+		Asker:    o.asker,
+		Recorder: o.recorder,
+		Policy:   "p",
+		Log:      slog.New(slog.NewJSONHandler(j, nil)),
 		Dial: func(ctx context.Context, to netip.AddrPort) (net.Conn, error) {
 			if to != routeAddr {
 				return nil, fmt.Errorf("dialled %s, not the route's address", to)

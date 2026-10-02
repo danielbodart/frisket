@@ -248,15 +248,36 @@ upstream first and the rest streams after it, however long it is: what a
 person admits is the start of a body.
 
 Exit 0 admits the request, 1 declines it, and anything else refuses it and is
-logged as the asker failing. `operation` is absent when nothing matched, and it
+logged as the asker failing. On 0 or 1, and only then, the asker may answer on
+stdout instead: one line, `allow`, `ask` or `refuse`, in any case, 64 bytes at
+most, which stands in place of the status. `ask` admits the request as `allow`
+does; a [recording session](record.md) records it as one to keep asking
+about. Nothing on stdout leaves the status to answer, and anything else there
+is the asker failing -- never a yes. zenity answers so already:
+
+```sh
+zenity --question --ok-label=Allow --cancel-label=Refuse --extra-button=Ask ...
+```
+
+prints nothing and exits 0 for Allow, 1 for Refuse, and prints `Ask` and exits
+1 for Ask. Offer the third button when the question has `record` set: one
+from a recording session. Every question has an `id`, the same for a second
+asking of the same subject in a session -- the operation, where a rule named
+one, or the exact path -- and different for any other.
+
+`operation` is absent when nothing matched, and it
 is the only prose in the question: it comes from the configuration, and
 everything else is the workload's, to be shown as the request. A client that
 stops waiting takes its question with it: queued, it is never asked; open, the
 asker's process group is sent SIGTERM. With no asker, every ask is refused.
 
-Each session has one question at most: another while one waits is refused at
-once, so no sandbox can queue ahead of another's or bury a question among
-many.
+One question is open at a time, daemon-wide, and each session has one
+question at most: another while one waits is refused at once, so no sandbox
+can queue ahead of another's or bury a question among many. An asker that
+stacks its questions in one window can take more of both:
+`services.frisket.askerConcurrent` and `askerPerSession` (`-asker-concurrent`
+and `-asker-per-session`), one each by default. A recording session's
+questions are never refused for being busy: each waits its turn.
 
 Where several rules match, an admission never depends on how literally the
 upstream reads its paths: a rule that asks, and matches the request read

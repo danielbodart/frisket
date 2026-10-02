@@ -32,6 +32,7 @@ import (
 	"github.com/danielbodart/frisket/internal/dockerapi"
 	"github.com/danielbodart/frisket/internal/egress"
 	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/record"
 	"github.com/danielbodart/frisket/internal/relay"
 	"github.com/danielbodart/frisket/internal/serve"
 	"github.com/danielbodart/frisket/internal/sshroute"
@@ -108,6 +109,9 @@ type Deps struct {
 	// Roots are the directories a policy document may be read from. Empty:
 	// anywhere, which only a check or a test should want.
 	Roots []string
+	// RecordDir is where a recording document's sink may be: directly in
+	// it. Empty refuses every document with a sink.
+	RecordDir string
 
 	// checking builds a document without watching its credential files.
 	checking bool
@@ -330,6 +334,14 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 		return nil, closers, err
 	}
 
+	rec, err := recorder(name, p.Record, d)
+	if err != nil {
+		return nil, closers, err
+	}
+	if rec != nil {
+		closers = append(closers, rec.Close)
+	}
+
 	routes := make([]intercept.Route, 0, len(p.Routes))
 	for _, r := range p.Routes {
 		ir, closer, err := route(r, d)
@@ -341,10 +353,11 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 	}
 
 	ic, err := intercept.New(intercept.Config{
-		Routes: routes,
-		Log:    d.Log,
-		Policy: name,
-		Asker:  d.Asker,
+		Routes:   routes,
+		Log:      d.Log,
+		Policy:   name,
+		Asker:    d.Asker,
+		Recorder: rec,
 		// The upstream is dialled through the same structural check as every
 		// other connection frisket makes: a route pointed at the host's own
 		// address, or at the metadata service, is refused at the dial.
@@ -395,7 +408,7 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 			}
 		}
 		resolved := egress.NewResolved(egress.ResolvedConfig{})
-		srv, err := dns.New(dns.Config{
+		dc := dns.Config{
 			Session:   s.Name,
 			Policy:    name,
 			Allow:     allow,
@@ -405,17 +418,28 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 			Upstream:  up,
 			Resolved:  resolved,
 			Log:       log,
-		})
+		}
+		eg := &egress.Handler{
+			Policy:     &egress.Policy{Classifier: d.Classifier, Resolved: resolved},
+			Dialer:     d.Dialer,
+			PolicyName: name,
+			Log:        log,
+		}
+		if rec != nil {
+			// A set of the session's own, apart from resolved: what the
+			// policy does not allow is never in the allowlist egress
+			// admits by, only in what the recording decides about.
+			unlisted := egress.NewResolved(egress.ResolvedConfig{})
+			dc.Unlisted = unlisted
+			dc.OnUnlisted = func(n string) { rec.Resolved(s.Name, n) }
+			eg.Record = &egress.Recording{Recorder: rec, Unlisted: unlisted, Asker: d.Asker, Workspace: s.Params["workspace"]}
+		}
+		srv, err := dns.New(dc)
 		if err != nil {
 			return serve.Handlers{}, err
 		}
 		h := serve.Handlers{
-			Egress: &egress.Handler{
-				Policy:     &egress.Policy{Classifier: d.Classifier, Resolved: resolved},
-				Dialer:     d.Dialer,
-				PolicyName: name,
-				Log:        log,
-			},
+			Egress:    eg,
 			Intercept: ic.For(ca, s.Params["workspace"]),
 			DNS:       srv,
 			Authority: authority,
@@ -441,12 +465,57 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 		// not steered, until it is relaunched; one it has lost falls to
 		// Egress, which refuses a private address structurally.
 		if len(shells) > 0 {
-			if h.SSH, h.SSHRoutes, err = sessionSSH(shells, ca, d.Asker, name, s.Params["workspace"], log); err != nil {
+			if h.SSH, h.SSHRoutes, err = sessionSSH(shells, ca, d.Asker, rec, name, s.Params["workspace"], log); err != nil {
 				return serve.Handlers{}, err
 			}
 		}
 		return h, nil
 	}), closers, nil
+}
+
+// recorder is a recording document's recorder, with its sink open, or nil
+// for every other document. A recording that would ask a person needs an
+// asker to ask, and a sink must be in the daemon's -record-dir: a document
+// short of either is refused, rather than a session that records nothing.
+func recorder(name string, r *policy.Record, d Deps) (*record.Recorder, error) {
+	if r == nil {
+		return nil, nil
+	}
+	def, ok := record.ParseAnswer(r.Default)
+	switch {
+	case r.Default == "":
+		def = ""
+		if d.Asker == nil && !d.checking {
+			return nil, errors.New("record: no default, so each subject is put to a person, and this daemon has no asker")
+		}
+	case !ok || def != record.Answer(r.Default):
+		return nil, fmt.Errorf("record: default %q: allow, ask or refuse, or none to ask a person", r.Default)
+	}
+	var sink *record.Sink
+	if r.Sink != "" {
+		if d.checking {
+			// Where the daemon keeps records is the daemon's to say.
+			if err := record.CheckSinkShape(r.Sink); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := record.CheckSinkPath(r.Sink, d.RecordDir); err != nil {
+				return nil, err
+			}
+			var err error
+			if sink, err = record.OpenSink(r.Sink); err != nil {
+				return nil, err
+			}
+		}
+	}
+	rec, err := record.New(record.Config{Policy: name, Default: def, Sink: sink, Log: d.Log})
+	if err != nil {
+		if sink != nil {
+			sink.Close()
+		}
+		return nil, err
+	}
+	return rec, nil
 }
 
 // dockerNames holds a document to one Docker route, and that route's names
@@ -517,7 +586,7 @@ func sshRoutes(p policy.Policy, hosts []string) ([]*sshroute.Route, error) {
 // record holds it -- so a session restored from its record has the SSH CA
 // its sandbox's known_hosts names, with nothing added to the record; the host
 // key under it is new each time, and trusted all the same.
-func sessionSSH(routes []*sshroute.Route, ca *intercept.CA, asker intercept.Asker, policyName, workspace string, log *slog.Logger) (serve.SSHHandler, *serve.SSHRoutes, error) {
+func sessionSSH(routes []*sshroute.Route, ca *intercept.CA, asker intercept.Asker, rec *record.Recorder, policyName, workspace string, log *slog.Logger) (serve.SSHHandler, *serve.SSHRoutes, error) {
 	key, err := ca.KeyPKCS8()
 	if err != nil {
 		return nil, nil, fmt.Errorf("ssh: the session's CA key: %w", err)
@@ -531,6 +600,7 @@ func sessionSSH(routes []*sshroute.Route, ca *intercept.CA, asker intercept.Aske
 		CA:        sshCA,
 		Expiry:    ca.Certificate().NotAfter,
 		Asker:     asker,
+		Recorder:  rec,
 		Policy:    policyName,
 		Workspace: workspace,
 		Log:       log,
@@ -878,6 +948,9 @@ func Dialer() (*egress.Classifier, *egress.Dialer, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// The host's routers, which a recording session's destination on the
+	// local network may never be.
+	c = c.WithGateways(egress.NewGateways(0))
 	// The default resolver, which in a static binary is Go's own, reading the
 	// host's resolv.conf: an upstream named in a route is the operator's
 	// choice, resolved as the host resolves it, and Control checks whatever

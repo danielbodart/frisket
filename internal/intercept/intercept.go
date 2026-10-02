@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/danielbodart/frisket/internal/dns"
+	recording "github.com/danielbodart/frisket/internal/record"
 	"github.com/danielbodart/frisket/internal/steer"
 )
 
@@ -91,6 +92,14 @@ const (
 // RuleAsked is the rule of a request a person admitted.
 const RuleAsked = "asked"
 
+// RuleRecorded is the rule of a request a recording session admitted that
+// its policy would have refused or asked about.
+const RuleRecorded = "recorded"
+
+// ReasonRecordRefused is a recording session's refusal of what its policy
+// would have refused or asked about, by its default or a person's answer.
+const ReasonRecordRefused = "refused while recording"
+
 // RuleGrant is the rule of a request to a session key's token URL.
 const RuleGrant = "session key grant"
 
@@ -99,11 +108,12 @@ const RuleGrant = "session key grant"
 var ErrBusy = errors.New(ReasonBusy)
 
 // Asker puts a request the scope would not decide to someone who can. It
-// answers true to admit it; false, or an error, refuses it. It is called on
-// the request's own goroutine and may take as long as a person does; ctx ends
-// when the client stops waiting.
+// answers allow or ask to admit it -- the same now, and different only to a
+// recording session, which records which -- and refuse, or an error, to
+// refuse it. It is called on the request's own goroutine and may take as
+// long as a person does; ctx ends when the client stops waiting.
 type Asker interface {
-	Ask(ctx context.Context, q Question) (bool, error)
+	Ask(ctx context.Context, q Question) (recording.Answer, error)
 }
 
 // Question is one request put to an Asker. Operation is the only prose in it,
@@ -142,7 +152,10 @@ type Question struct {
 	// Kind is what is asked about: empty for an HTTP request, as every
 	// question was before there was anything else, and "ssh" for a command
 	// on an SSH route -- whose Host is the route's name, with no Method or
-	// Path, and whose Body is the start of the command's stdin.
+	// Path, and whose Body is the start of the command's stdin -- and
+	// "egress" for a recording session's connection to a name its policy
+	// does not allow, or to the local network: Host is the name, Address
+	// the ip:port dialled, and there is no Route, Method or Path.
 	Kind string `json:"kind,omitempty"`
 	// Address is the SSH route's upstream, ip:port, and User who the
 	// command runs as there.
@@ -153,7 +166,18 @@ type Question struct {
 	// Shell is a command on a Shell route: typed into the device's own CLI,
 	// whose grammar frisket does not know, rather than run as an exec.
 	Shell bool `json:"shell,omitempty"`
+	// Record is a question from a recording session, whose answer is what
+	// is recorded as well as what is done: allow, ask -- admitted now and
+	// recorded as one to ask about -- or refuse. An asker shows the third
+	// answer for it.
+	Record bool `json:"record,omitempty"`
+	// ID names what is asked about within its session: the same for a
+	// second asking of the same subject, different for any other.
+	ID string `json:"id"`
 }
+
+// KindEgress is a Question's Kind for a recording session's connection.
+const KindEgress = "egress"
 
 // Config is everything an Interceptor needs.
 type Config struct {
@@ -168,6 +192,10 @@ type Config struct {
 	// Asker decides what a scope asks about. Nil refuses it: a gate with
 	// nobody to ask fails closed, never open.
 	Asker Asker
+	// Recorder makes every session served here a recording one: what the
+	// scope would refuse or ask about is the recorder's to decide. Nil for
+	// every document without a record block.
+	Recorder *recording.Recorder
 	// Now is the clock credential expiry is judged against. Nil is time.Now.
 	Now func() time.Time
 	// DialContext dials upstreams. Nil is a plain net.Dialer; the daemon
@@ -182,11 +210,12 @@ type Config struct {
 type Interceptor struct {
 	routes map[string]*route
 	// wild is the wildcard routes, by the suffix below which they serve.
-	wild   map[string]*route
-	log    *slog.Logger
-	now    func() time.Time
-	policy string
-	asker  Asker
+	wild     map[string]*route
+	log      *slog.Logger
+	now      func() time.Time
+	policy   string
+	asker    Asker
+	recorder *recording.Recorder
 
 	tlsConfig *tls.Config
 	// http1TLS is the handshake for a Docker route: HTTP/1.1 alone, which is
@@ -233,15 +262,16 @@ func New(cfg Config) (*Interceptor, error) {
 	}
 
 	i := &Interceptor{
-		routes:  map[string]*route{},
-		wild:    map[string]*route{},
-		log:     cfg.Log,
-		now:     cfg.Now,
-		policy:  cfg.Policy,
-		asker:   cfg.Asker,
-		ln:      newConnListener(),
-		served:  make(chan struct{}),
-		closing: make(chan struct{}),
+		routes:   map[string]*route{},
+		wild:     map[string]*route{},
+		log:      cfg.Log,
+		now:      cfg.Now,
+		policy:   cfg.Policy,
+		asker:    cfg.Asker,
+		recorder: cfg.Recorder,
+		ln:       newConnListener(),
+		served:   make(chan struct{}),
+		closing:  make(chan struct{}),
 	}
 	errLog := slog.NewLogLogger(cfg.Log.Handler(), slog.LevelWarn)
 
@@ -713,6 +743,21 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case v.Operation != nil:
 		rec.operation = v.Operation.ID
 	}
+	if i.recorder != nil && v.Outcome != Admit {
+		if recordable(rt, v) {
+			if reason := i.record(r, ic, v); reason != "" {
+				rec.refuse(reason)
+				rt.refuse(lw, http.StatusForbidden, reason, v.Operation)
+				return
+			}
+			// Admitted, and on as any admitted request is: its credential
+			// put on it if it carries the placeholder, since the person
+			// recording is driving.
+			v.Outcome, v.Reason = Admit, RuleRecorded
+		} else if v.Outcome == Refuse {
+			i.recorder.Hard(httpLine(ic, r, v), httpKey(ic.route.Name, r.Method, r.URL.EscapedPath(), v), v.Reason)
+		}
+	}
 	switch v.Outcome {
 	case Refuse:
 		rec.refuse(v.Reason)
@@ -798,6 +843,14 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 	if i.asker == nil {
 		return ReasonNobodyToAsk
 	}
+	_, reason := i.askPerson(r, ic, v, false)
+	return reason
+}
+
+// askPerson puts a request to the Asker, the start of its body with it, and
+// returns the answer, or why there was none and it is refused. A recording
+// session's question says so.
+func (i *Interceptor) askPerson(r *http.Request, ic *interceptedConn, v Verdict, recorded bool) (recording.Answer, string) {
 	q := Question{
 		Session:    ic.session,
 		Workspace:  ic.workspace,
@@ -809,50 +862,53 @@ func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) strin
 		Query:      r.URL.RawQuery,
 		Operation:  v.Operation,
 		Operations: v.Operations,
+		Record:     recorded,
+		ID:         recording.ID(ic.session, recording.KindHTTP, httpKey(ic.route.Name, r.Method, r.URL.EscapedPath(), v)),
 	}
 	// The body is what a write does, so its start is read before the
 	// question is asked and goes upstream first, exactly as it was shown.
 	if r.Body != nil && r.Body != http.NoBody {
 		head, more, rest, err := preview(r.Context(), r.Body)
 		if err != nil {
-			return ReasonStoppedWaiting
+			return recording.Refuse, ReasonStoppedWaiting
 		}
 		q.Body, q.BodyMore = string(head), more
 		q.BodyLength = max(r.ContentLength, 0)
 		r.Body = rest
 	}
-	reason, err := AskAbout(r.Context(), i.asker, q)
+	answer, reason, err := AskAbout(r.Context(), i.asker, q)
 	if err != nil {
 		// Said in the log where it happened, not in the request's line: the
 		// error is the asker's, and may quote whatever it was sent.
 		i.log.Error("ask", "session", ic.session, "conn", ic.id, "route", ic.route.Name, "error", err.Error())
 	}
-	return reason
+	return answer, reason
 }
 
-// AskAbout puts q to a, and returns why what it asks about is refused, or ""
-// if it was admitted: the one reading of an Asker's answer, for everything
-// that asks. err is the asker's own failure, set only with ReasonAskFailed,
-// for the caller to log on a line of its own -- it may quote whatever the
-// asker was sent. ctx is the asking side's lifetime.
-func AskAbout(ctx context.Context, a Asker, q Question) (reason string, err error) {
+// AskAbout puts q to a, and returns its answer, and why what it asks about
+// is refused, or "" if it was admitted: the one reading of an Asker's
+// answer, for everything that asks. err is the asker's own failure, set
+// only with ReasonAskFailed, for the caller to log on a line of its own --
+// it may quote whatever the asker was sent. ctx is the asking side's
+// lifetime. A refusal is answer refuse, whatever its reason.
+func AskAbout(ctx context.Context, a Asker, q Question) (answer recording.Answer, reason string, err error) {
 	if a == nil {
-		return ReasonNobodyToAsk, nil
+		return recording.Refuse, ReasonNobodyToAsk, nil
 	}
-	ok, err := a.Ask(ctx, q)
+	answer, err = a.Ask(ctx, q)
 	switch {
 	case ctx.Err() != nil:
 		// Nobody is waiting for the answer, so there is nothing to admit and
 		// nothing wrong with the asker.
-		return ReasonStoppedWaiting, nil
+		return recording.Refuse, ReasonStoppedWaiting, nil
 	case errors.Is(err, ErrBusy):
-		return ReasonBusy, nil
+		return recording.Refuse, ReasonBusy, nil
 	case err != nil:
-		return ReasonAskFailed, err
-	case !ok:
-		return ReasonDeclined, nil
+		return recording.Refuse, ReasonAskFailed, err
+	case !answer.Admits():
+		return recording.Refuse, ReasonDeclined, nil
 	}
-	return "", nil
+	return answer, "", nil
 }
 
 // rewrite is the only place a credential is put on a request.

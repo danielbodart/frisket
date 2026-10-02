@@ -696,6 +696,18 @@ in
       postStart = mark;
     };
     services.frisket.flong.ssh = { policy = "test"; policyFile = "/srv/policies/ssh.json"; };
+
+    # A recording session: the `test` policy's document with a record block,
+    # as `chase record --default allow` writes one, its lines appended to a
+    # sink in the daemon's record directory.
+    flong.record = {
+      container = "strict";
+      user = "alice";
+      inherit workspace;
+      command = [ "bash" "-c" ];
+      postStart = mark;
+    };
+    services.frisket.flong.record = { policy = "test"; policyFile = "/srv/policies/record.json"; };
   };
 
   testScript = { nodes, ... }:
@@ -709,6 +721,7 @@ in
       docker = lib.getExe nodes.machine.flong.docker.launcher;
       forwarded = lib.getExe nodes.machine.flong.forwarded.launcher;
       sshLauncher = lib.getExe nodes.machine.flong.ssh.launcher;
+      recordLauncher = lib.getExe nodes.machine.flong.record.launcher;
       sshAddr = nodes.upstream.networking.primaryIPAddress;
       frisket = lib.getExe nodes.machine.services.frisket.package;
       roots = nodes.machine.security.pki.caBundle;
@@ -869,8 +882,11 @@ in
           assert "another user namespace" in r["error"], r
           assert stored() == 0
           # It keeps nothing on disk: a session's CA is made when it opens,
-          # and kept only in the daemon and the session's sealed record.
-          machine.fail("test -e /var/lib/frisket")
+          # and kept only in the daemon and the session's sealed record. Its
+          # one directory is for a recording session's lines, empty until
+          # one runs.
+          assert machine.succeed("ls -A /var/lib/frisket").split() == ["records"]
+          assert machine.succeed("ls -A /var/lib/frisket/records") == ""
 
       with subtest("a session is steered, and every connection logged once with where it was going"):
           out = machine.succeed(as_user("${strict} 'curl -sS -m 5 -4 http://allowed.test/; curl -sS -m 5 -6 http://allowed.test/'"))
@@ -1714,6 +1730,42 @@ in
               assert bad not in lines, out
           # And it is still steered afterwards.
           assert "upstream-body" in out, out
+
+      with subtest("a recording session admits what its policy would not, and writes each subject down"):
+          doc = json.loads(machine.succeed("cat /etc/frisket/policies/test.json"))
+          sink = "/var/lib/frisket/records/record.jsonl"
+          doc["record"] = {"default": "allow", "sink": sink}
+          machine.succeed(f"printf '%s' {shlex.quote(json.dumps(doc))} > /srv/policies/record.json && chmod 0644 /srv/policies/record.json")
+          name, leader = hold("${recordLauncher}", "ip link show frisket0")
+          # Out of the route's scope, and admitted with the real credential:
+          # the person recording is driving.
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 --cacert /etc/frisket/ca.crt -o /dev/null -w '%{http_code}' "
+                                                    f"-H 'Authorization: Bearer {placeholder}' https://api.test/recorded"))
+          assert out.strip() == "200", out
+          assert f"GET api.test /recorded auth=Bearer {token}" in upstream_saw("/recorded"), upstream_saw("/recorded")
+          # A name on no allowlist resolves, and a connection to it goes.
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 http://unlisted.test/"))
+          assert "upstream-body" in out, out
+          # An address dialled by itself has no name to grant: refused. By
+          # its v6 address, which unlisted.test, v4 alone, never answered.
+          machine.fail(as_workload(leader, "curl -sS -m 5 -g '${url6}'"))
+          release(name)
+          assert machine.succeed("stat -c '%U %a' /var/lib/frisket/records").strip() == "alice 700"
+          assert machine.succeed(f"stat -c '%U %a' {sink}").strip() == "alice 600"
+          lines = [json.loads(l) for l in machine.succeed(as_alice(f"cat {sink}")).splitlines()]
+          assert all(l["session"] == name for l in lines), lines
+          http = [l for l in lines if l["kind"] == "http"]
+          assert [(l["route"], l["method"], l["host"], l["path"], l["would"], l["rule"], l["answer"], l["source"]) for l in http] == [
+              ("api", "GET", "api.test", "/recorded", "refuse", "out of scope", "allow", "default")], http
+          [dns] = [l for l in lines if l["kind"] == "dns"]
+          assert (dns["name"], dns["source"]) == ("unlisted.test", "telemetry"), dns
+          egress = [l for l in lines if l["kind"] == "egress"]
+          admitted = [l for l in egress if l["source"] == "default"]
+          assert [(l["name"], l["port"], l["rule"], l["answer"]) for l in admitted] == [("unlisted.test", 80, "not allowed", "allow")], egress
+          hard = [l for l in egress if l["source"] == "hard"]
+          assert [(l["address"], l["reason"]) for l in hard] == [("[${upstream6}]:80", "not resolved by this session")], egress
+          # And the journal has them too, as `record` lines.
+          assert len(lines_of("record", name)) == len(lines), lines_of("record", name)
 
       with subtest("a session with a policy the daemon does not have never runs"):
           err = machine.succeed(as_user("${badpolicy} 'echo ran' 2>&1; echo rc=$?"))

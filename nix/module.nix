@@ -624,10 +624,39 @@ in
         `operations`, as for a GraphQL request, and one no rule names is only
         in `command`; there is no `method` or `path` to show. Exit 0 admits the
         request or command, 1 declines it, anything else refuses it and is
-        logged as the asker failing. Everything but `operation` is the
+        logged as the asker failing. On 0 or 1, and only then, one line on
+        stdout -- `allow`, `ask` or `refuse`, any case, 64 bytes at most --
+        answers in the status's place, and anything else there is the asker
+        failing. Every question has an `id`, the same for a second asking of
+        the same subject in the session. A recording session's has `record`
+        set: offer Ask beside Allow and Refuse, which admits it now and is
+        recorded as one to ask about -- zenity's `--extra-button=Ask` prints
+        its label and exits 1 -- and a connection to a name the policy does
+        not allow is asked about with `kind` "egress", `host` the name and
+        `address` the ip:port. Everything but `operation` is the
         workload's choosing: show it as the request, never as prose, and
         escape it for whatever renders it. Null: everything a route asks
         about is refused.
+      '';
+    };
+
+    askerConcurrent = mkOption {
+      type = types.ints.positive;
+      default = 1;
+      description = ''
+        Questions open at once, daemon-wide; the rest wait their turn. One
+        suits a dialog per question; an asker that queues its own -- a
+        window that stacks them -- can take more.
+      '';
+    };
+
+    askerPerSession = mkOption {
+      type = types.ints.positive;
+      default = 1;
+      description = ''
+        Questions one session may have queued or open; another is refused at
+        once, so no sandbox can bury a question among many. A recording
+        session's waits its turn instead: someone is there to answer each.
       '';
     };
 
@@ -872,6 +901,17 @@ in
             "${configFile}"
           ]
           ++ lib.optionals (cfg.asker != null) [ "-asker" cfg.asker ]
+          ++ [
+            "-asker-concurrent"
+            (toString cfg.askerConcurrent)
+            "-asker-per-session"
+            (toString cfg.askerPerSession)
+            # Where a recording session's lines are appended, beside the
+            # journal, which rate-limits: the user's, 0700, under
+            # ProtectSystem's read-only /var, and bound into no sandbox.
+            "-record-dir"
+            "/var/lib/frisket/records"
+          ]
           ++ lib.concatMap (r: [ "-policy-root" r ]) ([ "/etc/frisket/policies" ] ++ cfg.policyRoots)
           ++ lib.optionals (cfg.maxConnections > 0) [ "-max-conns" (toString cfg.maxConnections) ]);
           User = cfg.user;
@@ -887,6 +927,14 @@ in
           NotifyAccess = "main";
           FileDescriptorStoreMax = cfg.maxSessions * perSession;
           FileDescriptorStorePreserve = "restart";
+
+          # A RECORDING SESSION'S LINES, the one place the daemon writes:
+          # /var/lib/frisket/records, made by systemd as the daemon's user,
+          # 0700, and kept across a restart, so the user's `chase record`
+          # reads a session's file after it ends, and no sandbox, which
+          # binds none of /var/lib, reaches it.
+          StateDirectory = "frisket/records";
+          StateDirectoryMode = "0700";
 
           # Everything else it could reach, taken away. It dials out from the
           # host's network namespace, so the network stays; it receives

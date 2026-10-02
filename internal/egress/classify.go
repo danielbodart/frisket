@@ -7,7 +7,12 @@
 //     unspecified, multicast, every other spelling of any of those, and every
 //     address the host itself owns. Not configurable per session, and nothing
 //     later can override it: there is no code path from "refused here" to
-//     "accepted". ottergate consults its allowlist FIRST, which is why its
+//     "accepted" -- but one. A recording session, whose every decision a
+//     person makes or chose up front, may reach the local network by a name
+//     its DNS gave, through ClassifyLAN, which is this table less private,
+//     unique-local and link-local addresses written as themselves, and still
+//     refuses the host's own addresses, its routers and a metadata service.
+//     ottergate consults its allowlist FIRST, which is why its
 //     shipped configuration (0.0.0.0/0 allowlisted) lets a sandbox reach
 //     169.254.169.254 and anything in 100.64/10.
 //  2. THE SESSION'S RESOLVED SET. A connection is accepted only to an address
@@ -172,6 +177,8 @@ func (r Refusal) String() string {
 type Classifier struct {
 	ranges []Range
 	host   *HostAddrs
+	// gateways are the host's routers, which only ClassifyLAN consults.
+	gateways *HostAddrs
 }
 
 // NewClassifier builds a classifier over ranges (DefaultRanges when nil) and

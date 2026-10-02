@@ -49,6 +49,36 @@ type Policy struct {
 	// answers with the service address, and an SSH route is neither -- it is
 	// reached at its own address, which no name resolves to.
 	SSH []SSHRoute `json:"ssh,omitempty"`
+	// Record makes every session served under the document a recording one
+	// (see Record). Absent, the policy decides, as it always has.
+	Record *Record `json:"record,omitempty"`
+}
+
+// Record is a recording session's: chase writes one into the document it
+// launches `chase record` with, and never otherwise. Whatever the policy
+// would refuse or ask about -- a route's request, an SSH route's command, a
+// connection to a name off the allowlist -- is answered by Default instead,
+// or put to a person, and written down as one JSON line, so that what the
+// session needed can become a grant. What the policy allows is served as
+// ever. What no policy decides -- a structural refusal, a credential or
+// placeholder that does not hold, a Host that is not the SNI, a method
+// override, a command a shell route cannot read, anything on a Docker
+// route, a connection to an address nobody resolved -- is refused as in any
+// session, and written down as that.
+//
+//	{"record": {"default": "allow", "sink": "/var/lib/frisket/records/chase-trusted-1.jsonl"}}
+type Record struct {
+	// Default is "allow", "ask" or "refuse": the answer to every subject,
+	// with nobody asked. allow and ask both admit it, and differ only in
+	// what is recorded; refuse refuses it. Empty puts each subject to the
+	// asker, with `record` set in the question, and its answer -- allow,
+	// ask or refuse -- does the same.
+	Default string `json:"default,omitempty"`
+	// Sink is a file the lines are appended to, as well as the journal,
+	// which rate-limits: by its absolute path, directly in the daemon's
+	// -record-dir, created 0600 and bounded at 64 MiB. Empty: the journal
+	// alone.
+	Sink string `json:"sink,omitempty"`
 }
 
 // SSHRoute is one machine a session may run commands on, by SSH, as User.

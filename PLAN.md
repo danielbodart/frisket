@@ -701,7 +701,11 @@ about forty lines.
   dials the machine itself with a dialer pinned to that address. It is never
   spliced as raw TCP: another port on the same machine, or the same port
   dialled any other way, is refused here as before, and no allowlist or
-  route can change that.
+  route can change that. The one exception is a recording session's, which
+  a person runs and answers for: there, a private, unique-local or
+  link-local address its DNS gave for a name is the recording's to decide,
+  and dialled through `ClassifyLAN`, which still refuses the host's own
+  addresses, its routers and a metadata service ("Recording", below).
 - **Allowlist:** a connection is accepted only to an address frisket resolved
   for an allowed name in that session, with a bounded TTL and a cap on the set.
 - **Names** come from frisket's own DNS answers to that session, with SNI or
@@ -1189,6 +1193,70 @@ is shaped so is below.
   catalogue of commands with it, rather than with a copy that could drift
   or through `frisket check -exec` alone.
 
+### Recording (decided; phase 1 built)
+
+Finding out what a sandbox needs by doing it: something is refused, you run
+`chase record --default allow <tier>`, do the one action, and exit, and what
+is left is a line for each rule that would have stopped it, for chase to
+make grant entries from. How it is written is `docs/record.md`; why it is
+shaped so is below.
+
+- **Only chase starts it.** A document's `record` block makes a session a
+  recording one, and chase writes the block only for `chase record`. A
+  document is already trusted whole -- root's or the daemon's user's, written
+  by nobody else -- so the block needs no gate of its own.
+- **Manual mode.** Whatever the policy decides -- a route's rule or
+  `unmatched`, a push, a GraphQL field, an SSH command's rule, a name off the
+  allowlist -- is the recording's: the default answers, or a person does,
+  Allow, Ask or Refuse, each both what is done now and what is recorded.
+  Guarded operations too: the person recording is driving, and a guarded
+  line in the proposal is theirs to see at approval. A credential goes on an
+  admitted request, for the same reason.
+- **What no policy decides stays decided.** Structural refusals, credential
+  and placeholder checks, a Host that is not the SNI, method overrides, a
+  path that is not canonical, a command a shell route cannot read, anything
+  on a Docker route, and an address dialled by itself are refused as ever,
+  and written down as `hard`: nothing a grant could change becomes a
+  person's to wave through, and a literal address has no name to grant.
+- **DNS resolves every name while recording, apart.** A name off the
+  allowlist is looked up and answered, its addresses kept in a set of the
+  session's own beside the resolved set, never in it -- so the allowlist
+  egress admits by is unchanged, and a connection to such an address is the
+  recording's to decide, by the name and port it was for. DNS itself decides
+  nothing: it is telemetry. A name leaves the host while recording; that is
+  what recording is.
+- **The local network, by name.** A private, unique-local or link-local
+  address the session's DNS gave is a recording's subject like any other,
+  dialled through `ClassifyLAN` at the dial as `Classify` is: never the
+  host's own addresses, a router its routing tables name, a metadata
+  service, loopback, CGNAT, or a v4 address spelt inside a v6 one. A
+  router's management address is the one LAN host a sandbox has no business
+  with, and the routing tables say which it is, read live as the host's own
+  addresses are, failing closed. Only in recording sessions: the structural
+  table is unchanged for every other.
+- **Each subject once a session.** The first answer is remembered in memory
+  for the rest of the session and written down; later ones are answered
+  silently. Two at once wait for one answer. No learned rule outlives the
+  session: Nix and the grant stay the only source of truth.
+- **A sink beside the journal.** The journal rate-limits, so each line also
+  goes to a file directly in `-record-dir`, which the module makes
+  `/var/lib/frisket/records` by `StateDirectory`, the user's own and 0700:
+  the one place a daemon under `ProtectSystem=strict` writes, readable by
+  the user's own `chase record` afterwards, and bound into no sandbox.
+  Appended, 0600, bounded at 64 MiB with one line saying so.
+- **A third answer, by stdout.** The asker's exit status still answers; on
+  0 or 1 one line on stdout -- allow, ask or refuse -- answers in its place,
+  so an asker that fails can never mint an answer, and zenity's
+  `--extra-button=Ask` is already the third button. A recording's question
+  says `record`, and has an `id` naming its subject. Its questions wait
+  their turn rather than being refused as busy, and how many are open at
+  once is a flag, for an asker that stacks them.
+- **Not yet.** Interception of names that are not routes' (an unconstrained
+  per-session CA), synthetic per-name DNS so every connection has its name,
+  UDP and QUIC counts, and the syscalls are later phases'. Until then a
+  connection is matched to a name by its address, as egress always has, and
+  an address an allowed name shares is admitted as that name's.
+
 ---
 
 ## Build order
@@ -1228,6 +1296,10 @@ project's address ("Docker", below Google Cloud).
 
 **SSH.** Commands on your own machines, each decided by its words, over
 frisket's login with your key ("SSH", below Docker).
+
+**Recording.** Phase 1 built: the record block, decisions by default or a
+person, the per-session memory, the sink, the three-way asker and the local
+network by name ("Recording", below SSH).
 
 **Integration.** The adapter against nix-config's tiers, and the mounts that
 target state removes.

@@ -883,3 +883,41 @@ type streamRW struct {
 
 func (s *streamRW) Read(p []byte) (int, error)  { return s.r.Read(p) }
 func (s *streamRW) Write(p []byte) (int, error) { return s.w.Write(p) }
+
+// A recording session resolves a name its policy does not allow, so that a
+// connection to it can be decided by name: its answer goes to Unlisted,
+// never to Resolved, the name is told to OnUnlisted, and a name the policy
+// does not allow is never intercepted for it.
+func TestARecordingSessionResolvesANameNotAllowedApart(t *testing.T) {
+	unlisted := &fakeRecorder{}
+	var told []string
+	f := newFixture(t, func(c *Config) {
+		c.Unlisted = unlisted
+		c.OnUnlisted = func(n string) { told = append(told, n) }
+	})
+	f.up.answers["unlisted.example"] = func(q dnsmessage.Question) []dnsmessage.Resource {
+		return []dnsmessage.Resource{rrA(q.Name, "198.51.100.7", 60)}
+	}
+	m, line := f.ask(t, query(t, 9, "unlisted.example.", dnsmessage.TypeA, false))
+	if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 1 {
+		t.Fatalf("reply = %+v", m)
+	}
+	expect(t, line, map[string]any{"decision": DecisionUnlisted, "name": "unlisted.example"})
+	if r := unlisted.all(); len(r) != 1 || r[0].addr != netip.MustParseAddr("198.51.100.7") || r[0].name != "unlisted.example" {
+		t.Fatalf("unlisted %+v", r)
+	}
+	if len(f.rec.all()) != 0 {
+		t.Fatalf("a name not allowed went into the resolved set: %+v", f.rec.all())
+	}
+	if len(told) != 1 || told[0] != "unlisted.example" {
+		t.Fatalf("told %v", told)
+	}
+	// Allowed names are as ever.
+	if _, line := f.ask(t, query(t, 10, "pkg.example.", dnsmessage.TypeA, false)); line["decision"] != DecisionResolved || len(f.rec.all()) != 1 {
+		t.Fatalf("an allowed name: %v", line)
+	}
+	m, line = f.ask(t, query(t, 11, "not-allowed-but-intercepted.example.", dnsmessage.TypeA, false))
+	if line["decision"] != DecisionUnlisted || (len(m.Answers) > 0 && m.Answers[0].Body.(*dnsmessage.AResource).A == service[0].As4()) {
+		t.Fatalf("a name not allowed was intercepted: %v", line)
+	}
+}

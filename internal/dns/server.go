@@ -42,9 +42,13 @@ const (
 	DecisionResolved    = "resolved"
 	DecisionIntercepted = "intercepted"
 	DecisionLocal       = "local"
-	DecisionRefused     = "refused"
-	DecisionDropped     = "dropped"
-	DecisionFailed      = "failed"
+	// DecisionUnlisted is a name the policy does not allow, resolved for a
+	// recording session all the same: its answer goes to Unlisted, not
+	// Resolved.
+	DecisionUnlisted = "unlisted"
+	DecisionRefused  = "refused"
+	DecisionDropped  = "dropped"
+	DecisionFailed   = "failed"
 )
 
 // Recorder is where upstream answers for allowed names go: the session's
@@ -79,6 +83,13 @@ type Config struct {
 
 	Upstream Exchanger
 	Resolved Recorder
+	// Unlisted makes the session a recording one: a name the policy does
+	// not allow is resolved anyway, its answer kept here, apart from
+	// Resolved, and OnUnlisted told the name -- so that egress can put a
+	// connection to it to the recording, by name. Nil for every other
+	// session, whose names off the allowlist never leave the host.
+	Unlisted   Recorder
+	OnUnlisted func(name string)
 
 	// Log is injected and required. A logger that silences itself under test
 	// -- ottergate's does, by sniffing os.Args -- makes "one line per query"
@@ -403,7 +414,8 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 	// because of one it does not. Cilium documents the same and makes its
 	// reject code configurable for it. To the sandbox, a name it may not
 	// resolve is a name that does not exist.
-	if !s.cfg.Allow.Match(name) {
+	unlisted := !s.cfg.Allow.Match(name)
+	if unlisted && s.cfg.Unlisted == nil {
 		l.refuse("not allowed", dnsmessage.RCodeNameError)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
@@ -412,7 +424,7 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 		l.refuse("zone transfer", dnsmessage.RCodeNotImplemented)
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
-	if s.cfg.Intercept.Match(name) {
+	if !unlisted && s.cfg.Intercept.Match(name) {
 		return s.reply(h, &q, l, s.intercept(q, l), nil, edns, limit)
 	}
 
@@ -427,8 +439,15 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 		return s.reply(h, &q, l, nil, nil, edns, limit)
 	}
 	l.decision, l.rcode = DecisionResolved, m.RCode
+	set := s.cfg.Resolved
+	if unlisted {
+		l.decision, set = DecisionUnlisted, s.cfg.Unlisted
+		if s.cfg.OnUnlisted != nil {
+			s.cfg.OnUnlisted(name)
+		}
+	}
 	for _, a := range chainAddrs(q.Name, m.Answers) {
-		s.cfg.Resolved.Record(name, a.addr, time.Duration(a.ttl)*time.Second, l.id)
+		set.Record(name, a.addr, time.Duration(a.ttl)*time.Second, l.id)
 		l.answers = append(l.answers, a.addr.String())
 	}
 	return s.reply(h, &q, l, m.Answers, m.Authorities, edns, limit)

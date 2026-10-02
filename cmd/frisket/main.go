@@ -53,7 +53,10 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         document, read when it opens and again if it is restored. Under
         systemd it is socket-activated, and
         keeps its sessions -- and their CAs -- across a restart in the
-        service's file-descriptor store.
+        service's file-descriptor store. -asker names the program questions
+        go to, -asker-concurrent and -asker-per-session how many may be open
+        at once and per session, and -record-dir where a recording session's
+        lines may be appended.
 
   frisket steer -netns PATH -mntns PATH -roots BUNDLE -steering FILE -name NAME -policy DOCUMENT [-param K=V]...
         The launcher's first step, from its hook: create the session's
@@ -179,6 +182,9 @@ func runServe(argv []string) error {
 	fs.Var(&roots, "policy-root", "a directory policy documents may be read from; repeatable (none: anywhere)")
 	policyDir := fs.String("policy-dir", "/etc/frisket/policies", "where a session stored under a policy name, before policies were documents, finds that policy")
 	askerPath := fs.String("asker", "", "the program a request a route asks about is put to (none: those requests are refused)")
+	askerConcurrent := fs.Int("asker-concurrent", 1, "questions open at once, daemon-wide; the rest wait their turn")
+	askerPerSession := fs.Int("asker-per-session", 1, "questions one session may have queued or open; another is refused at once, but a recording session's waits")
+	recordDir := fs.String("record-dir", "", "the directory a recording session's sink may be in (none: a document with a sink is refused)")
 	var level slog.Level
 	fs.TextVar(&level, "log-level", slog.LevelInfo, "debug adds each intercepted request's headers, credentials described and never shown")
 	if err := fs.Parse(argv); err != nil {
@@ -202,11 +208,17 @@ func runServe(argv []string) error {
 	if err != nil {
 		return err
 	}
-	deps := store.Deps{Classifier: classifier, Dialer: dialer, Log: log, Roots: roots}
+	if *recordDir != "" && (!filepath.IsAbs(*recordDir) || filepath.Clean(*recordDir) != *recordDir) {
+		return fmt.Errorf("-record-dir %q is not an absolute, clean path", *recordDir)
+	}
+	if *askerConcurrent < 1 || *askerPerSession < 1 {
+		return errors.New("-asker-concurrent and -asker-per-session are at least 1")
+	}
+	deps := store.Deps{Classifier: classifier, Dialer: dialer, Log: log, Roots: roots, RecordDir: *recordDir}
 	if *askerPath != "" {
 		// Only when there is one: a nil *ask.Command in the interface would
 		// be an asker that panics rather than no asker at all.
-		asker, err := ask.NewCommand(*askerPath)
+		asker, err := ask.NewCommand(*askerPath, ask.Limits{Concurrent: *askerConcurrent, PerSession: *askerPerSession})
 		if err != nil {
 			return err
 		}

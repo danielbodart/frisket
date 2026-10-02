@@ -28,6 +28,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/record"
 	"github.com/danielbodart/frisket/internal/steer"
 )
 
@@ -50,6 +51,10 @@ type Config struct {
 	Expiry time.Time
 	// Asker decides what the rules ask about. Nil refuses it.
 	Asker intercept.Asker
+	// Recorder makes the session a recording one: what the rules refuse or
+	// ask about is the recorder's to decide, but for a command a Shell
+	// route cannot read. Nil without a record block.
+	Recorder *record.Recorder
 	// Policy and Workspace are the session's, for a question.
 	Policy    string
 	Workspace string
@@ -67,6 +72,7 @@ type Config struct {
 type Handler struct {
 	routes    map[netip.AddrPort]*served
 	asker     intercept.Asker
+	recorder  *record.Recorder
 	policy    string
 	workspace string
 	log       *slog.Logger
@@ -99,6 +105,7 @@ func New(cfg Config) (*Handler, error) {
 	h := &Handler{
 		routes:    map[netip.AddrPort]*served{},
 		asker:     cfg.Asker,
+		recorder:  cfg.Recorder,
 		policy:    cfg.Policy,
 		workspace: cfg.Workspace,
 		log:       cfg.Log,

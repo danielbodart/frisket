@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/frisket/internal/record"
 )
 
 // Exit statuses frisket gives a command it did not run: 126, the shell's
@@ -200,6 +201,25 @@ func (c *channel) exec(r *ssh.Request) {
 	d := rt.Decide(p.Command)
 	line.rule, line.operation = d.Rule, d.operationIDs()
 	var stdin io.Reader = c.ch
+	if c.s.h.recorder != nil && d.Outcome != intercept.Admit {
+		if rt.shell && !rt.rules.Readable(p.Command) {
+			// Typed byte for byte into a CLI frisket cannot read: refused
+			// below as in any session, and written down as that.
+			c.s.h.recorder.Hard(c.recordLine(p.Command, d), c.recordKey(p.Command), ReasonUnreadable)
+		} else {
+			reason, rest := c.record(p.Command, d)
+			if reason != "" {
+				line.decision, line.reason = intercept.DecisionRefused, reason
+				c.refuse(r, line, start, exitRefused)
+				return
+			}
+			line.rule = intercept.RuleRecorded
+			d.Outcome = intercept.Admit
+			if rest != nil {
+				stdin = rest
+			}
+		}
+	}
 	switch d.Outcome {
 	case intercept.Refuse:
 		line.decision, line.reason = intercept.DecisionRefused, intercept.ReasonRefused
@@ -213,7 +233,7 @@ func (c *channel) exec(r *ssh.Request) {
 		return
 	case intercept.Ask:
 		line.asked = true
-		reason, rest := c.ask(p.Command, d)
+		_, reason, rest := c.ask(p.Command, d, false)
 		if reason != "" {
 			line.decision, line.reason = intercept.DecisionRefused, reason
 			c.refuse(r, line, start, exitRefused)
@@ -365,12 +385,12 @@ func (c *channel) refuse(r *ssh.Request, line *execLine, start time.Time, status
 }
 
 // ask puts the command to the asker with the start of its stdin, and
-// returns why it is refused, or "" and the stdin to send, the preview
-// first.
-func (c *channel) ask(command string, d Decision) (string, io.Reader) {
+// returns the answer and why it is refused, or "" and the stdin to send, the
+// preview first. A recording session's question says so.
+func (c *channel) ask(command string, d Decision, recorded bool) (record.Answer, string, io.Reader) {
 	h := c.s.h
 	if h.asker == nil {
-		return intercept.ReasonNobodyToAsk, nil
+		return record.Refuse, intercept.ReasonNobodyToAsk, nil
 	}
 	rt := c.s.route
 	var (
@@ -383,7 +403,7 @@ func (c *channel) ask(command string, d Decision) (string, io.Reader) {
 		// show.
 		var err error
 		if head, more, rest, err = intercept.Preview(c.ctx, c.ch, previewIdle, true); err != nil {
-			return intercept.ReasonStoppedWaiting, nil
+			return record.Refuse, intercept.ReasonStoppedWaiting, nil
 		}
 	}
 	q := intercept.Question{
@@ -404,14 +424,63 @@ func (c *channel) ask(command string, d Decision) (string, io.Reader) {
 		// of them where there are several.
 		Operation:  d.Operation,
 		Operations: d.Operations,
+		Record:     recorded,
+		ID:         record.ID(c.s.c.Session, record.KindSSH, c.recordKey(command)),
 	}
-	reason, err := intercept.AskAbout(c.ctx, h.asker, q)
+	answer, reason, err := intercept.AskAbout(c.ctx, h.asker, q)
 	if err != nil {
 		// Its own line, not the command's: the error is the asker's, and
 		// may quote whatever it was sent.
 		h.log.Error("ask", "session", c.s.c.Session, "conn", c.s.c.ID, "channel", c.n, "route", rt.Name, "error", err.Error())
 	}
-	return reason, rest
+	return answer, reason, rest
+}
+
+// record decides a command the rules refuse or ask about, in a recording
+// session: why it is refused, or "" and, if a person was asked, the stdin
+// to send, the preview first.
+func (c *channel) record(command string, d Decision) (string, io.Reader) {
+	var rest io.Reader
+	res := c.s.h.recorder.Decide(c.ctx, c.recordLine(command, d), c.recordKey(command), func(context.Context) (record.Answer, string, error) {
+		a, reason, r := c.ask(command, d, true)
+		rest = r
+		a, reason = intercept.RecordAnswer(a, reason)
+		return a, reason, nil
+	})
+	switch {
+	case res.Answer.Admits():
+		return "", rest
+	case res.Reason != "":
+		return res.Reason, nil
+	}
+	return intercept.ReasonRecordRefused, nil
+}
+
+// recordKey names a command's subject within its session: the route, and
+// the command exactly, since a grant names a command by its words.
+func (c *channel) recordKey(command string) string {
+	return c.s.route.Name + "\x00" + command
+}
+
+// recordLine is a command's record line, before it is answered.
+func (c *channel) recordLine(command string, d Decision) record.Line {
+	rt := c.s.route
+	would := record.Refuse
+	if d.Outcome == intercept.Ask {
+		would = record.Ask
+	}
+	return record.Line{
+		Session:   c.s.c.Session,
+		Kind:      record.KindSSH,
+		Route:     rt.Name,
+		User:      rt.User,
+		Address:   rt.Address.String(),
+		Command:   command,
+		Shell:     rt.shell,
+		Operation: d.operationIDs(),
+		Would:     string(would),
+		Rule:      d.Rule,
+	}
 }
 
 // counting is a writer that adds what it wrote to n.
