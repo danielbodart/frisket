@@ -1268,11 +1268,113 @@ shaped so is below.
   says `record`, and has an `id` naming its subject. Its questions wait
   their turn rather than being refused as busy, and how many are open at
   once is a flag, for an asker that stacks them.
-- **Not yet.** Interception of names that are not routes' (an unconstrained
-  per-session CA), synthetic per-name DNS so every connection has its name,
-  UDP and QUIC counts, and the syscalls are later phases'. Until then a
-  connection is matched to a name by its address, as egress always has, and
-  an address an allowed name shares is admitted as that name's.
+- **Not yet.** A connection is matched to a name by its address, as egress
+  always has, and an address an allowed name shares is admitted as that
+  name's. What might come next is below.
+
+#### Recording: possible follow-ups (not decided)
+
+Thoughts kept so they are not lost, from the design that led to phase 1.
+None is decided or scheduled; each would want its own design pass, and any
+may be dropped. Line references were right at fc6ed4d.
+
+- **Every connection through frisket while recording.** On a tier whose
+  egress is direct, frisket sees DNS and routes only, so a recording there
+  misses every other connection. chase could launch a recording through a
+  second launcher of the tier's own whose set is `all` and which has no
+  flong network: no flong or steering change, the per-session document
+  saying it records. What a recording would lose on a direct tier: forwarded
+  dev-server ports, UDP, and what the host's daemons do for it (a Docker
+  app's containers egress through the daemon, unrecorded). chase's record
+  launcher already does this; this item is what would follow from it.
+- **Synthetic per-name addresses.** While recording, DNS would answer each
+  A/AAAA with an address from a pool kept for the session -- 198.18.0.0/15,
+  and a /64 of 2001:db8:: -- clear of the service and dummy addresses, and
+  look nothing up upstream. Under `all` every TCP packet is already tproxied
+  with its original destination, so no ruleset change. Dispatch would map a
+  pool address back to its name before Egress: a route's host on 443 to
+  Intercept, its SNI required to equal the name; port 80 to an HTTP
+  recorder; any other port, `git@github.com:22` among them, to a passthrough
+  that resolves the name upstream at dial, the structural check still on
+  the real address. It would give an exact name on every connection (today
+  `Resolved` keeps one name per address, last write wins, so a shared CDN
+  address can be labelled wrongly), end the collision of a route host's
+  port 22 with the TLS listener (dispatch.go:176; the client waits for a
+  banner while frisket waits for a ClientHello, until `handshakeTimeout`),
+  and keep any name from leaving the host until a connection to it is
+  allowed. Costs: the pool needs LRU, other query types for a name off the
+  list get NODATA or NXDOMAIN and are logged, and a client that compares
+  addresses sees fakes.
+- **Interception of names that are not routes'.** A recording's CA without
+  DNS name constraints, still excluding every IP, still per session, in
+  memory and in the sealed record only, and dying with it; perhaps a shorter
+  `caLifetime`. A second unconstrained CA beside the route one was the
+  alternative, rejected on paper: it can mint route hosts' names anyway --
+  credentials stay safe because only the route path injects them -- and
+  would be a second key to seal and restore. The recorder, a branch of
+  Egress:
+  - peek the ClientHello without consuming it, on client-speaks-first ports
+    only (443, 8443); elsewhere splice with a passive tee that reads the SNI
+    from the first bytes, so server-first protocols are not held up;
+  - handshake with the real upstream first, with the client's SNI and ALPN
+    list, verified against the host's roots;
+  - intercept only when that succeeded, the ALPN chosen is `h2`,
+    `http/1.1` or none, and the upstream asked for no client certificate:
+    mint a leaf, offer the client only the ALPN the upstream chose, and
+    reverse-proxy with no credential, in a handler that shares no code with
+    injection;
+  - otherwise splice, replaying the peeked bytes, and write an SNI-only
+    line: mTLS, unusual ALPNs (imap, dot, acme);
+  - a client that aborts the handshake with unknown_ca or bad_certificate,
+    or just closes, is taken as pinning: its SNI goes in a per-session
+    passthrough set, its later connections are spliced, and the first one
+    fails once, as mitmproxy does; the document's never-intercept names
+    seed the set;
+  - an upstream that fails verification is a 502, recorded, never a
+    downgrade;
+  - HTTP/1.1 Upgrade through the existing stream path, recording the
+    request, the 101 and byte counts, no frames; h2's extended CONNECT best
+    effort;
+  - plain HTTP on 80: a request line that parses is reverse-proxied and
+    recorded, flagging a Host unlike the resolved name; anything else is
+    spliced; h2c passes through.
+  The peek decides how deep a connection is observed, never whether it is
+  allowed -- that is still by destination, before a byte is read -- and no
+  credential is on this path, so a workload choosing its first bytes gains
+  nothing; this would want saying beside decision 1's refusal of protocol
+  sniffing for routing. What a line would hold: method, host, SNI, path
+  (cut as today), query parameter names, status, bytes each way,
+  content-type, header names, a GraphQL operation's name -- never a header
+  value or a body, which for a model's API is the whole conversation. If a
+  body opt-in were ever wanted: per host, capped, redacting Authorization,
+  Cookie, Set-Cookie, Proxy-Authorization and x-api-key, described as the
+  debug describer does (kind and hash). High-entropy path segments
+  (`/bot<token>/`) would be templated before becoming proposed rules.
+  Trust gaps to expect: the bundle chase points 14 variables at is not
+  Java's trust store, not certifi used directly, not the NSS db of Chromium
+  and Electron.
+- **A non-route host asked by name, at connect.** With interception, the
+  question for a host that is not a route stays "may this session reach
+  X", by name and by port where it is not 443 or 80: method and path cannot
+  be enforced off a route outside recording without making it one. A
+  credential-free route scoped to the recorded paths would be the
+  alternative proposal, for path-level control; it means interception in
+  ordinary sessions too.
+- **UDP and ICMP counts.** Keep the fast reject so clients fall back to
+  TCP, and before it, in the recording ruleset, `update @udpseen4/6 { daddr
+  . dport counter }` (and the same for ICMP); frisket dumps the sets in the
+  namespace at close, one line per destination, named by synthetic address
+  or `Resolved`. Cheaper than NFLOG, which needs a netlink socket handed in
+  per session and is the upgrade if per-flow timing is ever wanted. Plain
+  nft `log` is no use: the sandbox namespace discards it
+  (nf_log_all_netns=0).
+- **A memo that outlives a daemon restart.** The memo is memory only, so a
+  restored recording may ask again or write a subject twice.
+- **Retention.** Sink files are chase's to clean up: kept until a proposal
+  is applied, or 14 days.
+- **Rough size, as estimated then:** synthetic DNS 2-3 days, the recorder
+  4-5, the CA mode half a day, UDP/ICMP counts and the sink's extras 1-2,
+  tests 3; most of it frisket's.
 
 ---
 
