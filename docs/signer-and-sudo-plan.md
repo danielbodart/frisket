@@ -867,7 +867,7 @@ T3 and T4 run in parallel once T2 merges. Cross-repo contracts, frozen when thei
 - galley `wire/` and its golden files, including `level`, `Field.text` and the three item shapes;
 - `GALLEY_SERVICES_SOCKET`, `GALLEY_SERVICES`, `services.galley.services`;
 - socket paths: `/run/frisket-signer/agent`, `/run/frisket-sudo/gate.sock`, `/run/galley-ask/<user>.sock`;
-- the sudo wire (kinds, tags, replies) between the C and the gate;
+- the sudo wire (kinds, tags, replies) between the Zig and the gate;
 - uids 951 and 952;
 - module options in §10.
 
