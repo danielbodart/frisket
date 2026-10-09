@@ -171,6 +171,7 @@ Collected by `internal/peer` for the signer (from the socket) and for the gate (
 - **What galley owns**: markup is off for services; the icon comes from `level` (`normal`, `warning`, `danger`), drawn by galley, with galley's banner for `danger` (the service sends only a reason line); recording keeps its red. Service rows never join. Any form shape is allowed.
 - **Who answered.** Before trusting an answer, a service checks its galley peer: uid `forUser`, and `cgroupid` == the inode of `…/user@<uid>.service/app.slice/galley.service`, stat'ed at every check (it changes on every galley start) [spike: G-P1, identity-vm]. Anything else is nobody to ask.
 - **Time control**: an entry prefilled `15` (wire `Field.text`) and a `minutes|hours` combo; capped at 24 h (a constant). An absent or empty unit is minutes. 0 means once; an unreadable number is once, logged as "time not understood" without the text. Above 24 h is clamped. Grants and windows count from the answer.
+- **Waiting rows follow a new grant or window.** When an answer makes a grant or opens a window, the service rechecks the rows it is still waiting on, so a request that arrived before the answer is treated as one arriving after it. Signer: a waiting row the new grant covers is signed and withdrawn. Sudo: a waiting non-danger dialog from the same claude is withdrawn and posted again as a plain question, still asked. Service rows never join: a typed password would reach every joiner, and one answer would approve a requester the row does not show.
 - **No deadlines.** A row lives as long as the requester's connection to the service. The service closes its galley connection when the requester hangs up, which withdraws the row. A locked screen does nothing special: the row waits.
 
 ### 4.4 The signer decides in a fixed order
@@ -355,6 +356,7 @@ A grantable question is a form with the time control; an Allow-once question (§
 - `until` = answer time + chosen, in `CLOCK_BOOTTIME`, so suspend counts against it. Use never extends it. A second grant for the same key keeps the later end.
 - A dead anchor's grant never matches again: a reused pid has another starttime. `Grant` drops expired entries; nothing reads `/proc`.
 - In memory only. A restart costs at most one question per active anchor.
+- A new grant is checked against every waiting row; each it covers is signed and its row withdrawn.
 
 ### Journal
 
@@ -450,7 +452,7 @@ While asking, the gate polls the plugin's connection for `POLLRDHUP` and withdra
 
 ### The gate on 'V'
 
-- **1**: if the chosen time is above 0, the command is not danger and the chain is not Cut or SessionRoot, open the window: until = answer time + chosen (boottime, at most 24 h), pinned to the dialog's galley process. Reply 'Y' "frisket-sudo: password remembered for this claude until 16:40", or 'Y' with no message when no window opened.
+- **1**: if the chosen time is above 0, the command is not danger and the chain is not Cut or SessionRoot, open the window: until = answer time + chosen (boottime, at most 24 h), pinned to the dialog's galley process. Reply 'Y' "frisket-sudo: password remembered for this claude until 16:40", or 'Y' with no message when no window opened. A new window turns the claude's other waiting non-danger dialogs into plain questions (withdraw, post again).
 - **0**: post the dialog again with the line "wrong password", as on 'A' step 3.
 
 The dialog:
@@ -713,6 +715,7 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 - `TestTheQuestionsEncodeToTheGoldenBytes` and `TestEveryGoldenAnswerLineDecodesToItsResult`
 - `TestTheTimeFieldParsesClampsAndLogsNoRawText`: `15 minutes`, `2 hours`, `15` with no unit (15 minutes), `0`, `hunter2` (once, logged as "time not understood"), `100 hours` (24 h)
 - `TestHangUpWithdrawsTheRow`
+- `TestANewGrantSignsTheWaitingRowsItCovers`: a covered row is signed and withdrawn; another host, key, anchor or a forwarded row stays
 - `TestThePasswordIsNeverLogged` (captures slog output and searches it)
 
 `internal/sudogate` (peer facts injected as `PeerInfo`):
@@ -722,6 +725,7 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 - `TestGIsYesOnlyWhenThePeersParentIsALiveCheckIn`: a non-root peer, a root peer whose parent never checked in, a check-in whose connection closed
 - `TestAnAOrVOffACheckInConnectionIsRefused`
 - `TestAWrongPasswordBringsTheDialogBack`
+- `TestANewWindowTurnsTheClaudesWaitingDialogsIntoQuestions`: another claude's dialog and a danger dialog stay
 - `TestOnlyAVerifiedDialogPasswordOpensAWindow`: a failed verify, a question's Allow, a danger dialog, a Cut chain and a time of 0 open none
 - `TestADangerOrCutDialogHasNoTimeField`
 - `TestTheWindowCountsOnlyAnswersFromThePinnedGalley`
