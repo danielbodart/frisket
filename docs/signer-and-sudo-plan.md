@@ -25,7 +25,7 @@ claude> sudo systemctl stop sshd    # galley, danger icon and banner: "touches a
 The work, done together:
 
 - **frisket-signer**, replacing the stock `ssh-tpm-agent` that ships first (M0.5).
-- **frisket-sudo**: a C audit plugin, a C PAM helper and a Go gate daemon.
+- **frisket-sudo**: a Zig audit plugin, a Zig PAM helper and a Go gate daemon.
 - **Shared packages** in frisket.
 - **A services socket in galley**, with a `level` field and prefilled field text.
 - **NixOS wiring**: frisket owns the modules, nix-config sets them.
@@ -363,8 +363,10 @@ One structured record per decision: requester chain, anchor, destination, key, c
 
 ### Pieces
 
-- `sudo/frisket_sudo.c` (the audit plugin, symbol `frisket_audit`), `sudo/frisket-sudo-pam.c`, shared `sudo/chain.c` (chain walk, remote test) and `sudo/wire.c`. Built against `sudo.src`'s `sudo_plugin.h` and linked with `-lpam`, with `-Wall -Wextra -Werror -fvisibility=hidden`. The C decides whether to gate, collects, frames and verifies the password; everything else is in Go.
-- `sudo/frisket-sudo-check-plugin.c` (~40 lines): `dlopen(RTLD_NOW)`, `dlsym`, then checks plugin type 3 (audit), the API major and the sudo version. A wrong type makes every sudo segfault [spike: SV1], so this check is mandatory.
+- `sudo/frisket_sudo.zig` (the audit plugin, exported symbol `frisket_audit`), `sudo/frisket-sudo-pam.zig`, shared `sudo/chain.zig` (chain walk, remote test) and `sudo/wire.zig`. The Zig decides whether to gate, collects, frames and verifies the password; everything else is in Go. sudo loads a plugin into a setuid process, which rules out Go's runtime; Zig has none.
+- **Zig as flong uses it**: 0.15.2 from nixpkgs' `zig_0_15`, built ReleaseSafe, with flong's toolkit: descriptors only through generation-checked handles (flong `src/fd.zig`, whether imported or copied decided when built), zwanzig's open models for a double close or use after close, minish property tests, and fdlint's rules (`extern`/`@cImport` of `sudo_plugin.h` and `pam_appl.h` in one ABI file, no `catch unreachable` without `// proven:`, no general-purpose allocator). Unlike flong it runs inside sudo, a libc process with libpam, so it uses libc, and the leak property is that every descriptor it opens is closed by `close()` or exit.
+- **No panic on the ungated path**: a ReleaseSafe panic in `open()` aborts every sudo, terminal sudo included. `open()` touches no handle until it has decided to gate, and returns errors rather than panicking.
+- `sudo/frisket-sudo-check-plugin.zig` (build time only): `dlopen(RTLD_NOW)`, `dlsym`, then checks plugin type 3 (audit), the API major and the sudo version. A wrong type makes every sudo segfault [spike: SV1], so this check is mandatory.
 - `cmd/frisket-sudo serve`: fd `gate` from `sdnotify.Listen()`; refuses to start without it.
 - `sudo/danger.json`, embedded with `go:embed`, checked by a unit test.
 
@@ -729,6 +731,11 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 - `TestEnvironmentVariablesAreTextLines`: allowlisted names pass; `LESSOPEN`, `LD_PRELOAD`, `FOO` are shown
 - `TestServeRefusesToStartWithoutTheGateFd`
 
+`sudo/` (Zig, minish):
+
+- The gating test and the mode parse: a property over generated arguments (every byte, every option and prefix, `--`, attached and separate option arguments) that the parse agrees with sudo's own `parse_args` built as a test oracle; and that `open()`'s ungated path never panics.
+- zwanzig's planted bugs for the plugin's handle kinds; every descriptor closed after `close()`.
+
 `execrule`: `TestDecideWordsAgreesWithDecideOnReadableStrings` (rapid).
 
 ### VM tests (frisket, `runNixOSTest`, importing exactly the module under test)
@@ -849,7 +856,7 @@ After M2 has settled on both hosts, delete the M0.5 branch from nix-config. The 
 | T1 galley | galley | Items 1-8 and their tests; item 1 first | — |
 | T2 shared | frisket | `internal/peer`, `internal/galleyask`, `internal/grant`, `execrule.DecideWords`, `tests/fakegalley`, swtpm in `mkFrisket` | T1 item 1's pseudo-version |
 | T3 signer | frisket | `internal/tpmkey`, `internal/agentsrv`, `cmd/frisket-signer`, `nixosModules.signer`, flong protect entries, `tests/signer.nix`, `docs/signer.md` (recovery) | T2 |
-| T4 sudo | frisket | `sudo/*.c`, check-plugin, `internal/sudogate`, `cmd/frisket-sudo`, `sudo/danger.json`, `nixosModules.sudoGate`, `tests/sudo-gate.nix`, `docs/sudo.md` | T2 |
+| T4 sudo | frisket | `sudo/*.zig`, check-plugin, `internal/sudogate`, `cmd/frisket-sudo`, `sudo/danger.json`, `nixosModules.sudoGate`, `tests/sudo-gate.nix`, `docs/sudo.md` | T2 |
 | T2b chase | chase | go.mod, `vendorHash` and flake.lock bump after T3 and T4 | T3, T4 |
 | T5 nix-config | nix-config | `sshSigner`, gate enable with Claude Code's `SUDO_ASKPASS` switch, galley services, `configurationLimit`, `checks.sudo-lockout` | T1 merged, T2b |
 
@@ -891,6 +898,8 @@ UNTESTED, each with the test that settles it:
 - **The signer's hardening set as a whole**, with the real binary and the TPM: signer VM.
 - **Connecting to the signer socket from frisket.service's read-only mounts**: signer VM stand-in.
 - **galley `Field.text` and `--value`**: galley e2e.
+- **sudo's `parse_args` as a test oracle**: whether it builds alone from `sudo.src` for the mode-parse property: a first build in the `sudo/` tests.
+- **A Zig audit plugin loaded by sudo**: the exported `frisket_audit` passes the check-plugin and sudo's loader: the sudo VM.
 - **The environment sudo passes after `env_reset`**: record it once in the sudo VM and write it into `docs/sudo.md`.
 - **galley's peer check under the signer's and gate's hardening** (cgroup inode stat worked under the same flags for `frisket.service` [spike: identity-vm]): both VM tests.
 
