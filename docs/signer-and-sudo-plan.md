@@ -2,8 +2,8 @@
 
 Two small gatekeepers beside frisket, both asking the person through galley:
 
-- **frisket-signer** holds the SSH keys that live in the TPM. It signs silently for frisket and for a terminal tab ssh-ing to a known host, and asks for everything else.
-- **frisket-sudo** gates sudo when no terminal is asking. The first sudo of a Claude session shows one dialog with the password. That password is then remembered for a time the person picks, for that claude only, and every command is still shown and asked.
+- **frisket-signer** holds the SSH keys that live in the TPM. It signs silently for frisket, for a terminal tab ssh-ing to a known host and for git's commit signatures, and asks for everything else.
+- **frisket-sudo** gates sudo when no terminal is asking. Each such sudo is one galley dialog showing the resolved command. Outside a window the dialog takes the password, which then opens a window, for a time the person picks and for that claude only, in which every command is still shown and asked, without the password.
 
 ```
 $ git push                          # typed in a gnome-console tab, github.com in ssh_known_hosts
@@ -19,15 +19,15 @@ frisket-sudo: password remembered for this claude until 16:40
 claude> sudo journalctl -u foo      # galley: "sudo journalctl -u foo"   [Refuse] [Allow]   (no password)
 
 claude> sudo systemctl stop sshd    # galley, danger icon and banner: "touches a unit that guards this machine"
-                                    #   [Refuse] [Allow]   (never opens a window)
+                                    #   [Refuse] [Allow]   (inside the window; never opens one)
 ```
 
 The work, done together:
 
 - **frisket-signer**, replacing the stock `ssh-tpm-agent` that ships first (M0.5).
-- **frisket-sudo**: a C approval plugin, a C PAM helper, a Go gate daemon and a Go askpass.
+- **frisket-sudo**: a C audit plugin, a C PAM helper and a Go gate daemon.
 - **Shared packages** in frisket.
-- **A services socket in galley**, with a `level` field.
+- **A services socket in galley**, with a `level` field and prefilled field text.
 - **NixOS wiring**: frisket owns the modules, nix-config sets them.
 
 ## 0. Goals and the floor
@@ -38,12 +38,12 @@ Goals:
 2. Every signature is journaled with its requester and destination, verified wherever ssh binds the session.
 3. One question per new situation: Allow once, Allow for a time the person picks, or Refuse.
 4. No-tty sudo: the person types the password once per claude per window, and still sees every command.
-5. Terminal sudo and remote `sudo -S` behave as today.
+5. Terminal sudo and attached remote `sudo -S` behave as today.
 6. No Python. Neither daemon runs as root or as dan.
 
 **The floor.** Nothing here is ever looser than stock `ssh-tpm-agent` or default sudo. Where flong already stops an attack, these programs do not repeat the defence. Defending against code that already runs as dan on the host is a non-goal (see §2).
 
-**Rules for the code.** No timeouts or deadlines anywhere in our code (signer, gate, plugin, PAM helper, askpass, galley). A request is open until it is answered or its requester goes away; the caller owns the timer (sshd's `LoginGraceTime`, Claude Code's Bash timeout, a person's Ctrl-C). A duration the person picks (Allow for 15 minutes) is not a timeout.
+**Rules for the code.** No timeouts or deadlines anywhere in our code (signer, gate, plugin, PAM helper, galley). A request is open until it is answered or its requester goes away; the caller owns the timer (sshd's `LoginGraceTime`, Claude Code's Bash timeout, a person's Ctrl-C). A duration the person picks (Allow for 15 minutes) is not a timeout.
 
 **Approach.** Build it, use it, read the journal, tune. New silent or refuse cases are a code change made after reading the journal.
 
@@ -55,35 +55,35 @@ Measured on both hosts (dan-blade, dan-desktop) unless marked; a file source is 
 |---|---|---|
 | H1 | Both TPMs are Intel PTT (ADL, fw 0x2580012). A transient H-2 ECC primary works. Sign takes ~225 ms with a fresh parent and ~43 ms with parent and key kept loaded. `MAX_AUTH_FAIL` 32, `LOCKOUT_INTERVAL` 7200 s, `lockoutAuthSet` 1. Persistent handles 0x81000001/2/9 and 0x81010001 exist; dan-blade's LUKS tokens are sealed under 0x81000001 | [spike: g0] |
 | H2 | dan-desktop. A gnome-console tab: `.kgx-wrapped --gapplication-service` (parent `systemd --user`) → `bash` (cmdline exactly `/run/current-system/sw/bin/bash`, pid = pgrp = sid, pts `tty_nr`) → `.claude-unwrapp` (comm, 15 chars) | [spike: host-facts-desktop] |
-| H3 | dan-desktop. Each command from Claude Code's Bash tool runs in its own session with no tty (`tty_nr` 0; `/dev/tty` gives ENXIO) | [spike: host-facts-desktop] |
-| H4 | Claude Code: `permissions.defaultMode = "auto"`, `permissions.allow = [ "Bash(sudo:*)" ]`, `SUDO_ASKPASS` set in its env only. Its commands inherit `DISPLAY=:0`, without which sudo with no tty and no `-A` says "a terminal is required" and never runs the askpass | `home/dan.nix:612`, `:636`, `:646`; sudo `tgetpass.c:139` |
+| H3 | dan-desktop. Each command from Claude Code's Bash tool runs in its own session with no tty (`tty_nr` 0; `/dev/tty` gives ENXIO), stdin `/dev/null` | [spike: host-facts-desktop, one-hop-sudo] |
+| H4 | Claude Code: `permissions.defaultMode = "auto"`, `permissions.allow = [ "Bash(sudo:*)" ]`, `SUDO_ASKPASS` (`sudo-askpass.sh`) set in its env, and its commands inherit `DISPLAY=:0`. With both set, sudo runs the askpass itself whenever pam_unix needs a password and there is no tty. No-tty sudo through the gate needs neither | `home/dan.nix:612`, `:636`, `:646`; sudo `src/tgetpass.c:136-145`; [spike: one-hop-sudo Q1a] |
 | H5 | ssh hosts: `modem` (password, needs `ssh-rsa`), `gateway` (OpenWrt dropbear; cannot take a P-256 key), `server`, `mac` (hand-managed `authorized_keys`), GitHub | `home/dan.nix:845-878` |
-| H6 | galley wire: one JSON object per line, `Hello{galley,item}`, `Item{kind,title,text,markup,icon,buttons,default,forms}`, `Answer{answer,index,fields,error}`. An `extra` button answers its index and no field values. Enter presses the item's `default`, in forms too | `galley/internal/wire`, `daemon/window.js` |
-| H7 | sudo forks the askpass itself (`execl` after dropping to the user) and waits for it. The PAM stack, so the PAM helper and the askpass, runs once per password try | sudo `tgetpass.c:295-375`; [spike: AP1] |
+| H6 | galley wire: one JSON object per line, `Hello{galley,item}`, `Item{kind,title,text,markup,icon,buttons,default,forms}`, `Answer{answer,index,fields,error}`. An `extra` button answers its index and no field values. Enter presses the item's `default`, in forms too. A form `Field` has no initial text | `galley/internal/wire`, `daemon/window.js` |
+| H7 | sudo calls an audit plugin's `open()` before PAM, PAM before the policy's accept, and the audit plugin's `accept()` on that accept; an `accept()` returning other than 1 refuses the command. PAM's `PAM_TTY` and sudo's `tty_nr` always agree and follow the controlling tty, not stdin | sudo `src/sudo.c:233`, `:1782-1792`; [spike: one-hop-sudo Q1, Q2, V1-V3] |
 | H8 | `kernel.yama.ptrace_scope` is 1 on both hosts | [spike: g0] |
 | H9 | nix-config has no flake `checks` output yet. dan-blade boots lanzaboote, dan-desktop plain systemd-boot; neither sets `configurationLimit` (null, unlimited) | `hosts/dan-blade/secure-boot.nix`, `modules/common.nix:19` |
+| H10 | The host's sudo auth stack is `pam_unix` then `pam_deny` | `/etc/pam.d/sudo`; [spike: one-hop-sudo noninteractive] |
 
 ## 2. Threat model
 
 | Actor | Runs as | Reaches | In scope |
 |---|---|---|---|
 | A. Agent in a chase/flong container | dan's uid in a user namespace | No signer, galley or sudo sockets (flong `protect` list), no user bus, no setuid sudo (NNP set, `/run/wrappers` absent). Can write the checkout, and in the trusted tier the host's `~/.claude`, `~/.codex` and cc-socks | **Yes.** Kept out by flong, not by prompts |
-| B. Host agent a prompt injection can steer (host Claude Code, auto mode, `Bash(sudo:*)`, `SUDO_ASKPASS`) | dan, no tty | Everything dan reaches | **Partly.** An attention boundary while B acts through ssh, git and sudo. A B that persists code (user units, rc files, a devShell, its own askpass) has become C |
+| B. Host agent a prompt injection can steer (host Claude Code, auto mode, `Bash(sudo:*)`) | dan, no tty | Everything dan reaches | **Partly.** An attention boundary while B acts through ssh, git and sudo. A B that persists code (user units, rc files, a devShell) has become C |
 | C. Code running as dan on the host | dan | Everything dan reaches, including joining `galley.service`'s cgroup | **No.** It cannot reach the TPM, root's cgroups or sudo internals; the journals record what it asked for |
 | D. Root, kernel, firmware | root | Everything | No. Root peers are refused, not defended against |
-| E. Remote host or network position | — | The agent protocol through a forwarded socket | **Yes**: session-bind is verified, forwarding is shown |
+| E. Remote host or network position | — | The agent protocol through a forwarded socket | **Yes**: session-bind is verified, forwarding is shown and always asked |
 
 **Accepted limits.** Each is at the stock floor or is stopped by flong.
 
 - C can answer galley. Any dan process inside `user@1000.service` can write its pid into `app.slice/galley.service/cgroup.procs`, rebind `/run/galley-ask/dan.sock` and pass the services' binder check [spike: G-P1]. The check is a bar-raiser against a plain socket rebind. Stock agent: signs silently; stock sudo: any program can draw a password box.
 - Forged terminal chains. Links are identified by comm and kernel structure, so a host process can build a chain shaped like a tab (bash copied as `.kgx-wrapped` under `systemd-run --user --pty`) and get a silent sign to a known host. Stock signs silently. A preloaded or memfd-loaded program is shown by its name.
-- `SUDO_ASKPASS=./steal sudo -A …` makes `./steal` sudo's child; it passes the ppid and euid-0 checks and receives the password typed into the genuine form. Stock: any program can draw a password box.
+- A process that opens its own pty (`script -qec 'sudo …'`) is a terminal to sudo, so it gets stock sudo prompting on that pty [spike: one-hop-sudo A8].
 - A checkout's devShell is code from whoever wrote the checkout; entering it in a host tab runs it as dan.
 - A trusted-tier session can write the host's `~/.claude`, `~/.codex` and cc-socks and so reach host sessions. Accepted: the end state is that nothing runs with host access.
-- Detached remote sudo (`ssh host 'setsid -f sh -c "sudo -S …"'`) loses its ssh ancestry and is gated locally: asked on the desktop, or refused with nobody to ask [spike: R1].
+- Remote sudo (`ssh host 'sudo -S …'`) takes the stock exit before PAM [spike: one-hop-sudo S3 (approval variant), N4b]. Detached remote sudo (`ssh host 'setsid -f sh -c "sudo -S …"'`) loses its ssh ancestry [spike: R1], so it is gated locally: asked on the desktop, its `-S` password ignored, or refused with nobody to ask.
 - An ssh blocked on the agent after the server's `LoginGraceTime` keeps its row until its launcher kills it.
 - A process that frisket.service starts (the asker, a hook) can double-fork to ppid 1 and name itself `frisket`, and then signs silently as frisket's main process. Stock signs for any dan process.
-- After a window ends, a sudo whose parent still holds a sudoers ticket gets a question without the password, as stock sudo skips the password.
 - During M0.5, dan is in `tss`: dan-uid code can sign with the key and drive DA lockout. That is stock `ssh-tpm-agent`.
 
 **What makes the sudo window hold.** The window is pinned to the galley process that took the password. An Allow is counted only from that process, so C's rebound socket does not count inside a window. The pin assumes C cannot steal galley's listener fd: `pidfd_getfd` works at `ptrace_scope` 0 and is EPERM at 1 [spike: G-P1]. An assertion keeps `ptrace_scope >= 1`. It also assumes no dan process can press Allow inside galley: galley answers only from its own buttons (no answer GAction) and runs with `GTK_A11Y=none` (its default); turning on galley's accessibility option opens the window to any dan process.
@@ -93,17 +93,16 @@ Measured on both hosts (dan-blade, dan-desktop) unless marked; a file source is 
 - Open `/dev/tpmrm0`: only `ssh-signer` is in `tss` once the signer is enabled (assertion) [spike: identity-vm].
 - Move into `system.slice/frisket.service`: `cgroup.procs` is root 0644. UNTESTED from inside `user@1000.service`; the signer VM test tries it.
 - Be frisket's main process: that needs ppid 1 in frisket's cgroup. A process frisket starts could get there by double-forking (an accepted limit above).
-- Write `/run/frisket-signer`, `/run/frisket-sudo`, `/run/frisket-sudo-askpass` or `/etc`.
-- ptrace setuid sudo [spike: sudo-plugin], or galley at `ptrace_scope` 1 [spike: G-P1].
+- Write `/run/frisket-signer`, `/run/frisket-sudo` or `/etc`.
+- Reach the dialog's password: it goes from galley to the gate and over a root-only socket into setuid sudo, which cannot be ptraced [spike: sudo-plugin]; galley cannot be ptraced at `ptrace_scope` 1 [spike: G-P1].
 
 ### Trusted computing base
 
 | Component | Runs as | Privilege | Trusted for |
 |---|---|---|---|
 | frisket-signer | `ssh-signer` (951) | `/dev/tpmrm0` via `tss`; no capabilities | The only TPM access; verifying session-bind |
-| frisket-sudo gate | `sudo-gate` (952) | none | Deciding sudo; holding each claude's password window and its galley pin; relaying the password to the askpass |
-| `frisket_approval.so`, `frisket-sudo-pam` | root inside setuid sudo / pam_exec | sudo's | Collecting the chain as root, so the gate needs no capability |
-| `frisket-sudo askpass` | dan, plain program | none | Handing the password to sudo's stdin |
+| frisket-sudo gate | `sudo-gate` (952) | none | Deciding sudo; holding check-ins, each claude's password window and its galley pin; passing the dialog's password to the plugin |
+| `frisket_sudo.so`, `frisket-sudo-pam` | root inside setuid sudo / pam_exec | sudo's | Deciding before PAM whether to gate; collecting the chain as root; verifying the password |
 | galley window | dan | none | The only source of answers; the pinned process for a window |
 | frisket main process | dan, system unit `frisket.service` | none | Signing silently for chase sessions |
 
@@ -111,23 +110,26 @@ Measured on both hosts (dan-blade, dan-desktop) unless marked; a file source is 
 
 | Moment | Today | Target |
 |---|---|---|
-| `ssh`/`git` typed in a tab to a host in `/etc/ssh/ssh_known_hosts` | 0 | 0 |
+| `ssh`/`git` typed in a tab to a host in `/etc/ssh/ssh_known_hosts` | 0 | 0 (`terminal = "allow"`) |
 | Same, to a host key not in `ssh_known_hosts` | 0 | 1 question; a grant covers that tab's shell |
+| `bash deploy.sh` in a tab, ssh-ing inside | 0 | 1 question; a grant covers that tab's shell |
 | `kgx -- ssh host`, `systemd-run --user ssh …`, a re-parented `ssh -f` | 0 | 1 question, warning icon, Allow once only |
 | frisket logging in for a chase session | 0 | 0, even with galley closed |
 | Host Claude Code, first `git push` of a session | 0 | 1 question; Allow for 15 minutes (prefilled) makes it 0 for that claude, host and key until the grant ends |
-| `ssh -A` and a sign on the far side | 0 | 1 question with the line "forwarded" |
+| `git commit -S` with an SSH signing key | — | 0 (`sshsig.git = "allow"`) |
+| `ssh -A` and a sign on the far side | 0 | 1 question with the line "forwarded", also from a tab to a known host; its grant covers forwarded signs only |
 | `sudo ssh …` reaching the signer as root | refused by gcr | refused, logged |
 | `ssh gateway` | ed25519 via gcr | ed25519 file, authorized on the gateway only |
 | `ssh modem` | password | unchanged |
 | `printf pw \| ssh host "sudo -S …"` | password | unchanged |
-| Host Claude Code, first sudo | 1 password dialog | 1 dialog: password and "remember for 15 minutes"; it approves this command |
+| Host Claude Code, first sudo (`-n` too) | 1 password dialog (`-n`: fails) | 1 dialog: the command, the password and "remember for 15 minutes" |
+| A wrong password in it | — | the dialog again |
 | Further sudo inside the window | 1 password per Bash call | 1 question, no password |
-| A danger command (§4.6) | 1 password | a question with the danger icon and banner (outside a window, after the dialog); never opens a window |
+| A danger command (§4.6) | 1 password | danger icon and banner; outside a window the dialog with the password and no time; inside, a question; never opens a window |
 | Window ended, or galley restarted | — | the dialog again |
 | A question while the screen is locked | — | it waits until unlock or until the requester gives up |
 | sudo in a terminal | — | unchanged |
-| Gate socket stopped | — | no-tty sudo refused with "gate not running"; terminal sudo unchanged |
+| Gate socket stopped | — | no-tty sudo says "gate not running" and fails as stock with no terminal; terminal sudo unchanged |
 
 Prompts rise for agent SSH, which is silent today. Typing falls for agent sudo; reviewing does not.
 
@@ -152,23 +154,23 @@ Collected by `internal/peer` for the signer (from the socket) and for the gate (
 - **Peer uid.** The signer's peer must have `SO_PEERCRED` uid == `forUser`. Anything else (root through `sudo ssh`, nix-daemon, another user) is refused with "peer uid N is not dan", and nobody is asked.
 - **Chain.** `SO_PEERPIDFD`, then `PIDFD_GET_INFO` (check the mask bits first: a dead pidfd reads uid 0 [spike: identity-vm]), then walk `/proc/<pid>/{stat,status,cmdline,cgroup}` up the ppids to depth 16, pid 1, or the first unreadable link. Links are named by **comm** (stat field 2) and kernel structure (ppid, sid, `tty_nr`, uid, cgroup).
 - **Cut**: the walk stopped early, or the chain is orphaned. **SessionRoot**: the anchor is pid 1, `systemd --user` or the terminal server. Both are never grantable and never open a window, and both get the warning icon.
-- **Anchor**: the nearest ancestor whose comm is not transient (`bash sh zsh fish dash env timeout nice nohup setsid script sudo ssh git`), keyed on `(pid, starttime)`. Host Claude Code resolves as `ssh ← git ← bash ← .claude-unwrapp`, so the anchor is the claude process [H2]. A desktop app anchors on itself, or falls to SessionRoot and is asked.
+- **Anchor**: the nearest ancestor whose comm is not transient (`bash sh zsh fish dash env timeout nice nohup setsid script sudo ssh git`), keyed on `(pid, starttime)`. The walk stops at a tab's shell (rule 1 below), which is then the anchor: `bash deploy.sh` from a tab anchors on the tab's shell, not the terminal server. Host Claude Code resolves as `ssh ← git ← bash ← .claude-unwrapp`, so the anchor is the claude process, found before the tab's shell [H2]. A desktop app anchors on itself, or falls to SessionRoot and is asked.
 - **Terminal**, all of:
   1. the link below the terminal server (comm `.kgx-wrapped`) is a shell (comm `bash`) whose cmdline is exactly its argv0 or `-bash`, which is a session leader with a pts `tty_nr`;
   2. the terminal server's parent is `systemd --user`;
   3. every link between the shell and the leaf has comm `ssh`, `git`, `scp`, `sftp` or `rsync`.
 
   For a Terminal chain the anchor is the tab's shell, so a grant is per tab. Agent commands fail rule 3: claude and its `bash` sit between the tab's shell and the leaf. `kgx -- ssh`, `kgx -- bash -c …` and `kgx -- git push` fail rule 1 and become SessionRoot.
-- **Remote** (sudo only): a link with comm `sshd-session` running as the user whose parent is a uid-0 `sshd-session` [spike: R1].
-- **frisket's main process**: uid `forUser`, `cgroupid` == the inode of `/sys/fs/cgroup/system.slice/frisket.service` (stat'ed at every check), ppid 1, comm `frisket`. Any other process in that cgroup (frisket-asker, an `ssh-add` from a hook) is a normal requester.
+- **Remote** (sudo only, tested in C): a link with comm `sshd-session` running as the user whose parent is a uid-0 `sshd-session` [spike: R1].
+- **frisket's main process**: uid `forUser`, `cgroupid` == the inode of `/sys/fs/cgroup/system.slice/frisket.service` (stat'ed at every check), ppid 1, comm `frisket`. No exe check. Any other process in that cgroup (frisket-asker, an `ssh-add` from a hook) is a normal requester.
 
 ### 4.3 galley
 
 - **A services socket** at `/run/galley-ask/<user>.sock`, 0666, in a `0755 dan` directory. galley binds it itself (unlink a stale file, bind, chmod, listen): under socket activation every client sees `systemd --user` as its peer [spike: G-P1].
 - **Who may post**: only uids listed in `GALLEY_SERVICES`; others are reset. The window sets `item.caller` from `SO_PEERCRED` after validation (a client-sent `caller` fails validation) and shows the caller's label.
-- **What galley owns**: markup is off for services; the icon comes from `level` (`normal`, `warning`, `danger`), drawn by galley, with a banner for `danger`; recording keeps its red. Service rows never join. Any form shape is allowed.
+- **What galley owns**: markup is off for services; the icon comes from `level` (`normal`, `warning`, `danger`), drawn by galley, with galley's banner for `danger` (the service sends only a reason line); recording keeps its red. Service rows never join. Any form shape is allowed.
 - **Who answered.** Before trusting an answer, a service checks its galley peer: uid `forUser`, and `cgroupid` == the inode of `…/user@<uid>.service/app.slice/galley.service`, stat'ed at every check (it changes on every galley start) [spike: G-P1, identity-vm]. Anything else is nobody to ask.
-- **Time control**: a number entry prefilled `15` and a `minutes|hours` dropdown; capped at 24 h (a constant). An absent or empty unit is minutes. An unreadable number or 0 means once, logged as "time not understood" without the text. Above 24 h is clamped.
+- **Time control**: an entry prefilled `15` (wire `Field.text`) and a `minutes|hours` combo; capped at 24 h (a constant). An absent or empty unit is minutes. 0 means once; an unreadable number is once, logged as "time not understood" without the text. Above 24 h is clamped. Grants and windows count from the answer.
 - **No deadlines.** A row lives as long as the requester's connection to the service. The service closes its galley connection when the requester hangs up, which withdraws the row. A locked screen does nothing special: the row waits.
 
 ### 4.4 The signer decides in a fixed order
@@ -176,25 +178,35 @@ Collected by `internal/peer` for the signer (from the socket) and for the gate (
 1. Peer uid is not `forUser` → refuse, logged.
 2. Userauth on a connection with binds, whose session id is not the last bind's, or a hostbound request whose embedded host key is not the bound key → refuse. A connection with no binds goes on as unbound.
 3. frisket's main process, userauth → sign.
-4. Terminal chain, bound userauth, not forwarded, host key in `/etc/ssh/ssh_known_hosts` → sign.
-5. A live grant for `(anchor, host key, key)`, chain not Cut or SessionRoot → sign.
-6. Otherwise ask.
+4. Terminal chain, bound userauth, not forwarded, host key in `/etc/ssh/ssh_known_hosts` → `terminal`: `allow` signs, `ask` goes to step 6.
+5. SSHSIG, not forwarded, namespace listed in `sshsig` → its value: `allow` signs, `ask` goes to step 6.
+6. Userauth only: a live grant for `(anchor, host key, key, forwarded)`, chain not Cut or SessionRoot → sign.
+7. Otherwise ask.
 
-Forwarded, unknown host key, unbound and SSHSIG appear as text lines in the question; whether any becomes silent or refused is decided from the journal.
+- **Forwarded** signs are never silent at steps 4 and 5. A grant made from a forwarded question has `Fwd` set and covers only forwarded signs; a direct grant never covers one. The hop host is not part of the key.
+- **Allow once only**: unbound userauth, SSHSIG (an unlisted namespace, or one set to `ask`), Cut and SessionRoot.
+- Forwarded, unknown host key, unbound and SSHSIG are text lines in the question.
 
-### 4.5 sudo: one dialog, then a per-claude password window
+### 4.5 sudo: one hop, one dialog
 
-- **The first no-tty sudo** of a claude reaches the askpass. The gate posts one form to galley: the command and requester, a password field, and "remember the password for this claude for [15] [minutes]". On Allow, the gate relays the password to the askpass, which writes it to sudo. If pam_unix accepts it, that dialog is also the approval of this command, and the window opens for the chosen time.
-- **Inside the window** the PAM helper lets sudo skip pam_unix, and every command is still asked as a plain question (Allow / Refuse).
+Stock sudoers stays the policy. frisket-sudo adds one audit plugin (`frisket_sudo.so`, one `sudo.conf` line), one PAM rule and the gate [spike: one-hop-sudo].
+
+- **Before PAM**, the plugin's `open()` decides whether this sudo is gated: the invoking user is `forUser`, there is no tty, the chain is not remote (a detached remote sudo is local [spike: R1]), and the mode is not `-v` or `-l`. Only then does it check in with the gate, which records the sudo's `(pid, starttime)` for as long as that connection is open. Any other sudo is stock.
+- **In PAM**, the helper (`auth sufficient`, before `pam_unix`) lets sudo skip the password only when its own sudo checked in.
+- **On the policy's accept**, the plugin sends the resolved command to the gate, and the gate posts the one galley item for it:
+  - **outside a window**: the dialog with the command, the requester, a password field and "remember the password for this claude for [15] [minutes]". The gate passes the password to the plugin, which verifies it itself with `pam_authenticate` on a `frisket-sudo` PAM service. A wrong password brings the dialog back, each try costing pam_unix's fail delay (~1.6 s) [spike: one-hop-sudo Q3a]. A verified password approves this command and opens the window for the chosen time (0 is once);
+  - **inside a window**: a plain question, Allow or Refuse, no password.
+
+  A refusal makes `accept()` return 0, and sudo refuses the command.
 - **The window** is keyed on the claude anchor `(pid, starttime)` and pinned to the galley process that served the dialog (its pid from `SO_PEERPIDFD` on the gate's galley connection, and its starttime from `/proc/<pid>/stat`). It ends at the chosen time, when that galley process exits, or when the anchor exits. An Allow from any other galley process does not count.
-- **Only a password typed in the dialog opens a window.** Never a sudoers ticket, `-S`, NOPASSWD, intercept, or an approval with no dialog. A danger command never opens a window. A Cut or SessionRoot chain never gets one.
-- **The askpass is a plain program**, `frisket-sudo askpass`, run as dan. The gate accepts it only when its kernel ppid is a sudo waiting on a pending 'G', and that parent (opened with `pidfd_open`) has euid 0 and ruid `forUser` [spike: AP1]. `SUDO_ASKPASS` must reach it by `exec`, so it stays sudo's direct child [spike: AP1].
-- **The askpass has no fallback box.** On a refusal or a down gate it prints the reason and exits 1. `SUDO_ASKPASS` points at it only when the gate is enabled.
-- **Who runs what**: the plugin and the PAM helper run as root inside sudo; the gate as `sudo-gate`; the askpass as dan.
+- **Only a verified dialog password opens a window.** A danger command never opens one, nor does a Cut or SessionRoot chain: their dialog has no time field.
+- **Rules the module sets**, from the one `enable` option: `Defaults noninteractive_auth`, so an agent's no-tty `sudo -n` reaches the dialog [spike: one-hop-sudo N1a]; `Defaults timestamp_type=tty`, with any other `timestamp_type` refused, since under `global` a no-tty skip leaves the next terminal sudo passwordless [spike: one-hop-sudo Q4f, T8b]; `rootpw`, `targetpw` and `runaspw` refused [spike: one-hop-sudo A7]; `intercept` and `log_subcmds` refused, since each intercepted subcommand calls `accept()` again (sudo `src/exec_intercept.c:508`) and nix-config sets neither; and a build assertion that sudo's auth stack is exactly the helper, `pam_unix`, `pam_deny`, since under `noninteractive_auth` any other module would run on every terminal `sudo -n` [spike: one-hop-sudo noninteractive].
+- **Accepted consequences**: with no tty, `-S` and any askpass are ignored, as the dialog's password is the one checked [spike: one-hop-sudo Q2d, Q2e, Q2g]; NOPASSWD commands still get the dialog [spike: one-hop-sudo T10]; a no-tty `sudo -v` or `-l` fails as stock (`-n`: "a password is required") [spike: one-hop-sudo N5]; a refusal adds sudo's line `sudo: frisket_audit: unable to log accept event: <reason>`; a terminal `sudo -n` without a ticket logs two extra `pam_unix` journal lines.
+- **Who runs what**: the plugin and the PAM helper run as root inside sudo; the gate as `sudo-gate`.
 
 ### 4.6 Danger and warning
 
-The gate classifies every command on 'A'. The dialog on 'P' is not classified: a danger command's dialog is a normal one, and its 'A' then asks the danger question and opens no window. A danger command gets the danger icon and banner and a reason line, is always asked, never forces a password, and never opens a window.
+The gate classifies every command it is sent. A danger command gets the danger level (galley's icon and banner) and a reason line, is always asked, never opens a window, and needs the password only where any command would (outside a window).
 
 - **Danger:**
   - a command matching the embedded catalogue: `systemctl` touching a guard unit `frisket*`, `galley*`, `sshd*`, `nftables*`, `debug-shell*` (`status` included);
@@ -203,13 +215,11 @@ The gate classifies every command on 'A'. The dialog on 'P' is not classified: a
 - **Warning** (requester only): a Cut or SessionRoot chain.
 - **Text lines**, no icon change: environment variables outside the allowlist (`HOME LOGNAME USER SHELL MAIL TERM TERMINFO TERMINFO_DIRS LANG LC_* PATH DISPLAY XAUTHORITY COLORTERM SUDO_USER SUDO_UID SUDO_GID SUDO_COMMAND SUDO_HOME`), shown with their values cut; for the signer, forwarded, unknown host key, unbound and SSHSIG namespace.
 
-The plugin is uninvolved when the invoking user is not `forUser`.
-
 ### 4.7 Failure
 
-- **No-tty sudo fails closed** when the gate cannot be reached: "frisket-sudo: gate not running (systemctl status frisket-sudo.socket); sudo in a terminal is not gated". Terminal and remote sudo never reach the gate, so this cannot lock anyone out. "Gate off" is `sudoGate.enable = false`, which leaves the plugin line out of `sudo.conf`.
-- `open()` never returns -1 or -2 [spike: sudo-vm].
-- **Nobody to ask** (galley not running, wrong galley peer): the signer signs at steps 3-5 as usual and refuses at step 6; the gate refuses with "no one to ask; use a terminal".
+- **No-tty sudo fails closed** when the gate cannot be reached: the plugin prints "frisket-sudo: gate not running (systemctl status frisket-sudo.socket); sudo in a terminal is not gated", the helper finds no check-in, and `pam_unix` fails with no terminal [spike: one-hop-sudo Q5f, N3c]. A sudo that `open()` gates but that could not check in is refused at `accept()`, so a same-parent sudoers ticket cannot carry it past PAM (decided, not measured; the sudo VM's Ticket case). Terminal and remote sudo never reach the gate, so this cannot lock anyone out. "Gate off" is `sudoGate.enable = false`, which leaves the plugin line out of `sudo.conf`.
+- `open()` returns 1 on every path, its allocation and socket errors included: 0 would make sudo unlink the plugin, so nothing vetoes, and -1 is `sudo_fatalx` on every sudo, terminal sudo included (sudo `src/sudo.c:1658-1670`).
+- **Nobody to ask** (galley not running, wrong galley peer): the signer signs at steps 3-6 as usual and refuses at step 7; the gate refuses with "no one to ask; use a terminal".
 - A panic in one request refuses that request and never exits the process.
 
 ## 5. Architecture
@@ -223,24 +233,22 @@ The plugin is uninvolved when the invoking user is not `forUser`.
   │   %t/galley/sock               0600  dan's clients (socket-activated) │
   │   /run/galley-ask/dan.sock     0666  services; bound by galley itself │
   └───────────▲─────────────────────────────────────────▲─────────────────┘
-              │ question / answer, level                 │ password form, questions
+              │ question / answer, level                 │ dialog, questions
               │ (peer: uid dan + galley.service cgroup)  │ (window pinned to galley's pid)
   ┌───────────┴───────────────┐            ┌─────────────┴─────────────────────┐
   │ frisket-signer            │            │ frisket-sudo gate                 │
   │ ssh-signer (951), tss     │            │ sudo-gate (952), no capabilities  │
   │ /dev/tpmrm0               │            │ /run/frisket-sudo/gate.sock       │
-  │ /var/lib/frisket-signer/  │            │   0600, root 0700 dir: 'G' 'A'    │
-  │   *.tpm                   │            │ /run/frisket-sudo-askpass/        │
-  └───────────▲───────────────┘            │   askpass.sock 0666: 'P'          │
-              │ agent protocol             └──────▲─────────────────▲──────────┘
-              │ /run/frisket-signer/agent         │ 'G' 'A' (uid 0) │ 'P' → password
-              │ (dan 0600)                        │                 │ (ppid = waiting sudo)
-  ┌───────────┴──────┐  ┌──────────────────┐  ┌───┴─────────────────┴─────────────┐
-  │ ssh, git, scp    │  │ frisket.service  │  │ setuid sudo                       │
-  │                  │  │ main process     │  │  pam_exec frisket-sudo-pam ('G')  │
-  └──────────────────┘  └──────────────────┘  │  frisket_approval.so ('A')        │
-                                              │  └▶ frisket-sudo askpass (child)  │
-                                              └───────────────────────────────────┘
+  │ /var/lib/frisket-signer/  │            │   0600, root 0700 dir             │
+  │   *.tpm                   │            └──────▲─────────────────▲──────────┘
+  └───────────▲───────────────┘                   │ 'C' 'A' 'V'     │ 'G'
+              │ agent protocol                    │ (uid 0)         │ (uid 0)
+              │ /run/frisket-signer/agent  ┌──────┴─────────────────┴──────────┐
+              │ (dan 0600)                 │ setuid sudo                       │
+  ┌───────────┴──────┐  ┌───────────────┐  │  frisket_sudo.so (audit plugin)   │
+  │ ssh, git, scp    │  │ frisket.svc   │  │  pam_exec frisket-sudo-pam        │
+  └──────────────────┘  │ main process  │  │  pam_authenticate("frisket-sudo") │
+                        └───────────────┘  └───────────────────────────────────┘
 ```
 
 ### An SSH login
@@ -252,7 +260,7 @@ ssh ──connect──▶ /run/frisket-signer/agent
 ssh ──session-bind@openssh.com(hostkey, sid, sig, fwd)──▶ verify sig over sid; push bind
 ssh ──REQUEST_IDENTITIES──▶ loaded keys
 ssh ──SIGN_REQUEST──▶ parse: userauth? sid == last bind? embedded hostkey == bound key? (else refuse)
-   decide (§4.4): frisket? terminal to known host? grant? → sign | ask
+   decide (§4.4): frisket? terminal? sshsig? grant? → sign | ask
    ask: galley question; poll ssh's connection for POLLRDHUP; hang-up withdraws the row
    sign: cached parent + key on the long-lived fd → TPM2_Sign → reply
    journal: one record per decision
@@ -261,11 +269,14 @@ ssh ──SIGN_REQUEST──▶ parse: userauth? sid == last bind? embedded host
 ### An agent's sudo
 
 ```
-first:  'G' → gate: no window → 'N'  ─▶ pam_unix → askpass 'P' → gate posts the dialog
-        Allow → 'Y' password → sudo's stdin; pam_unix accepts
-        'A' → gate: the dialog is the approval → 'Y', window opens (§7)
-next:   'G' → gate: window live → 'Y' (pam_unix skipped)
-        'A' → gate: question → Allow from the pinned galley → 'Y'
+open():    forUser, no tty, local, not -v/-l → connect gate.sock, 'C'      (else stock sudo)
+PAM:       helper 'G' → gate: its parent sudo checked in → 'Y' (pam_unix skipped)
+accept():  'A' resolved command →
+  outside a window: dialog → 'W' password → pam_authenticate(frisket-sudo) → 'V'
+                    ok → window opens → 'Y'     bad → dialog again
+  inside a window:  question → Allow from the pinned galley → 'Y'
+  refused:          'N' → accept() returns 0, sudo refuses
+exit:      connection closes → check-in gone, any row withdrawn
 ```
 
 ## 6. frisket-signer
@@ -306,7 +317,7 @@ Names come from `/etc/ssh/ssh_known_hosts` (NixOS writes it unhashed). A host ke
 
 ### Questions
 
-A grantable question (not Cut, not SessionRoot) is a form with the time control; an ungrantable one is a plain question with the warning level.
+A grantable question is a form with the time control; an Allow-once question (§4.4) is a plain question, with the warning level for Cut and SessionRoot.
 
 ```json
 {"galley":3,"item":{"kind":"forms","level":"normal","title":"ssh to github.com",
@@ -315,7 +326,7 @@ A grantable question (not Cut, not SessionRoot) is a form with the time control;
              {"answer":"extra","index":0,"label":"Allow once","underline":-1},
              {"answer":"ok","label":"Allow for","underline":-1}],
   "default":-1,
-  "forms":{"fields":[{"kind":"entry","label":"Allow for","values":["15"]},
+  "forms":{"fields":[{"kind":"entry","label":"Allow for","text":"15"},
                      {"kind":"combo","label":"","values":["minutes","hours"]}]}}}
 ```
 
@@ -339,132 +350,122 @@ A grantable question (not Cut, not SessionRoot) is a form with the time control;
 
 ### Grants (`internal/grant`, signer only)
 
-- `Key{Anchor{Pid, Start}, Host, KeyFP}`; `Grant(k, until)`; `Use(k) bool`.
+- `Key{Anchor{Pid, Start}, Host, KeyFP, Fwd}`; `Grant(k, until)`; `Use(k) bool`.
 - `until` = answer time + chosen, in `CLOCK_BOOTTIME`, so suspend counts against it. Use never extends it. A second grant for the same key keeps the later end.
 - A dead anchor's grant never matches again: a reused pid has another starttime. `Grant` drops expired entries; nothing reads `/proc`.
 - In memory only. A restart costs at most one question per active anchor.
 
 ### Journal
 
-One structured record per decision: requester chain, anchor, destination, key, class, text lines, outcome, its source (frisket, terminal, grant, galley answer, nobody), the chosen time, and the galley peer's pid and cgroup.
+One structured record per decision: requester chain, anchor, destination, key, class, forwarded, text lines, outcome, its source (frisket, terminal, sshsig, grant, galley answer, nobody), the chosen time, and the galley peer's pid and cgroup.
 
 ## 7. frisket-sudo
 
 ### Pieces
 
-- `sudo/frisket_approval.c`, `sudo/frisket-sudo-pam.c`, shared `sudo/chain.c` (chain walk, remote test, 'S') and `sudo/wire.c`. Built against `sudo.src`'s `sudo_plugin.h` with `-Wall -Wextra -Werror -fvisibility=hidden`. The C collects, frames and makes the three stock-sudo exits (other user, tty, remote); everything else is in Go.
-- `sudo/frisket-sudo-check-plugin.c` (~40 lines): `dlopen(RTLD_NOW)`, `dlsym`, then checks plugin type 4 (approval), the API major and the sudo version. A wrong type makes every sudo segfault [spike: SV1], so this check is mandatory.
-- `cmd/frisket-sudo`: `serve` (fds `gate` and `askpass` from `sdnotify.Listen()`; refuses to start without `gate`) and `askpass`.
+- `sudo/frisket_sudo.c` (the audit plugin, symbol `frisket_audit`), `sudo/frisket-sudo-pam.c`, shared `sudo/chain.c` (chain walk, remote test) and `sudo/wire.c`. Built against `sudo.src`'s `sudo_plugin.h` and linked with `-lpam`, with `-Wall -Wextra -Werror -fvisibility=hidden`. The C decides whether to gate, collects, frames and verifies the password; everything else is in Go.
+- `sudo/frisket-sudo-check-plugin.c` (~40 lines): `dlopen(RTLD_NOW)`, `dlsym`, then checks plugin type 3 (audit), the API major and the sudo version. A wrong type makes every sudo segfault [spike: SV1], so this check is mandatory.
+- `cmd/frisket-sudo serve`: fd `gate` from `sdnotify.Listen()`; refuses to start without it.
 - `sudo/danger.json`, embedded with `go:embed`, checked by a unit test.
 
 ### When it is involved
 
-| Situation | Plugin | PAM helper | Result |
-|---|---|---|---|
-| Invoking user is not `forUser` | `open()` 0 | exits 1 | Stock sudo |
-| tty present | `open()` 0 | exits 1 | Stock sudo |
-| tty present, `-A` with frisket's askpass | `open()` 0 | exits 1 | The askpass gets 'N' "not started by a waiting sudo" and sudo fails; `SUDO_ASKPASS` is set only in Claude Code's env [spike: AP1] |
-| Remote chain, no tty (`ssh host "sudo -S …"`) | `open()` 0 | exits 1 | Stock sudo |
-| Local, no tty, askpass | gates | may skip pam_unix | §4.5 |
-| Local, no tty, `-S`, a ticket, another `SUDO_ASKPASS` | gates | may skip pam_unix | No dialog: a question, no window |
-| `-v`, `-l`, `-k` | not opened | runs | Unchanged |
-| `-n` | gates | not run | Fails without a ticket, as stock (`noninteractive_auth` is unset) |
-| No tty, no `DISPLAY`, no `-A` | gates | runs | sudo's own "a terminal is required"; the pending record goes when sudo exits [spike: sudo-vm] |
+| Situation | `open()` | PAM helper | `accept()` | Result |
+|---|---|---|---|---|
+| Invoking user is not `forUser` | not gated | exits 1 | passes | Stock sudo [spike: one-hop-sudo S2, approval variant] |
+| tty present | not gated | exits 1 | passes | Stock sudo |
+| Remote chain (`ssh host "sudo -S …"`) | not gated | exits 1 | passes | Stock sudo [spike: one-hop-sudo S3, approval variant; N4b] |
+| Detached remote (`setsid -f`) | checks in | exits 0 | asks the gate | Gated locally (§2) [spike: R1] |
+| `-v`, `-l` (any spelling) | not gated | exits 1 | — | Stock; fails with no tty [spike: one-hop-sudo S4, N5] |
+| Local, no tty (`-n`, `-S`, `-A`, `-k cmd` alike) | checks in | exits 0 | asks the gate | §4.5 |
+| Same, a sudoers ticket from the same parent | checks in | not run | asks the gate | The ticket gives nothing [spike: one-hop-sudo Q4a, Q4d] |
+| Same, NOPASSWD | checks in | not run | asks the gate | The dialog [spike: one-hop-sudo T10] |
+| Same, gate unreachable | prints "gate not running" | exits 1 | refuses | pam_unix fails with no terminal |
 
 ### Wire, version 1
 
-One request and one reply per connection.
-
 ```
 request := "FSUD" | u8 version=1 | u8 kind | u32be length | body
-kind     : 'G' grant query (PAM helper)  'A' approval (plugin)  'P' password (askpass)
+kind     : 'C' check-in (plugin open())       'G' did my sudo check in (PAM helper)
+           'A' approval (plugin accept())     'V' verify result (plugin, after a 'W' reply)
 body     := record*        record := u8 tag | u32be len | bytes[len]
-'S'  u32be sudo_pid | u64be sudo_starttime                    G, A: required, once
 'k'  chain link: u32be pid | u32be ppid | u64be starttime | u32be uid | u32be tty_nr
-                 | u16be len comm | u16be len cmdline (NUL-separated, ≤ 4096)   G, A
-'v'  sudo's own argv from /proc/<sudo_pid>/cmdline (NUL-separated, ≤ 4096)      G: required
+                 | u16be len comm | u16be len cmdline (NUL-separated, ≤ 4096)   A
 'u' user_info  's' settings  'c' command_info  'a' run_argv  'e' run_envp       A
+'r'  u8: 1 the password verified, 0 not                                          V
 't'  truncated marker
-'P'  body empty; the sudo is the peer's kernel ppid, never a field
+'C', 'G': body empty; the sudo is the peer ('C') or the peer's kernel ppid ('G'), never a field
 limits   : ≤ 1 MiB (truncate run_envp, then cmdline); ≤ 16 links;
            every record length checked against the remaining body before allocating
-reply    := u8 'Y' | u16be len | message      'Y' to 'P': the password, raw bytes, ≤ 1023
-          | u8 'N' | u16be len | message      messages: ≤ 512 printable ASCII
+reply    := u8 'Y' | u16be len | message      messages: ≤ 512 printable ASCII
+          | u8 'N' | u16be len | message
+          | u8 'W' | u16be len | password     to 'A' or 'V' only; raw bytes, ≤ 1023
 ```
 
-- `gate.sock` takes 'G' and 'A' from peer uid 0 only. `askpass.sock` takes 'P' only; any other kind or a non-empty body gets 'N'.
-- A 'G' or 'A' missing 'S' (or a 'G' missing 'v') gets 'N'.
+- `gate.sock` takes requests from peer uid 0 only.
+- A 'G' is one request and one reply on its own connection.
+- 'C' opens the plugin's connection, which stays open until `close()` or sudo's exit; the check-in lasts as long. 'C' → 'Y'; then 'A' → 'Y', 'N' or 'W'; after 'W', 'V' → 'Y', 'N' or 'W'. An 'A' or 'V' anywhere else gets 'N'.
 - The first 'k' link is sudo's parent. Each link reads `stat` before and after `cmdline`; a starttime change cuts the chain there.
-- 'S' starttime is field 22 of `/proc/<pid>/stat`: the plugin reads its own, the helper its parent's. Both name the same sudo on every try [spike: R1, AP1].
 
 ### Plugin
 
-`open()`:
+`open()`, always returning 1:
 
-- `user_info` user is not the `user=` option → 0.
-- `tty=` present → 0 [spike: sudo-vm].
-- Remote chain → 0.
-- `user=` missing → set misconfigured and return 1; `check()` then denies with "frisket-sudo: plugin misconfigured in /etc/sudo.conf; use a terminal".
-- Otherwise 1. Never -1 or -2.
+- Gated when all hold: `user_info` user is the `user=` option, no `tty=` [spike: sudo-vm], the chain is not remote, and the mode is not `-v` or `-l` [spike: one-hop-sudo S4]. The mode is read from the arguments before `submit_optind` as sudo's `getopt_long` reads them: sudo's short-option string (`src/parse_args.c:115`) so an option's argument (`-gwheel`, `-u lp`) is skipped, a stop at `--`, and any unambiguous prefix of `--validate` or `--list` (`--li`). A missing `user=` leaves every sudo ungated. `accept()` adds no second check for a sudo left ungated by the mode test: `-v` and `-l` never reach it, so only a wrong parse could, and the parse tests cover that.
+- Gated: connect `/run/frisket-sudo/gate.sock` (compiled in, `SOCK_CLOEXEC`), check the peer is `sudo-gate`'s uid, send 'C', read 'Y'. Any failure prints the "gate not running" line with `sudo_plugin_printf(SUDO_CONV_ERROR_MSG)`.
 
-`check()`:
+`accept()`, for the policy plugin's accept of a gated sudo (any other returns 1):
 
-1. Connect `/run/frisket-sudo/gate.sock` (compiled in). Any error → the "gate not running" denial.
-2. Send 'A' and read the reply, with no timeout of its own.
-3. EOF or garbage → deny "no answer from gate". 'N' → print the message with `sudo_plugin_printf(SUDO_CONV_ERROR_MSG)` (errstr is never shown [spike: sudo-vm]) and return 0. 'Y' → print a non-empty message with `SUDO_CONV_INFO_MSG` and return 1.
+1. No check-in → errstr "gate not running", return 0.
+2. Collect the chain and send 'A' with the run info. Wait, with no timeout of its own.
+3. 'Y' → print a non-empty message with `SUDO_CONV_INFO_MSG`, return 1. 'N' → print the message with `SUDO_CONV_ERROR_MSG`, return 0. EOF or garbage → "no answer from gate", return 0.
+4. 'W' → `pam_start("frisket-sudo", user)`, `pam_authenticate(PAM_SILENT)` and `pam_acct_mgmt`, with a conversation that answers every prompt with the password; zero the buffer; send 'V' with the result and go to 3 [spike: one-hop-sudo Q3, V1, V2].
 
-sudo writes its ticket even when approval refuses, but the plugin runs on every command and a dead gate refuses, so the ticket never runs a command unseen [spike: sudo-vm].
+`close()` closes the connection.
 
 ### PAM helper
 
 `auth sufficient pam_exec.so seteuid quiet <helper> <user>`, ordered before `pam_unix` [spike: sudo-vm].
 
-1. `PAM_TTY` set → exit 1. (`sudo -A` from a terminal reaches the helper and stops here [spike: AP1].)
-2. `PAM_SERVICE != sudo`, `PAM_USER != PAM_RUSER`, or `PAM_USER != <user>` → exit 1.
-3. Collect the chain from `getppid()`'s parent, 'S' from `getppid()`, 'v' from `/proc/<getppid()>/cmdline`. Remote chain → exit 1.
-4. Send 'G' and wait. 'Y' → exit 0. Anything else → exit 1, and pam_unix runs.
+1. `PAM_TTY` set → exit 1.
+2. `PAM_SERVICE != sudo` or `PAM_USER != <user>` → exit 1.
+3. Connect `gate.sock`, check the peer is `sudo-gate`'s uid, send 'G'. 'Y' → exit 0. Anything else → exit 1, and pam_unix runs.
 
-The helper never asks: pam_exec waits for it.
+### The gate on 'C' and 'G'
 
-### Askpass
+- **'C'**: `SO_PEERCRED` uid 0. Record the peer's `(pid, starttime)` from `SO_PEERPIDFD` (mask checked) and `/proc/<pid>/stat`. Reply 'Y'. The check-in lasts until the connection closes; then any row it posted is withdrawn.
+- **'G'**: `SO_PEERCRED` uid 0, and the peer's parent, its kernel ppid from `PIDFD_GET_INFO` and that pid's starttime, is a live check-in's `(pid, starttime)` → 'Y'. Otherwise 'N'. A child of sudo running as another user is refused here [spike: one-hop-sudo Q6k].
 
-`frisket-sudo askpass` connects `/run/frisket-sudo-askpass/askpass.sock` (compiled in), sends 'P', and waits. 'Y' → write the password and a newline to stdout, zero the buffer, exit 0. 'N' or a connect error → print "frisket-sudo: <reason>" on stderr, exit 1, which sudo treats as a cancelled prompt. It is installed as `bin/frisket-sudo-askpass`, a script that runs `exec frisket-sudo askpass`, so it stays sudo's direct child.
+### The gate on 'A'
 
-### The gate on 'G'
+1. Classify (§4.6). Words are `[basename(program)] + run_argv[1:]`; for `-s`/`-i` sudo's backslash escaping is undone first.
+2. **Inside a window** (the anchor has one, now < its end, its pinned galley process is alive, and the chain is not Cut or SessionRoot): ask the question (below). An Allow counts only if the galley peer is the pinned process; any other answer is a refusal → 'N'. Allow → 'Y'.
+3. **Otherwise** post the dialog (below). Cancel or close → 'N' "cancelled". An empty password, or one with a NUL or newline → the dialog again. Allow with a non-empty password → 'W' and the password; keep the answer's time and galley peer `(pid, starttime)`.
+4. Nobody to ask → 'N' "no one to ask; use a terminal".
 
-1. Peer uid 0.
-2. Store or refresh the pending record for 'S': links, 'v', the classified anchor, and `pidfd_open(S.pid)` (sudo is blocked in PAM, so the pid is its). The record goes when that pidfd reports exit.
-3. Reply 'Y' only when the chain is not Cut or SessionRoot, the anchor has a window, now < its end, and its pinned galley process has not exited. Mark the record `skipped`. Otherwise 'N', and clear `skipped`.
+While asking, the gate polls the plugin's connection for `POLLRDHUP` and withdraws the row on hang-up.
 
-### The gate on 'P'
+### The gate on 'V'
 
-1. Peer: `SO_PEERCRED` uid `forUser`; `PIDFD_GET_INFO` on `SO_PEERPIDFD` gives the ppid (mask checked); `pidfd_open(ppid)` and `PIDFD_GET_INFO` give euid 0 and ruid `forUser` [spike: AP1]. The ppid must be the pid of a pending record that is not `skipped` and whose sudo pidfd has not reported exit. Otherwise 'N' "not started by a waiting sudo".
-2. Post the dialog (below). Poll the galley connection, the askpass connection and the sudo pidfd. If sudo exits or the askpass hangs up, close the galley connection.
-3. Cancel or close → 'N' "cancelled". A password with a NUL or newline → 'N' "password contains a newline". Allow with a non-empty password → replace the record's dialog record (shown argv, shown anchor, level, chosen time, the galley peer's pid and starttime), then reply 'Y' and the password. Each try's 'P' replaces the dialog record, so only the last try counts.
+- **1**: if the chosen time is above 0, the command is not danger and the chain is not Cut or SessionRoot, open the window: until = answer time + chosen (boottime, at most 24 h), pinned to the dialog's galley process. Reply 'Y' "frisket-sudo: password remembered for this claude until 16:40", or 'Y' with no message when no window opened.
+- **0**: post the dialog again with the line "wrong password", as on 'A' step 3.
+
+The dialog:
 
 ```json
 {"galley":3,"item":{"kind":"forms","level":"normal","title":"sudo systemctl restart foo",
-  "text":"claude (pid 5113) ← bash\n\nsudo systemctl restart foo",
+  "text":"claude (pid 5113) ← bash\n\n/run/current-system/sw/bin/systemctl restart foo",
   "buttons":[{"answer":"cancel","label":"Cancel","underline":-1},
              {"answer":"ok","label":"Allow","underline":-1}],
   "default":1,
   "forms":{"fields":[{"kind":"password","label":"Password for dan"},
-                     {"kind":"entry","label":"Remember the password for this claude for","values":["15"]},
+                     {"kind":"entry","label":"Remember the password for this claude for","text":"15"},
                      {"kind":"combo","label":"","values":["minutes","hours"]}]}}}
 ```
 
 - `default` is Allow, so Enter after the password allows with the prefilled time.
-- A Cut or SessionRoot dialog has the warning level and the password field only.
+- A danger dialog has the danger level, its reason first in the text, and the password field only. A Cut or SessionRoot dialog has the warning level and the password field only.
 - The password is never logged; the journal records "<n> bytes".
-
-### The gate on 'A'
-
-1. Peer uid 0. Take and remove the pending record for 'S'.
-2. Classify (§4.6). Words are `[basename(program)] + run_argv[1:]`; for `-s`/`-i` sudo's backslash escaping is undone first.
-3. **Window path** (the record is `skipped`): if the window has ended or its galley process has exited, reply 'N' "password window ended; run it again to be asked for the password". Otherwise ask the question (below). An answer counts only if the galley peer is the pinned process; any other answer is a refusal.
-4. **Dialog path** (a dialog record exists): the dialog is the answer when the chain's anchor is the one the dialog showed. Then approve. If the chosen time is above 0 and the chain is not Cut or SessionRoot, open the window: until = answer time + chosen (boottime, at most 24 h), pinned to the dialog's galley process. Reply 'Y' "frisket-sudo: password remembered for this claude until 16:40". If 'A' finds danger or an environment line the dialog did not show, ask the question instead, whose text starts with the reason ("sudo resolved /home/dan/bin/systemctl, outside the root-owned directories"), and open no window.
-5. **No 'G' or no dialog** (a ticket, `-S`, another askpass): ask the question.
-6. Nobody to ask → 'N' "no one to ask; use a terminal".
 
 The question:
 
@@ -475,8 +476,6 @@ The question:
              {"answer":"extra","index":0,"label":"Allow","underline":-1}],
   "default":-1}}
 ```
-
-While asking, the gate polls the plugin's connection for `POLLRDHUP` and withdraws the row on hang-up.
 
 ### Danger catalogue
 
@@ -499,13 +498,14 @@ New patterns are added after reading the journal.
 | Failure | Effect | Why it is safe |
 |---|---|---|
 | `.so` missing, wrong symbol, type or sudo version | The `sudo.conf` derivation fails to build (guard 1) | If it got through anyway, the previous generation at the console; `configurationLimit >= 5` |
-| `sudo.conf` group-writable or not root's | Every sudo prints "/etc/sudo.conf is group writable"; the gate is off | The store symlink is root 0444 [spike: SV1] |
-| Gate socket stopped or absent | No-tty sudo refused with the message; terminal and remote sudo unaffected | Terminal sudo never reaches the gate |
+| `sudo.conf` group-writable or not root's | Every sudo prints "/etc/sudo.conf is group writable"; no check-in, so no-tty sudo fails as stock | The store symlink is root 0444 [spike: SV1, one-hop-sudo Q5d, Q5e] |
+| `sudo.conf` empty or ignored | Stock sudo | No check-in, the helper exits 1 [spike: one-hop-sudo Q5b, N3a] |
+| Gate socket stopped or absent | No-tty sudo says "gate not running" and fails as stock; terminal and remote sudo unaffected | Terminal sudo never reaches the gate [spike: one-hop-sudo Q5f, N3c] |
 | Gate service crash-looping | The socket stays up and connects succeed with no answer, so no-tty sudo waits until its caller gives up; terminal and remote sudo unaffected | `StartLimitIntervalSec=0` keeps the socket up [spike: crosscheck]; no lockout |
 | Gate hangs | sudo waits until its caller gives up | The caller owns the timer |
-| galley not running | The askpass prints "no one to ask; use a terminal" and exits 1; questions refuse with the same | Terminal sudo unaffected |
-| sudo killed while its dialog or question is up | The gate sees the pidfd or the connection close and withdraws the row | No late rows |
-| Gate restarts | Windows and records are lost; the next sudo asks for the password | In memory only |
+| galley not running | 'N' "no one to ask; use a terminal" | Terminal sudo unaffected |
+| sudo killed while its dialog or question is up | The gate sees the connection close and withdraws the row | No late rows |
+| Gate restarts | Check-ins and windows are lost; open sudos get no answer and fail; the next sudo gets the dialog | In memory only |
 
 ## 8. Shared packages (frisket repo)
 
@@ -517,7 +517,7 @@ type Link struct {
 }
 type Requester struct {
     Chain []Link; Anchor *Link
-    Cut, SessionRoot, Terminal, Remote bool
+    Cut, SessionRoot, Terminal bool
     PeerUID int; CgroupID uint64; PPid int
 }
 func FromConn(c *net.UnixConn) (*Requester, error) // SO_PEERPIDFD path (signer)
@@ -536,8 +536,8 @@ func Ask(ctx context.Context, user string, q Question) (Answer, error)
 ```
 
 - `internal/peer`'s transient set and depth are constants.
-- `galleyask.Ask` dials `/run/galley-ask/<user>.sock`, checks the peer (§4.3), posts the item, and closes the connection when `ctx` is cancelled; the caller cancels it on `POLLRDHUP` or the sudo pidfd's exit. It speaks `github.com/danielbodart/galley/wire`.
-- `internal/grant` belongs to the signer (§6). The sudo window is one record in `internal/sudogate`.
+- `galleyask.Ask` dials `/run/galley-ask/<user>.sock`, checks the peer (§4.3), posts the item, and closes the connection when `ctx` is cancelled; the caller cancels it on `POLLRDHUP`. It speaks `github.com/danielbodart/galley/wire`.
+- `internal/grant` belongs to the signer (§6). Check-ins and the sudo window are records in `internal/sudogate`.
 - `execrule` gains `DecideWords(words []string) Decision` beside `Decide`, sharing its Decision builder, so the gate never re-quotes argv into a shell string [spike: policy-fit].
 - New module dependencies: `github.com/google/go-tpm`, `github.com/foxboron/go-tpm-keyfiles`, and `github.com/danielbodart/galley` at a pseudo-version with a public `wire/`.
 
@@ -553,13 +553,13 @@ Script actions, one per question, the last line repeating: `ok <field>…` (answ
 
 ## 9. galley changes
 
-1. Move `internal/wire` to a public `wire/` package with golden files: the signer form, the plain question, the sudo dialog, every `level`, and the answer lines. Wire version 3 adds `level` (and the window-set `caller`). **This merges first.**
+1. Move `internal/wire` to a public `wire/` package with golden files: the signer form, the plain question, the sudo dialog, every `level`, and the answer lines. Wire version 3 adds `level`, `Field.text` and the window-set `caller`. **This merges first.**
 2. `server.js` keeps the user listener from `LISTEN_FDNAMES` and binds `GALLEY_SERVICES_SOCKET` itself (unlink, bind, chmod 0666, listen). Shown with real gjs [spike: galley-socket].
 3. The services listener admits only `GALLEY_SERVICES` uids (names from `/etc/passwd` at start); others are reset. gjs reads the peer uid and pid from `Gio.Credentials` [spike: crosscheck/galley].
 4. `item.caller = {uid, name, label, pid}` is set after `validate()`; a client-sent `caller` fails validation.
 5. Service items: markup forced off; `level` (`normal`, `warning`, `danger`; absent is `normal`) chooses galley's icon, and `danger` adds galley's banner. No shape allowlist.
 6. Service rows never join.
-7. An `entry` field shows `values[0]` as its initial text.
+7. Prefilled text: wire `Field.text` is an entry or multiline field's initial text, and fails validation on a password field. The CLI gains `--value TEXT` in the forms option group, setting it on the preceding `--add-entry` or `--add-multiline-entry`; `--scale`'s integer `--value` is unchanged: both mean the starting value, typed by the dialog.
 8. Home-manager: `services.galley.services` (uid name → label); the socket is on when it is non-empty.
 
 ## 10. NixOS wiring
@@ -572,22 +572,20 @@ frisket owns `nixosModules.signer` and `nixosModules.sudoGate`, each added to fr
 |---|---|---|---|
 | `enable` | bool | false | Run the signer |
 | `forUser` | str | `"dan"` | The only peer uid served; galley user |
+| `terminal` | `allow` \| `ask` | `allow` | A real tab's bound, direct sign to a host in `ssh_known_hosts` |
+| `sshsig.<namespace>` | `allow` \| `ask` | `{ git = "allow"; }` | A direct SSHSIG sign in that namespace; an unlisted namespace is asked, Allow once |
+
+Not options: frisket's main process is always trusted, a forwarded sign is never silent, and there is no refuse value.
 
 Fixed: user and group `ssh-signer` (951); socket `/run/frisket-signer/agent`; keys `/var/lib/frisket-signer/*.tpm`.
 
 Load-bearing lines:
 
-```nix
-assertions = [{
-  assertion = lib.intersectLists normalUsers usersInTss == [ ];   # members, extraGroups, primary group
-  message = "a login user in tss could sign with any key blob";
-}];
-socketConfig = { ListenStream = "/run/frisket-signer/agent"; SocketUser = cfg.forUser;
-                 SocketMode = "0600"; DirectoryMode = "0755"; FileDescriptorName = "agent"; };
-serviceConfig = { User = "ssh-signer"; SupplementaryGroups = [ "tss" ];
-                  DevicePolicy = "closed"; DeviceAllow = [ "/dev/tpmrm0 rw" ];
-                  StateDirectory = "frisket-signer"; StateDirectoryMode = "0700"; };
-```
+| What | Line |
+|---|---|
+| tss assertion, when enabled | no login user in `tss` by members, `extraGroups` or primary group: "a login user in tss could sign with any key blob" |
+| Socket | `/run/frisket-signer/agent`, `SocketUser = forUser`, `SocketMode = 0600`, `DirectoryMode = 0755`, fd name `agent` |
+| Service | `User = ssh-signer`, `SupplementaryGroups = tss`, `DevicePolicy = closed`, `DeviceAllow = /dev/tpmrm0 rw`, `StateDirectory = frisket-signer` mode 0700 |
 
 Hardening: `NoNewPrivileges`, `CapabilityBoundingSet = ""`, `ProtectSystem = "strict"`, `ProtectHome`, `PrivateTmp`, `ProtectControlGroups`, `RestrictAddressFamilies = [ "AF_UNIX" ]`, `SystemCallFilter = [ "@system-service" "~@privileged" ]`, `MemoryDenyWriteExecute`, `Restart = "always"`, `StartLimitIntervalSec = 0`. UNTESTED as a set with the real binary and TPM; the signer VM test runs this module.
 
@@ -597,41 +595,31 @@ Hardening: `NoNewPrivileges`, `CapabilityBoundingSet = ""`, `ProtectSystem = "st
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `enable` | bool | false | Plugin line in `sudo.conf`, PAM rule, gate |
+| `enable` | bool | false | Plugin line in `sudo.conf`, PAM rule, `frisket-sudo` PAM service, sudoers defaults, gate |
 | `forUser` | str | `"dan"` | The gated user |
 
-Fixed: user and group `sudo-gate` (952); `/run/frisket-sudo/gate.sock`; `/run/frisket-sudo-askpass/askpass.sock`.
+Fixed: user and group `sudo-gate` (952); `/run/frisket-sudo/gate.sock`.
 
 Load-bearing lines:
 
-```nix
-sudoConf = pkgs.runCommand "sudo.conf" { } ''        # guard 1: build-time, every rebuild path
-  ${root}/bin/frisket-sudo-check-plugin ${so} frisket_approval ${sudo.version}
-  echo "Plugin frisket_approval ${so} user=${cfg.forUser}" > $out
-'';
-environment.etc."sudo.conf".source = sudoConf;
-security.pam.services.sudo.rules.auth.frisket-grant = {
-  order = config.security.pam.services.sudo.rules.auth.unix.order - 10;
-  control = "sufficient";
-  modulePath = "${config.security.pam.package}/lib/security/pam_exec.so";
-  args = [ "seteuid" "quiet" "${root}/bin/frisket-sudo-pam" cfg.forUser ];
-};
-systemd.sockets.frisket-sudo.socketConfig = { ListenStream = "/run/frisket-sudo/gate.sock";
-  SocketUser = "sudo-gate"; SocketMode = "0600"; DirectoryMode = "0700"; FileDescriptorName = "gate"; };
-systemd.sockets.frisket-sudo-askpass.socketConfig = { ListenStream = "/run/frisket-sudo-askpass/askpass.sock";
-  Service = "frisket-sudo.service"; SocketUser = "sudo-gate"; SocketMode = "0666";
-  DirectoryMode = "0755"; FileDescriptorName = "askpass"; };
-assertions = [{ assertion = (config.boot.kernel.sysctl."kernel.yama.ptrace_scope" or 1) >= 1;
-                message = "the sudo window's galley pin needs ptrace_scope >= 1"; }];
-```
+| What | Line |
+|---|---|
+| `sudo.conf` (guard 1, build-time on every rebuild path) | a derivation that runs `frisket-sudo-check-plugin <so> frisket_audit <sudo version>` and writes `Plugin frisket_audit <so> user=<forUser>` |
+| PAM rule | `sudo` auth `frisket-sudo-pam`: `sufficient pam_exec.so seteuid quiet <helper> <forUser>`, order `unix.order - 10` |
+| Auth stack assertion | sudo's enabled auth rules are exactly `frisket-sudo-pam`, `unix`, `deny`: "a conversation-free auth module would run on every terminal sudo -n" |
+| PAM service | `security.pam.services.frisket-sudo = { }` |
+| sudoers | `Defaults noninteractive_auth`, `Defaults timestamp_type=tty` |
+| sudoers assertion | no other `timestamp_type`, and no `rootpw`, `targetpw`, `runaspw`, `intercept` or `log_subcmds` |
+| Socket | `/run/frisket-sudo/gate.sock`, `SocketUser = sudo-gate`, `SocketMode = 0600`, `DirectoryMode = 0700`, fd name `gate` |
+| ptrace assertion | `kernel.yama.ptrace_scope >= 1`: "the sudo window's galley pin needs ptrace_scope >= 1" |
 
 The gate unit: `User = "sudo-gate"`, `CapabilityBoundingSet = ""`, `ProcSubset = "pid"`, `PrivateDevices`, `ProtectSystem = "strict"`, `ProtectHome`, `RestrictAddressFamilies = [ "AF_UNIX" ]`, `Restart = "always"`, `RestartSec = "1s"`, `StartLimitIntervalSec = 0`.
 
-`/run` is root 0755, so only root can create the gate's directories; the plugin needs no check of who made them.
+`/run` is root 0755, so only root can create the gate's directory; the plugin needs no check of who made it.
 
 ### frisket `nix/flong.nix`
 
-When the signer or the gate is enabled, every flong session's `protect` list gains `/run/frisket-signer`, `/run/galley-ask`, `/run/frisket-sudo` and `/run/frisket-sudo-askpass`, beside frisket's control socket, so "no socket in a container" is checked by flong.
+When the signer or the gate is enabled, every flong session's `protect` list gains `/run/frisket-signer`, `/run/galley-ask` and `/run/frisket-sudo`, beside frisket's control socket, so "no socket in a container" is checked by flong.
 
 ### nix-config
 
@@ -654,7 +642,7 @@ Both states:
 - `programs.ssh.knownHosts.server` and `.mac`.
 - Before the gate is enabled, the boot menu keeps at least 5 generations: `boot.lanzaboote.configurationLimit` on dan-blade and `boot.loader.systemd-boot.configurationLimit` on dan-desktop are null (unlimited, today's value) or `>= 5`.
 - galley: `services.galley.services = { ssh-signer = "SSH signer"; sudo-gate = "sudo"; }`; `systemd.tmpfiles.rules = [ "d /run/galley-ask 0755 dan dan -" ]`.
-- Claude Code: `permissions.allow = [ "Bash(sudo:*)" ]` stays, and no deny rules are added. `env.SUDO_ASKPASS` is `${frisket-sudo}/bin/frisket-sudo-askpass` when `services.frisket.sudoGate.enable`, else today's `~/.claude/sudo-askpass.sh`.
+- Claude Code: `permissions.allow = [ "Bash(sudo:*)" ]` stays, and no deny rules are added. `env.SUDO_ASKPASS` is unset when `sudoGate.enable` and stays `sudo-askpass.sh` when it is off; left set, a no-tty sudo the gate does not take (gate stopped, `-v`) would run the askpass [H4].
 - Hosts set `services.frisket.sudoGate.enable` directly.
 
 ### nix-config `checks.x86_64-linux.sudo-lockout` (guard 2)
@@ -662,6 +650,7 @@ Both states:
 A NixOS VM test, run by `nix flake check` on chase, nixpkgs or sudo bumps and before M3. It imports only frisket's `nixosModules.sudoGate` and copies the host's sudo and PAM values by name. Importing nix-config's host modules recurses, and at the host's `eval-cores = 0` that is a silent hang [spike: X1]. It runs:
 
 - `sudo id -u` with a tty, as root, and with no tty against a real gate;
+- `sudo -n id -u` with a tty and no ticket: stock "a password is required";
 - no-tty sudo with the gate's socket stopped: refused with the message, while tty sudo works;
 - a remote `sudo -S` over ssh.
 
@@ -692,18 +681,22 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 - `TestAPeerThatIsNotTheConfiguredUserIsRefusedBeforeAnyMessage`
 - `TestAPanicInOneRequestDoesNotStopTheNext`
 - `TestNoKeysAnswersAnEmptyList`
+- `TestTerminalAskAsksATabToAKnownHost`
+- `TestAGitSignatureIsSilentByDefaultAndAnUnlistedNamespaceIsAllowOnce`
+- `TestAForwardedSignIsAskedEvenFromATabToAKnownHost`
+- `TestADirectGrantNeverCoversAForwardedSignNorTheReverse`
 - `FuzzNoAgentMessageCrashesTheParser`
 
 `internal/peer`:
 
 - `TestADeadPidfdIsNeverRoot`
-- `TestOnlyFrisketsMainProcessIsTrusted` (ppid, cgroup by inode)
+- `TestOnlyFrisketsMainProcessIsTrusted` (comm, ppid, cgroup by inode)
 - `TestTheClaudeChainAnchorsOnClaude` (H2 fixture)
+- `TestAScriptRunFromATabAnchorsOnTheTabsShell`
 - `TestATabShellRunningSshIsATerminal` (H2 fixture)
 - `TestACommandLaunchedThroughTheTerminalServerIsNotATerminal`: `kgx -- ssh`, `kgx -- bash -c`, `kgx -- git push`
 - `TestAnAgentCommandIsNeverATerminal` (claude and its `bash` between the tab's shell and the leaf)
 - `TestASystemdUserRootAndAReparentedSshAreNeverGrantable`
-- `TestARemoteChainNeedsARootSshdSessionParent`
 
 `internal/grant`:
 
@@ -721,24 +714,20 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 
 `internal/sudogate` (peer facts injected as `PeerInfo`):
 
-- `FuzzNoRequestCrashesTheGate` (all three kinds, both sockets)
-- `TestARequestWithoutTheSudoTagIsDenied`
-- `TestAPasswordRequestWhoseParentIsNotAWaitingSudoIsRefused`: no 'G'; a 'G' already consumed; a 'G' whose sudo has exited; a parent with euid dan; another user
-- `TestAGWhoseSudoExitsWithoutAnALeavesNoRecord`
-- `TestTheLastTrysDialogIsTheOneThatCounts`
-- `TestADialogRecordIsUsedOnlyByTheSudoItWasMadeFor` (`(P, t1)` vs `(P, t2)` and `(Q, t1)`)
-- `TestADialogDoesNotCountWhenAFindsDangerOrAnUnshownVariable`
+- `FuzzNoRequestCrashesTheGate` (every kind, in and out of order)
+- `TestOnlyARootPeerChecksIn`
+- `TestGIsYesOnlyWhenThePeersParentIsALiveCheckIn`: a non-root peer, a root peer whose parent never checked in, a check-in whose connection closed
+- `TestAnAOrVOffACheckInConnectionIsRefused`
+- `TestAWrongPasswordBringsTheDialogBack`
+- `TestOnlyAVerifiedDialogPasswordOpensAWindow`: a failed verify, a question's Allow, a danger dialog, a Cut chain and a time of 0 open none
+- `TestADangerOrCutDialogHasNoTimeField`
+- `TestTheWindowCountsOnlyAnswersFromThePinnedGalley`
+- `TestTheWindowEndsWithItsGalleyProcessItsAnchorOrItsTime`
 - `TestAProgramOutsideTheRootOwnedDirsIsDanger`: `..`, `/./`, `//`, a nested dir, a store path, plus a rapid property that no non-clean path passes
 - `TestShellAndEnvWrappersAreClassifiedByEveryInnerCommand`, and unreadable is danger
 - `TestTheGuardUnitsAreDanger` (the embedded catalogue)
-- `TestEnvironmentVariablesAreTextLines`: allowlisted names pass; `LESSOPEN`, `LD_PRELOAD`, `FOO` are shown and stop the dialog counting
-- `TestOnlyADialogPasswordOpensAWindow`: a ticket ('A' with no 'G'), `-S`, intercept, a question's Allow, a dialog whose 'A' is danger and a Cut chain open none
-- `TestTheWindowCountsOnlyAnswersFromThePinnedGalley`
-- `TestTheWindowEndsWithItsGalleyProcessItsAnchorOrItsTime`
-- `TestAWindowThatEndsBetweenGAndAIsRefused`
+- `TestEnvironmentVariablesAreTextLines`: allowlisted names pass; `LESSOPEN`, `LD_PRELOAD`, `FOO` are shown
 - `TestServeRefusesToStartWithoutTheGateFd`
-
-`cmd/frisket-sudo askpass` (gate faked on a socketpair): `TestThePasswordGoesOnlyToStdout`, `TestAGateNoPrintsTheReasonAndExitsOne`.
 
 `execrule`: `TestDecideWordsAgreesWithDecideOnReadableStrings` (rapid).
 
@@ -752,40 +741,42 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 - A child exec'd inside `frisket.service` is asked.
 - A cgroup move from dan's real `user@` session into `frisket.service` is refused.
 - A sign for another session than the last bind (tamper) is refused.
-- `ssh -A` through the second sshd: the far-side sign is asked with the "forwarded" line.
-- A terminal-shaped chain (a pty holder with comm `.kgx-wrapped`, then bash, then ssh) to a known host signs silently; `kgx -- ssh` shapes and `systemd-run --user ssh` are asked with the warning level and no time field.
+- `ssh -A` through the second sshd: the far-side sign is asked with the "forwarded" line, also from a terminal-shaped chain.
+- A terminal-shaped chain (a pty holder with comm `.kgx-wrapped`, then bash, then ssh) to a known host signs silently, and is asked with `terminal = "ask"`; `kgx -- ssh` shapes and `systemd-run --user ssh` are asked with the warning level and no time field.
+- `ssh-keygen -Y sign -n git` signs silently; `-n file` is asked, Allow once.
 - fakegalley `ok 15 minutes` makes a grant: the next sign from the same anchor is silent and fakegalley logs no question; `answer 0` (Allow once) grants nothing.
 - A rebound `/run/galley-ask/dan.sock` (socat outside `galley.service`) is nobody, and the journal names its cgroup.
 - An ssh killed while its question is up: fakegalley logs the close.
 - The sockets are absent inside a flong-style namespace.
 - TPM cleared (swtpm state reset): the key is still listed, a sign fails with "TPM cleared or a different chip" in ssh's error and the journal, and `serve` stays up.
 
-`tests/sudo-gate.nix`: no tty via `setsid -w runuser` with `DISPLAY=:0`, a tty via `script -qec`; `SUDO_ASKPASS` set to the package's `bin/frisket-sudo-askpass`; fakegalley as `galley.service`.
+`tests/sudo-gate.nix`: no tty via `setsid -w runuser … </dev/null`, a tty via `script -qec`; fakegalley as `galley.service`.
 
-- With a tty and no `-A`, the gate is never contacted. With a tty and `-A`, no 'G' or 'A' arrives and the askpass's 'N' "not started by a waiting sudo" fails the sudo.
-- **One dialog**: `sudo systemctl restart foo` with fakegalley `ok <pw> 15 minutes`. It runs; fakegalley logged exactly one item, from the `sudo-gate` caller, showing the chain and the command; stderr says "password remembered … until"; the journal has no password.
+- With a tty, the gate is never contacted and sudo prompts as stock; tty `sudo -n` says "a password is required".
+- **One dialog**: `sudo systemctl restart foo` with fakegalley `ok <pw> 15 minutes`. It runs; fakegalley logged exactly one item, from the `sudo-gate` caller, showing the chain and the resolved command; stderr says "password remembered … until"; the journal has no password.
+- **`-n`**: `sudo -n id -u` with no tty gets the dialog and runs.
 - **Window**: the next sudo from a new `bash -c` under the same claude gets one question and no password; a different claude gets the dialog.
 - **Pin**: fakegalley restarted → the next sudo gets the dialog. A thief that joins `galley.service`'s cgroup and rebinds the socket inside a window → its Allow is a refusal, the journal names the pin, and the window is unchanged. A socat outside the cgroup → nobody to ask.
-- **Danger**: `sudo systemctl stop frisket.service` outside a window → the normal dialog, then a danger question, and no window afterwards; inside a window → a danger question with no password.
-- **Resolved differently**: a dan-owned `~/bin/systemctl` first in PATH → the dialog shows `sudo systemctl status`, and a danger question follows naming the path.
+- **Wrong password**, then right: two dialogs; the second's time is the one used.
+- **Danger**: `sudo systemctl stop frisket.service` outside a window → one dialog with the danger level, a password and no time field, and no window afterwards; inside a window → a danger question with no password.
+- **Resolved path**: a dan-owned `~/bin/systemctl` first in PATH → danger, the line naming the path.
 - **sh -c**: `sudo sh -c 'systemctl stop sshd'` is danger; `sudo sh -c "$(printf x)"` is danger as unreadable.
-- **Environment**: `sudo --preserve-env=FOO …` → the dialog does not count; a question shows `FOO`.
-- **Cancel**: sudo fails authentication and no 'A' arrives.
-- **Wrong password**, then right: two forms; the second's time is the one used.
-- **Forged askpass**: a `SUDO_ASKPASS` script that prints the password → a question, no window.
-- **Askpass from a shell**: `frisket-sudo askpass` run directly → refused, exit 1.
-- **Ticket**: `sudo -v; sudo id` → the second gets a question and no window.
-- **`-S`**: `echo pw | sudo -S id` → a question.
-- **'S' agreement**: 'G', the askpass's ppid and 'A' name the same sudo.
-- **Ticket on refusal**: the ticket is written on refusal; the plugin refuses the cached retry, also with the gate stopped.
+- **Environment**: `sudo --preserve-env=FOO …` → the item shows `FOO`.
+- **Cancel**: sudo refuses and prints sudo's "unable to log accept event" line.
+- **Ignored input**: `echo wrong | sudo -S id` and `sudo -A id` with a script askpass → the askpass never runs, and the dialog's password is the one checked.
+- **Ticket**: two no-tty sudos from the same parent → the second is asked again; with the gate stopped in between, refused.
+- **`-v` and `-l`**: `sudo -v`, `-nv`, `-l`, `--validate`, `--vali`, `--li` with no tty → fail as stock, no check-in, and the next sudo is asked. `-gwheel id` and `-u lp id` check in and get the dialog, with and without a same-parent ticket.
+- **NOPASSWD**: a NOPASSWD rule's command still gets the dialog.
+- **timestamp_type**: a no-tty `sudo id` allowed through fakegalley (`ok <pw> 0`), then a tty `sudo id` in the same VM → prompted.
 - **Gate socket stopped**: no-tty sudo refused with the message; tty and root sudo work.
 - **Crash loop**: a gate that exits at start keeps the socket active; no-tty sudo blocks until the test's timeout kills it, and tty sudo works.
 - **Hang-up**: sudo killed while its dialog is up → fakegalley logs the close; the same for a question.
 - **Never answered**: fakegalley `never` keeps sudo waiting; killing it withdraws the row.
-- **Another user** (bob): the plugin is uninvolved, no 'G' is sent.
-- **Remote**: make-usb's `printf pw | ssh vm "sudo -S -p '' tar …"` succeeds with fakegalley never answering and with the gate stopped. Detached `ssh vm 'setsid -f sh -c "sudo -S id"'` is gated.
+- **Another user** (bob): no check-in; stock.
+- **Child of sudo**: a process run by `sudo -u bob` sending 'G' gets 'N'.
+- **Remote**: make-usb's `printf pw | ssh vm "sudo -S -p '' tar …"` succeeds with fakegalley never answering and with the gate stopped; a wrong password fails as stock. Detached `ssh vm 'setsid -f sh -c "sudo -S id"'` is gated: fakegalley logs a dialog, and with `never` sudo waits.
 - A broken `.so`, a wrong symbol or a wrong plugin type fails the `sudo.conf` derivation build.
-- `/etc/pam.d/sudo` has the grant line before `pam_unix`.
+- `/etc/pam.d/sudo` auth is the helper, `pam_unix`, `pam_deny`; an extra auth rule, `timestamp_type=global`, `rootpw` or `intercept` fails evaluation.
 
 ### galley tests
 
@@ -794,7 +785,7 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 - Service rows never join any other row; a thief with the same title does not join.
 - A stale services socket file is replaced at start.
 - The golden files round-trip.
-- An entry shows `values[0]`; Enter in the sudo form presses Allow.
+- An entry shows `Field.text`; `text` on a password field fails validation; `--value` fills the preceding `--add-entry` or `--add-multiline-entry`, and `--scale --value 5` still parses; Enter in the sudo form presses Allow.
 - A service row on a locked screen stays until answered or withdrawn.
 
 ## 12. Rollout
@@ -816,15 +807,15 @@ galley items 1-8 merged and deployed; `services.galley.services` and the tmpfile
 ### M2: signer
 
 1. `sshSigner.enable = true` on one host and switch; dan leaves `tss`, and the signer starts with no keys. Then `sudo install -o ssh-signer -g ssh-signer -m 0600 ~/.ssh/id_ecdsa.tpm /var/lib/frisket-signer/` and `sudo systemctl restart frisket-signer`. Log out and in; `id` in a new tab shows no `tss`.
-2. Check by hand: a tab's `ssh server true` is silent; Claude Code's `git push` is asked and a 15-minute grant holds; `systemd-run --user ssh server true` is asked with the warning; a chase session's push is silent.
+2. Check by hand: a tab's `ssh server true` is silent; Claude Code's `git push` is asked and a 15-minute grant holds; `systemd-run --user ssh server true` is asked with the warning; a chase session's push is silent; a signed commit is silent.
 3. Read the journal for a few days and tune in code. Then the other host.
 
 ### M3: sudo gate
 
 Preconditions: `sudo-lockout` passes; `configurationLimit` is null or `>= 5` (§10).
 
-1. `services.frisket.sudoGate.enable = true` on one host; `SUDO_ASKPASS` switches with it.
-2. Check by hand: a first agent sudo shows one dialog and runs; the next asks without a password; a wrong password shows the dialog again; `sudo systemctl stop galley.service` shows danger.
+1. `services.frisket.sudoGate.enable = true` on one host; Claude Code's `SUDO_ASKPASS` goes with it (§10).
+2. Check by hand: a first agent sudo (`-n` too) shows one dialog and runs; the next asks without a password; a wrong password shows the dialog again; `sudo systemctl stop galley.service` shows danger; terminal sudo prompts as before.
 3. Read the journal (dialogs, windows, questions per window) and tune. Then the other host.
 
 ### M4: stock agent removed
@@ -840,12 +831,13 @@ After M2 has settled on both hosts, delete the M0.5 branch from nix-config. The 
 ### Rollback
 
 1. `sshSigner.enable = false`: back to the stock agent on the same key file (until M4; after M4, put the M0.5 branch back).
-2. `services.frisket.sudoGate.enable = false`: the plugin line and PAM rule go; `SUDO_ASKPASS` goes back to `sudo-askpass.sh`.
+2. `services.frisket.sudoGate.enable = false`: the plugin line, the PAM rule and service, and the sudoers defaults go, and Claude Code's `SUDO_ASKPASS` is back.
 3. sudo broken anyway: boot the previous generation from the boot menu at the console.
 
 ### Later tracks, not designed here
 
-- **Remote sudo** through the forwarded agent and `pam_rssh`, asked in galley: after the signer's rollout (never with the stock agent, which signs forwarded requests silently), with the normal key; the question needn't show the remote command; starts with a small spike.
+- **Remote sudo** through the forwarded agent and `pam_rssh`, asked in galley: after the signer's rollout (never with the stock agent, which signs forwarded requests silently), with the normal key; the question needn't show the remote command; starts with a small spike. It must revisit the sudo auth stack assertion.
+- **Commit signing from inside containers**: frisket offers each session a narrow agent socket (SSHSIG namespace `git` only) that names the session to the signer, decided by frisket's per-tier config; flong mounts the socket.
 - **Allow-with-notice sudo class** (e.g. `nixos-rebuild switch`, run without a question but posted as a galley notice): parked; it would need a root-owned-PATH check.
 - **A TPM-held age identity.**
 
@@ -859,13 +851,13 @@ After M2 has settled on both hosts, delete the M0.5 branch from nix-config. The 
 | T3 signer | frisket | `internal/tpmkey`, `internal/agentsrv`, `cmd/frisket-signer`, `nixosModules.signer`, flong protect entries, `tests/signer.nix`, `docs/signer.md` (recovery) | T2 |
 | T4 sudo | frisket | `sudo/*.c`, check-plugin, `internal/sudogate`, `cmd/frisket-sudo`, `sudo/danger.json`, `nixosModules.sudoGate`, `tests/sudo-gate.nix`, `docs/sudo.md` | T2 |
 | T2b chase | chase | go.mod, `vendorHash` and flake.lock bump after T3 and T4 | T3, T4 |
-| T5 nix-config | nix-config | `sshSigner`, gate enable, `SUDO_ASKPASS` switch, galley services, `configurationLimit`, `checks.sudo-lockout` | T1 merged, T2b |
+| T5 nix-config | nix-config | `sshSigner`, gate enable with Claude Code's `SUDO_ASKPASS` switch, galley services, `configurationLimit`, `checks.sudo-lockout` | T1 merged, T2b |
 
 T3 and T4 run in parallel once T2 merges. Cross-repo contracts, frozen when their track merges:
 
-- galley `wire/` and its golden files, including `level`, the entry initial value and the three item shapes;
+- galley `wire/` and its golden files, including `level`, `Field.text` and the three item shapes;
 - `GALLEY_SERVICES_SOCKET`, `GALLEY_SERVICES`, `services.galley.services`;
-- socket paths: `/run/frisket-signer/agent`, `/run/frisket-sudo/gate.sock`, `/run/frisket-sudo-askpass/askpass.sock`, `/run/galley-ask/<user>.sock`;
+- socket paths: `/run/frisket-signer/agent`, `/run/frisket-sudo/gate.sock`, `/run/galley-ask/<user>.sock`;
 - the sudo wire (kinds, tags, replies) between the C and the gate;
 - uids 951 and 952;
 - module options in §10.
@@ -874,6 +866,9 @@ T3 and T4 run in parallel once T2 merges. Cross-repo contracts, frozen when thei
 
 - **Exe paths or a known store-path set**: they need `CAP_SYS_PTRACE` and were forgeable with `nix-store --add` [spike: store-name-attack]; comm plus structure is at the stock floor.
 - **Question-as-authentication for sudo outside a window**: a galley Allow can come from dan-uid code with nobody there; the dialog's password needs a person.
+- **An approval plugin**: its `open()` returning 0 skips `check()` after the helper has skipped the password, and a `sudo.conf` that loses its line does the same [spike: one-hop-sudo A1, A2, A4].
+- **A check-in read from `/proc/<sudo>/maps`**: it shows the `.so` is loaded, not that this sudo is gated [spike: one-hop-sudo A1, A2, A4].
+- **An askpass**: with no tty sudo never runs one once the helper skips the password [spike: one-hop-sudo Q2g].
 - **A prefix check on `command=`**: `/run/current-system/sw/bin/../../../home/…/cat` ran as root [spike: evidence-audit].
 - **An env denylist**: `LESSOPEN` ran code as root [spike: policy-fit]; variables are shown instead.
 - **Fail-open when the gate is unreachable**: a crash loop with a fresh ticket was silent root [spike: sudo-vm, ops-socket-limit].
@@ -883,7 +878,11 @@ T3 and T4 run in parallel once T2 merges. Cross-repo contracts, frozen when thei
 
 UNTESTED, each with the test that settles it:
 
-- **Claude Code's Bash timeout kills the whole process tree**, so sudo and ssh hang up and their rows are withdrawn. A quick check before building: a Bash call running `sudo -A sleep 600` with a short timeout, then `pgrep sudo`. If sudo survives, a timed-out command keeps its row until answered.
+- **Claude Code's Bash timeout kills the whole process tree**, so sudo and ssh hang up and their rows are withdrawn. A quick check before building: a Bash call running `sudo -n sleep 600` with a short timeout, then `pgrep sudo`. If sudo survives, a timed-out command keeps its row until answered.
+- **The plugin's one connection** lives from `open()` through PAM and pam_exec's fork to `accept()`, the gate sees its hang-up while `accept()` waits, and its close ends the check-in: the sudo VM (Hang-up, Ticket cases).
+- **Ungated sudo passes the audit-only veto**: S2 and S3 ran with the approval plugin, and the veto runs failed in PAM first, so no run shows an ungated no-tty sudo reaching `accept()` and passing (remote `printf pw | ssh host 'sudo -S id'`): the sudo VM's Remote case.
+- **The "gate not running" line printed from the audit `open()`** reaches stderr: the sudo VM.
+- **The sudo lecture** on a terminal `sudo -n` from a user never lectured [spike: one-hop-sudo noninteractive]: the sudo VM.
 - **The comm of frisket's main process** is `frisket`: record it in the signer VM stand-in.
 - **The tab shape on dan-blade** (H2 was recorded on dan-desktop): record one chain before M2 there.
 - **comm of `sshd-session`** links is `sshd-session` on OpenSSH 10.5 (only exe and cmdline were recorded): the sudo VM remote subtest.
@@ -891,7 +890,7 @@ UNTESTED, each with the test that settles it:
 - **SSHSIG parsing** on real `ssh-keygen -Y sign` output: unit test.
 - **The signer's hardening set as a whole**, with the real binary and the TPM: signer VM.
 - **Connecting to the signer socket from frisket.service's read-only mounts**: signer VM stand-in.
-- **galley `entry` initial text**: galley e2e.
+- **galley `Field.text` and `--value`**: galley e2e.
 - **The environment sudo passes after `env_reset`**: record it once in the sudo VM and write it into `docs/sudo.md`.
 - **galley's peer check under the signer's and gate's hardening** (cgroup inode stat worked under the same flags for `frisket.service` [spike: identity-vm]): both VM tests.
 
@@ -899,14 +898,15 @@ Try later, after reading the journal:
 
 - Make forwarded, unbound or SSHSIG requests silent or refused.
 - A terminal grant offer on unknown host keys versus a silent sign.
-- Retry niceties in the sudo dialog (keep the previous time; "that password was not accepted").
+- Keep the previous time when the dialog comes back after a wrong password.
+- A cap on wrong passwords in one dialog.
 - More danger patterns.
 - Splitting `execrule` so the gate binary drops `policy` and `internal/dns` (~0.7 MB).
 - A cap on queued service rows, if flooding shows up.
 
 ## 16. Evidence index
 
-Spike directories are under `~/spike-tools/`. Where a spike has a `-sceptic` twin, the sceptic's verdict wins.
+Spike directories are under `~/spike-tools/`. Where a spike has a sceptic twin, the sceptic's verdict wins.
 
 | Spike | Showed | Path |
 |---|---|---|
@@ -915,15 +915,15 @@ Spike directories are under `~/spike-tools/`. Where a spike has a `-sceptic` twi
 | tpm-da-lockout | DA-on keys fail with `TPM_RC_LOCKOUT` in lockout | `rev2-spikes/spikes/tpm-da-{lockout,rerun}/` |
 | session-bind | OpenSSH binds before signing; binds verify; forwarding visible; `LoginGraceTime` | `rev2-spikes/spikes/session-bind/` |
 | identity-vm | uncapped readers get stat, status, cmdline, cgroup but not exe; pidfd mask recipe; cgroup inode stat under hardening; `linuxtpm` polling | `rev2-spikes/spikes/identity-vm{,-sceptic}/` |
-| sudo-vm | `tty=` and `open()` returns; messages; ticket written on refusal; no-tty askpass needs `DISPLAY`; pam_exec codes | `rev2-spikes/spikes/sudo-vm{,-sceptic}/` |
+| sudo-vm | `tty=` and `open()` returns; messages; pam_exec codes | `rev2-spikes/spikes/sudo-vm{,-sceptic}/` |
+| one-hop-sudo | audit `open()` → PAM → accept order; `PAM_TTY` and `tty_nr` agree; `pam_authenticate` inside sudo (~1.6 s on a wrong password); tickets under each `timestamp_type`, `global` a bypass; fail-closed cases; `-S`/`-A` ignored with no tty; NOPASSWD still asked; approval-plugin and maps holes; check-in only when gating; the audit-only veto; `rootpw` replaced; `noninteractive_auth` and `-n` | `one-hop-sudo/{summary.md,sceptic.md,sceptic/,noninteractive/}` |
 | ops-socket-limit | the default start limit stops the socket after 5 failed starts, and connects are then refused | `rev2-spikes/spikes/ops-socket-limit/` |
 | sudo-plugin | setuid sudo cannot be ptraced | `rev2-spikes/spikes/sudo-plugin/` |
 | policy-fit, evidence-audit | resolved-command trust, dotdot path, `LESSOPEN`, no re-quoting | `rev2-spikes/spikes/{policy-fit,policy-fit-sceptic,evidence-audit}/` |
 | store-name-attack | `nix-store --add` forges store names | `rev2-spikes/spikes/store-name-attack/` |
 | galley-socket | answers go only to the asker; password rows leak to joiners without no-join; real gjs self-binding | `rev2-spikes/spikes/galley-socket{,-sceptic}/` |
 | G-P1 | activation hides the peer; self-bound peer is galley's MainPID; cgroup migration passes the binder check; `pidfd_getfd` needs `ptrace_scope` 0 | `t0-2026-10-08/spikes/G-P1{,-sceptic}/` |
-| AP1 | askpass ppid is the 'S' sudo when `SUDO_ASKPASS` execs; parent euid 0 via `pidfd_open`; PAM per try; tty `-A` stops at `PAM_TTY` | `t0-2026-10-08/spikes/AP1{,-sceptic}/` |
-| R1 | OpenSSH 10.5 privsep chain; 'S' agrees; detached remote sudo loses ancestry | `t0-2026-10-08/spikes/R1{,-sceptic}/` |
+| R1 | OpenSSH 10.5 privsep chain; detached remote sudo loses ancestry | `t0-2026-10-08/spikes/R1{,-sceptic}/` |
 | SV1 | wrong plugin type segfaults sudo; ignored `sudo.conf` warns | `t0-2026-10-08/spikes/SV1{,-sceptic}/` |
 | X1 | the lockout check recurses if it imports host modules | `t0-2026-10-08/spikes/X1{,-sceptic}/` |
 | host-facts-desktop | H2, H3 on dan-desktop | `t0-2026-10-08/spikes/host-facts-desktop{,-sceptic}/` |
