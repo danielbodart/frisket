@@ -166,7 +166,7 @@ Collected by `internal/peer` for the signer (from the socket) and for the gate (
 
 ### 4.3 galley
 
-- **A services socket** at `/run/galley-ask/<user>.sock`, 0666, in a `0755 dan` directory. galley binds it itself (unlink a stale file, bind, chmod, listen): under socket activation every client sees `systemd --user` as its peer [spike: G-P1].
+- **A services socket** at `/run/galley-ask/<user>.sock`, 0666, in a `0755 dan` directory. galley binds it itself (unlink a stale file, bind, chmod, listen): under socket activation every client sees `systemd --user` as its peer [spike: G-P1]. So that the socket exists before a service asks, galley starts at login when `services.galley.services` is set. A services set-up failure is logged and the user's own socket keeps working.
 - **Who may post**: only uids listed in `GALLEY_SERVICES`; others are reset. The window sets `item.caller` from `SO_PEERCRED` after validation (a client-sent `caller` fails validation) and shows the caller's label.
 - **What galley owns**: markup is off for services; the icon comes from `level` (`normal`, `warning`, `danger`), drawn by galley, with galley's banner for `danger` (the service sends only a reason line); recording keeps its red. Service rows never join. Any form shape is allowed.
 - **Who answered.** Before trusting an answer, a service checks its galley peer: uid `forUser`, and `cgroupid` == the inode of `…/user@<uid>.service/app.slice/galley.service`, stat'ed at every check (it changes on every galley start) [spike: G-P1, identity-vm]. Anything else is nobody to ask.
@@ -559,13 +559,13 @@ Script actions, one per question, the last line repeating: `ok <field>…` (answ
 ## 9. galley changes
 
 1. Move `internal/wire` to a public `wire/` package with golden files: the signer form, the plain question, the sudo dialog, every `level`, and the answer lines. Wire version 3 adds `level`, `Field.text` and the window-set `caller`. **This merges first.**
-2. `server.js` keeps the user listener from `LISTEN_FDNAMES` and binds `GALLEY_SERVICES_SOCKET` itself (unlink, bind, chmod 0666, listen). Shown with real gjs [spike: galley-socket].
+2. `server.js` keeps the user listener from systemd and binds `GALLEY_SERVICES_SOCKET` itself (unlink, bind, chmod 0666, listen), so a client's peer is galley's own process. Shown with real gjs [spike: galley-socket]. A services set-up failure is logged and the user's socket keeps working.
 3. The services listener admits only `GALLEY_SERVICES` uids (names from `/etc/passwd` at start); others are reset. gjs reads the peer uid and pid from `Gio.Credentials` [spike: crosscheck/galley].
 4. `item.caller = {uid, name, label, pid}` is set after `validate()`; a client-sent `caller` fails validation.
 5. Service items: markup forced off; `level` (`normal`, `warning`, `danger`; absent is `normal`) chooses galley's icon, and `danger` adds galley's banner. No shape allowlist.
-6. Service rows never join.
+6. Service rows never join, and a service's notification row goes when its connection closes.
 7. Prefilled text: wire `Field.text` is an entry or multiline field's initial text, and fails validation on a password field. The CLI gains `--value TEXT` in the forms option group, setting it on the preceding `--add-entry` or `--add-multiline-entry`; `--scale`'s integer `--value` is unchanged: both mean the starting value, typed by the dialog.
-8. Home-manager: `services.galley.services` (uid name → label); the socket is on when it is non-empty.
+8. Home-manager: `services.galley.services` (user name → label, as `GALLEY_SERVICES` JSON); when it is non-empty, the unit sets `GALLEY_SERVICES` and `GALLEY_SERVICES_SOCKET` and galley starts with the graphical session.
 
 ## 10. NixOS wiring
 
