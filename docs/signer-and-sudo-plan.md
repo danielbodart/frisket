@@ -218,7 +218,7 @@ The gate classifies every command it is sent. A danger command gets the danger l
 
 ### 4.7 Failure
 
-- **No-tty sudo fails closed** when the gate cannot be reached: the plugin prints "frisket-sudo: gate not running (systemctl status frisket-sudo.socket); sudo in a terminal is not gated", the helper finds no check-in, and `pam_unix` fails with no terminal [spike: one-hop-sudo Q5f, N3c]. A sudo that `open()` gates but that could not check in is refused at `accept()`, so a same-parent sudoers ticket cannot carry it past PAM (decided, not measured; the sudo VM's Ticket case). Terminal and remote sudo never reach the gate, so this cannot lock anyone out. "Gate off" is `sudoGate.enable = false`, which leaves the plugin line out of `sudo.conf`.
+- **No-tty sudo fails closed** when the gate cannot be reached: the plugin prints "frisket-sudo: gate not running (systemctl status frisket-sudo.socket); sudo in a terminal is not gated", the helper finds no check-in, and `pam_unix` fails with no terminal [spike: one-hop-sudo Q5f, N3c]. A no-tty, local `forUser` sudo with no check-in is refused at `accept()`, whether `open()` gated it or a wrong mode parse left it ungated, so a same-parent sudoers ticket cannot carry it past PAM (decided, not measured; the sudo VM's Ticket case). Terminal and remote sudo never reach the gate, so this cannot lock anyone out. "Gate off" is `sudoGate.enable = false`, which leaves the plugin line out of `sudo.conf`.
 - `open()` returns 1 on every path, its allocation and socket errors included: 0 would make sudo unlink the plugin, so nothing vetoes, and -1 is `sudo_fatalx` on every sudo, terminal sudo included (sudo `src/sudo.c:1658-1670`).
 - **Nobody to ask** (galley not running, wrong galley peer): the signer signs at steps 3-6 as usual and refuses at step 7; the gate refuses with "no one to ask; use a terminal".
 - A panic in one request refuses that request and never exits the process.
@@ -414,12 +414,12 @@ reply    := u8 'Y' | u16be len | message      messages: ≤ 512 printable ASCII
 
 `open()`, always returning 1:
 
-- Gated when all hold: `user_info` user is the `user=` option, no `tty=` [spike: sudo-vm], the chain is not remote, and the mode is not `-v` or `-l` [spike: one-hop-sudo S4]. The mode is read from the arguments before `submit_optind` as sudo's `getopt_long` reads them: sudo's short-option string (`src/parse_args.c:115`) so an option's argument (`-gwheel`, `-u lp`) is skipped, a stop at `--`, and any unambiguous prefix of `--validate` or `--list` (`--li`). A missing `user=` leaves every sudo ungated. `accept()` adds no second check for a sudo left ungated by the mode test: `-v` and `-l` never reach it, so only a wrong parse could, and the parse tests cover that.
+- Gated when all hold: `user_info` user is the `user=` option, no `tty=` [spike: sudo-vm], the chain is not remote, and the mode is not `-v` or `-l` [spike: one-hop-sudo S4]. The mode is read from the arguments before `submit_optind` as sudo's `getopt_long` reads them: sudo's short-option string (`src/parse_args.c:115`) so an option's argument (`-gwheel`, `-u lp`) is skipped, a stop at `--`, and any unambiguous prefix of `--validate` or `--list` (`--li`). A missing `user=` leaves every sudo ungated. The mode test is the only part read from arguments, so `accept()` repeats the rest (below): a wrong parse can then only refuse, never run a command unasked.
 - Gated: connect `/run/frisket-sudo/gate.sock` (compiled in, `SOCK_CLOEXEC`), check the peer is `sudo-gate`'s uid, send 'C', read 'Y'. Any failure prints the "gate not running" line with `sudo_plugin_printf(SUDO_CONV_ERROR_MSG)`.
 
-`accept()`, for the policy plugin's accept of a gated sudo (any other returns 1):
+`accept()`, for the policy plugin's accept:
 
-1. No check-in → errstr "gate not running", return 0.
+1. The gating test without the mode: `user_info` user is the `user=` option, no `tty=`, the chain is not remote. Not all hold → return 1. All hold and no check-in → errstr "gate not running", return 0. `-v` and `-l` never reach `accept()`, so this refuses only a sudo the gate is down for, or one a wrong mode parse left ungated, which a same-parent ticket or NOPASSWD rule would otherwise run unasked.
 2. Collect the chain and send 'A' with the run info. Wait, with no timeout of its own.
 3. 'Y' → print a non-empty message with `SUDO_CONV_INFO_MSG`, return 1. 'N' → print the message with `SUDO_CONV_ERROR_MSG`, return 0. EOF or garbage → "no answer from gate", return 0.
 4. 'W' → `pam_start("frisket-sudo", user)`, `pam_authenticate(PAM_SILENT)` and `pam_acct_mgmt`, with a conversation that answers every prompt with the password; zero the buffer; send 'V' with the result and go to 3 [spike: one-hop-sudo Q3, V1, V2].
@@ -735,6 +735,7 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 `sudo/` (Zig, minish):
 
 - The gating test and the mode parse: a property over generated arguments (every byte, every option and prefix, `--`, attached and separate option arguments) that the parse agrees with sudo's own `parse_args` built as a test oracle; and that `open()`'s ungated path never panics.
+- `accept()` refuses a no-tty, local `forUser` sudo with no check-in whatever `open()` decided: a mode test forced to say `-v`.
 - zwanzig's planted bugs for the plugin's handle kinds; every descriptor closed after `close()`.
 
 `execrule`: `TestDecideWordsAgreesWithDecideOnReadableStrings` (rapid).
@@ -772,7 +773,7 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 - **Environment**: `sudo --preserve-env=FOO …` → the item shows `FOO`.
 - **Cancel**: sudo refuses and prints sudo's "unable to log accept event" line.
 - **Ignored input**: `echo wrong | sudo -S id` and `sudo -A id` with a script askpass → the askpass never runs, and the dialog's password is the one checked.
-- **Ticket**: two no-tty sudos from the same parent → the second is asked again; with the gate stopped in between, refused.
+- **Ticket**: two no-tty sudos from the same parent → the second is asked again; with the gate stopped in between, refused; with a NOPASSWD rule and a plugin built to misread the mode, refused.
 - **`-v` and `-l`**: `sudo -v`, `-nv`, `-l`, `--validate`, `--vali`, `--li` with no tty → fail as stock, no check-in, and the next sudo is asked. `-gwheel id` and `-u lp id` check in and get the dialog, with and without a same-parent ticket.
 - **NOPASSWD**: a NOPASSWD rule's command still gets the dialog.
 - **timestamp_type**: a no-tty `sudo id` allowed through fakegalley (`ok <pw> 0`), then a tty `sudo id` in the same VM → prompted.
