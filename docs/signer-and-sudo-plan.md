@@ -823,6 +823,8 @@ galley items 1-8 merged and deployed; `services.galley.services` and the tmpfile
 2. Check by hand: a tab's `ssh server true` is silent; Claude Code's `git push` is asked and a 15-minute grant holds; `systemd-run --user ssh server true` is asked with the warning; a chase session's push is silent; a signed commit is silent.
 3. Read the journal for a few days and tune in code. Then the other host.
 
+Done: dan-desktop checked as in step 2, then dan-blade switched without the wait, so both hosts are in daily use and tuning comes from that.
+
 ### M3: sudo gate
 
 Preconditions: `sudo-lockout` passes; `configurationLimit` is null or `>= 5` (§10).
