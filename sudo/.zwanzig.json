@@ -1,0 +1,7 @@
+{
+  "enabled_rules": ["store-violations-engine", "unreachable-code-engine", "empty-catch-engine"],
+  "resource_models": [
+    { "kind": "open", "method_name": "connectUnix" },
+    { "kind": "close", "method_name": "close" }
+  ]
+}

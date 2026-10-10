@@ -1,0 +1,21 @@
+.{
+    .name = .frisket_sudo,
+    .version = "0.0.0",
+    // Lazy, fetched only under -Ddev=true, and pinned to flong's tags:
+    // minish for property tests, zwanzig for static analysis.
+    .dependencies = .{
+        .minish = .{
+            .url = "https://github.com/CogitatorTech/minish/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "minish-0.1.0-SQtSTWHkAQACfz3xGuWHU8zbx320vK_47r2yto3Pq0Rf",
+            .lazy = true,
+        },
+        .zwanzig = .{
+            .url = "https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.15.1.tar.gz",
+            .hash = "zwanzig-0.15.1-oiXZliOBGQA1fkoEDA6UxFdOv1ezRF5Jc9YY7uZnHjKe",
+            .lazy = true,
+        },
+    },
+    .fingerprint = 0x77fb8bde30df4ffe,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{""},
+}

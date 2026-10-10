@@ -125,6 +125,9 @@
             doCheck = false;
             meta = old.meta // { mainProgram = "agenttamper"; };
           });
+          # frisket-sudo's Zig: the audit plugin, its PAM helper and the
+          # build-time plugin check. See nix/sudo-zig.nix.
+          frisket-sudo-plugin = (import ./nix/sudo-zig.nix { inherit pkgs; }).package;
           frisket-signer = (mkFrisket pkgs).overrideAttrs (old: {
             pname = "frisket-signer";
             subPackages = [ "cmd/frisket-signer" ];
@@ -164,6 +167,11 @@
           # The build, which is also the unit tests, the property tests and the
           # fuzz corpora.
           inherit (self.packages.${system}) frisket;
+
+          # frisket-sudo's Zig, and its tests, the mode parse held to sudo's
+          # own parse_args among them, lint, fmt and zwanzig.
+          inherit (self.packages.${system}) frisket-sudo-plugin;
+          sudo-zig = (import ./nix/sudo-zig.nix { inherit pkgs; }).check;
 
           # Importing the daemon module beside the flong adapter, which imports
           # it too, must evaluate: the key on nixosModules.default is what makes
