@@ -266,7 +266,7 @@ func claude(pid int) *peer.Requester {
 		peer.Link{Pid: pid + 3, PPid: pid + 2, Sid: pid + 1, Start: 103, Comm: "ssh", Cmdline: []string{"ssh", "git@github.com"}},
 		peer.Link{Pid: pid + 2, PPid: pid + 1, Sid: pid + 1, Start: 102, Comm: "git", Cmdline: []string{"git", "push"}},
 		peer.Link{Pid: pid + 1, PPid: pid, Sid: pid + 1, Start: 101, Comm: "bash", Cmdline: []string{"bash", "-c", "git push"}},
-		peer.Link{Pid: pid, PPid: 30, Sid: 30, TTY: pts0, Start: 100, Comm: ".claude-unwrapp"},
+		peer.Link{Pid: pid, PPid: 30, Sid: 30, TTY: pts0, Start: 100, Comm: ".claude-unwrapp", Cmdline: []string{"/nix/store/x-claude-code/bin/claude"}},
 		tabShell, kgx, systemdUser, pid1)
 }
 
@@ -737,6 +737,22 @@ func TestAPanicWhileAskingRefusesThatRequestOnly(t *testing.T) {
 	if err := wait(t, done); err != nil {
 		t.Errorf("the next sign: %v", err)
 	}
+}
+
+func TestTheQuestionNamesTheRequesterOnceAndLeavesOutTheShells(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	c := h.dial(claude(100))
+	if err := c.bind(t, h.github, []byte("sid"), false); err != nil {
+		t.Fatal(err)
+	}
+	done := c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(0), nil))
+	a := h.next()
+	want := "claude ← git push ← ssh git@github.com\n"
+	if !strings.HasPrefix(a.q.Text, want) || !strings.HasSuffix(a.q.Text, "\nA grant covers github.com from claude (pid 100).") {
+		t.Errorf("asked %q", a.q.Text)
+	}
+	a.reply <- answered{}
+	wait(t, done)
 }
 
 func TestTextEscapesControlAndBidiCharactersAndCutsEachArgument(t *testing.T) {

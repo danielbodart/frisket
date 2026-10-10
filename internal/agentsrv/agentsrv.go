@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"unicode"
@@ -429,7 +430,7 @@ func (c *conn) describe(req *request) {
 		if req.fwd {
 			what = "forwarded signs to " + req.dest
 		}
-		lines = append(lines, fmt.Sprintf("A grant covers %s from %s (pid %d).", what, clean(r.Anchor.Comm), r.Anchor.Pid))
+		lines = append(lines, fmt.Sprintf("A grant covers %s from %s (pid %d).", what, name(*r.Anchor), r.Anchor.Pid))
 	}
 	level := "normal"
 	if r.Cut || r.SessionRoot {
@@ -466,7 +467,8 @@ func sessionRoot(a *peer.Link) string {
 	return "systemd --user"
 }
 
-// chainText runs from the anchor, or the top of the chain, down to the leaf.
+// chainText runs from the anchor, or the top of the chain, down to the
+// leaf, leaving out the shells between them.
 func chainText(r *peer.Requester) string {
 	top := len(r.Chain) - 1
 	for i := range r.Chain {
@@ -477,20 +479,32 @@ func chainText(r *peer.Requester) string {
 	var parts []string
 	for i := top; i >= 0; i-- {
 		l := r.Chain[i]
-		if i == top {
-			parts = append(parts, fmt.Sprintf("%s (pid %d)", clean(l.Comm), l.Pid))
-			continue
+		switch {
+		case i == top:
+			parts = append(parts, name(l))
+		case i == 0 || !shells[l.Comm]:
+			args := make([]string, len(l.Cmdline))
+			for j, a := range l.Cmdline {
+				args[j] = clean(a)
+			}
+			if len(args) == 0 {
+				args = []string{clean(l.Comm)}
+			}
+			parts = append(parts, strings.Join(args, " "))
 		}
-		args := make([]string, len(l.Cmdline))
-		for j, a := range l.Cmdline {
-			args[j] = clean(a)
-		}
-		if len(args) == 0 {
-			args = []string{clean(l.Comm)}
-		}
-		parts = append(parts, strings.Join(args, " "))
 	}
 	return strings.Join(parts, " ← ")
+}
+
+var shells = map[string]bool{"bash": true, "sh": true, "zsh": true, "fish": true, "dash": true}
+
+// name is the program a link runs, by its argv0, since comm is cut at 15
+// characters and a wrapped program's comm is its wrapper's.
+func name(l peer.Link) string {
+	if len(l.Cmdline) > 0 && l.Cmdline[0] != "" {
+		return clean(filepath.Base(l.Cmdline[0]))
+	}
+	return clean(l.Comm)
 }
 
 // clean cuts s at maxArg characters and escapes control, bidi and line
