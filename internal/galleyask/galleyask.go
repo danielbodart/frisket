@@ -33,8 +33,9 @@ type Answer struct {
 	// Password is the dialog's only; the caller zeroes it.
 	Password []byte
 	Galley   struct {
-		Pid   int
-		Start uint64
+		Pid    int
+		Start  uint64
+		Cgroup string
 	}
 }
 
@@ -81,6 +82,7 @@ func Ask(ctx context.Context, name string, q Question) (Answer, error) {
 	if a.Galley.Pid, a.Galley.Start, err = checkPeer(conn, uid); err != nil {
 		return Answer{}, fmt.Errorf("%w: %v", ErrNobody, err)
 	}
+	a.Galley.Cgroup = cgroupOf(a.Galley.Pid)
 
 	it := item(name, q)
 	line, err := json.Marshal(wire.Hello{Galley: wire.Needs(it), Item: it})

@@ -251,12 +251,12 @@ in
         assert q["kind"] == "question" and q["title"] == "SSHSIG signature", q
         assert 'SSHSIG namespace "file"' in q["text"].split("\n"), q
 
-    with subtest("ssh -A: the far-side sign is asked as forwarded, also from a tab"):
-        asked = len(events("question"))
-        assert run("tab", "ssh -n -A alpha '/run/current-system/sw/bin/ssh -n beta true'") == 0
-        qs = events("question")[asked:]
-        assert len(qs) == 1 and qs[0]["title"] == "ssh to beta", qs
-        assert "forwarded" in qs[0]["text"].split("\n"), qs
+    with subtest("ssh -A: the far-side sign is asked as forwarded, from a claude and from a tab"):
+        for where in ("claude", "tab"):
+            asked = len(events("question"))
+            assert run(where, "ssh -n -A alpha '/run/current-system/sw/bin/ssh -n beta true'") == 0
+            qs = [q for q in events("question")[asked:] if q["title"] == "ssh to beta"]
+            assert len(qs) == 1 and "forwarded" in qs[0]["text"].split("\n"), qs
 
     with subtest("a sign for another session than the last bind is refused"):
         assert run("claude", "agenttamper") == 0
@@ -265,9 +265,10 @@ in
     with subtest("an ssh killed while its question is up withdraws it"):
         galley("never")
         closed = len(events("close"))
+        asked = len(events("question"))
         run("claude", "ssh -n beta true & echo $! > /run/claude/ssh.pid")
-        machine.wait_until_succeeds("grep -q '\"title\":\"ssh to beta\"' /run/fakegalley/log")
-        machine.wait_until_succeeds("tail -n1 /run/fakegalley/log | grep -q '\"event\":\"question\"'")
+        machine.wait_until_succeeds(f"test $(grep -c '\"event\":\"question\"' /run/fakegalley/log) -gt {asked}")
+        assert events("question")[-1]["title"] == "ssh to beta"
         machine.succeed("kill $(cat /run/claude/ssh.pid)")
         machine.wait_until_succeeds(f"test $(grep -c '\"event\":\"close\"' /run/fakegalley/log) -gt {closed}")
         machine.wait_until_succeeds("journalctl -u frisket-signer.service -o cat | grep -q '\"source\":\"hung up\"'")

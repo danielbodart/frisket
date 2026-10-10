@@ -25,6 +25,7 @@ import (
 	"github.com/danielbodart/frisket/internal/peer"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -592,8 +593,126 @@ func TestAWarningChainIsAllowOnceWithTheWarningLevel(t *testing.T) {
 	}
 }
 
+func TestACutChainIsAllowOnceWithTheWarningLevel(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	c := h.dial(links(claude(100).Chain[:4]...))
+	if err := c.bind(t, h.github, []byte("sid"), false); err != nil {
+		t.Fatal(err)
+	}
+	done := c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(0), nil))
+	a := h.next()
+	if a.q.Grantable || a.q.Level != "warning" || !strings.HasPrefix(a.q.Text, "the process chain was cut short\n") {
+		t.Errorf("asked %+v", a.q)
+	}
+	a.reply <- allowFor(15 * time.Minute)
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	done = c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(0), nil))
+	h.next().reply <- answered{}
+	if err := wait(t, done); err == nil {
+		t.Error("an Allow for a cut chain made a grant")
+	}
+}
+
+func TestATabToAnUnknownHostIsAskedAndGrantable(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	c := h.dial(tab())
+	stranger := hostKey(t)
+	if err := c.bind(t, stranger, []byte("sid"), false); err != nil {
+		t.Fatal(err)
+	}
+	done := c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(0), nil))
+	a := h.next()
+	fp := ssh.FingerprintSHA256(stranger.PublicKey())
+	if !a.q.Grantable || a.q.Title != "ssh to unknown host "+fp || !strings.Contains(a.q.Text, "\nunknown host key\n") {
+		t.Errorf("asked %+v", a.q)
+	}
+	a.reply <- answered{}
+	wait(t, done)
+}
+
+func TestAForwardedGitSignatureIsAsked(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	c := h.dial(claude(100))
+	if err := c.bind(t, h.github, []byte("sid"), true); err != nil {
+		t.Fatal(err)
+	}
+	git, _ := os.ReadFile(filepath.Join("testdata", "sshsig-git.bin"))
+	done := c.signAsync(h.key(0), git)
+	a := h.next()
+	if a.q.Grantable || !strings.Contains(a.q.Text, "\nforwarded\n") || !strings.Contains(a.q.Text, `SSHSIG namespace "git"`) {
+		t.Errorf("asked %+v", a.q)
+	}
+	a.reply <- answered{}
+	wait(t, done)
+}
+
+func TestFrisketsMainProcessIsSilentForUserauthOnly(t *testing.T) {
+	h := newHarness(t, 1, func(s *Server) { s.SSHSIG = nil })
+	h.frisket.Store(true)
+	c := h.dial(claude(100))
+	if err := wait(t, c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(0), nil))); err != nil {
+		t.Fatal(err)
+	}
+	h.nothingAsked()
+	git, _ := os.ReadFile(filepath.Join("testdata", "sshsig-git.bin"))
+	done := c.signAsync(h.key(0), git)
+	h.next().reply <- answered{}
+	if err := wait(t, done); err == nil {
+		t.Error("frisket's SSHSIG was signed without a question")
+	}
+}
+
+func TestAnUnboundRequestShowsTheHostKeyItClaims(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	c := h.dial(claude(100))
+	done := c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(0), h.github.PublicKey()))
+	a := h.next()
+	if a.q.Grantable || !strings.Contains(a.q.Text, "\nclaims "+ssh.FingerprintSHA256(h.github.PublicKey())) {
+		t.Errorf("asked %+v", a.q)
+	}
+	a.reply <- answered{}
+	wait(t, done)
+}
+
+func TestAConnectionKeepsAtMostSixteenBinds(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	c := h.dial(claude(100))
+	for i := range maxBinds {
+		if err := c.bind(t, h.github, []byte{byte(i)}, false); err != nil {
+			t.Fatalf("bind %d: %v", i, err)
+		}
+	}
+	if err := c.bind(t, h.github, []byte("one more"), false); err == nil {
+		t.Error("a seventeenth bind was kept")
+	}
+}
+
+func TestAPanicWhileAskingRefusesThatRequestOnly(t *testing.T) {
+	var panicked atomic.Bool
+	h := newHarness(t, 1, func(s *Server) {
+		ask := s.ask
+		s.ask = func(ctx context.Context, user string, q galleyask.Question) (galleyask.Answer, error) {
+			if !panicked.Swap(true) {
+				panic("galley parse")
+			}
+			return ask(ctx, user, q)
+		}
+	})
+	data := userauthData([]byte("sid"), h.key(0), nil)
+	if err := wait(t, h.dial(claude(100)).signAsync(h.key(0), data)); err == nil {
+		t.Error("a sign whose question panicked was made")
+	}
+	done := h.dial(claude(100)).signAsync(h.key(0), data)
+	h.next().reply <- answered{a: galleyask.Answer{Allowed: true}}
+	if err := wait(t, done); err != nil {
+		t.Errorf("the next sign: %v", err)
+	}
+}
+
 func TestTextEscapesControlAndBidiCharactersAndCutsEachArgument(t *testing.T) {
-	if got := clean("a\x1b[2J\u202eb\n"); got != `a\u001b[2J\u202eb\u000a` {
+	if got := clean("a\x1b[2J\u202eb\n\u2028c\u2029"); got != `a\u001b[2J\u202eb\u000a\u2028c\u2029` {
 		t.Errorf("got %q", got)
 	}
 	if got := clean(strings.Repeat("é", 1500)); len([]rune(got)) != maxArg {
@@ -601,30 +720,68 @@ func TestTextEscapesControlAndBidiCharactersAndCutsEachArgument(t *testing.T) {
 	}
 }
 
+func frame(typ byte, payload []byte) []byte {
+	return append(ssh.Marshal(struct {
+		N   uint32
+		Typ byte
+	}{uint32(1 + len(payload)), typ}), payload...)
+}
+
+func signMsg(key ssh.PublicKey, data []byte) []byte {
+	return frame(13, ssh.Marshal(struct {
+		Key, Data []byte
+		Flags     uint32
+	}{key.Marshal(), data, 0}))
+}
+
 func FuzzNoAgentMessageCrashesTheParser(f *testing.F) {
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, _ := ssh.NewPublicKey(k.Public())
+	_, hk, _ := ed25519.GenerateKey(rand.Reader)
+	host, _ := ssh.NewSignerFromKey(hk)
+	sig, _ := host.Sign(rand.Reader, []byte("sid"))
+	bind := frame(27, ssh.Marshal(struct {
+		Typ  string
+		Rest []byte `ssh:"rest"`
+	}{"session-bind@openssh.com", bindMsg(host.PublicKey(), []byte("sid"), ssh.Marshal(sig), true)}))
+	f.Add(frame(11, nil))
+	f.Add(append(bind, signMsg(key, userauthData([]byte("sid"), key, host.PublicKey()))...))
+	f.Add(signMsg(key, userauthData([]byte("sid"), key, nil)))
 	for _, name := range []string{"sshsig-git.bin", "sshsig-file.bin"} {
 		b, err := os.ReadFile(filepath.Join("testdata", name))
 		if err != nil {
 			f.Fatal(err)
 		}
-		f.Add(b)
+		f.Add(signMsg(key, b))
 	}
-	_, k, _ := ed25519.GenerateKey(rand.Reader)
-	host, _ := ssh.NewSignerFromKey(k)
-	sig, _ := host.Sign(rand.Reader, []byte("sid"))
-	f.Add(bindMsg(host.PublicKey(), []byte("sid"), ssh.Marshal(sig), true))
-	f.Add(userauthData([]byte("sid"), host.PublicKey(), host.PublicKey()))
-	f.Add(userauthData([]byte("sid"), host.PublicKey(), nil))
 
-	s := &Server{Log: slog.New(slog.NewJSONHandler(io.Discard, nil))}
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		f.Fatal(err)
+	}
+	us, err := net.FileConn(os.NewFile(uintptr(fds[0]), "us"))
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Cleanup(func() { us.Close(); unix.Close(fds[1]) })
+	s := &Server{
+		User: "dan", UID: uid, Terminal: Allow, SSHSIG: map[string]Rule{"git": Allow},
+		Keys: []Key{{Signer: k, Comment: "dan@test"}}, KnownHosts: "/nonexistent", Grants: grant.New(),
+		frisket: func(*peer.Requester) bool { return false },
+		ask: func(context.Context, string, galleyask.Question) (galleyask.Answer, error) {
+			return galleyask.Answer{}, nil
+		},
+	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		c := &conn{s: s, r: &peer.Requester{}}
-		if _, err := c.Extension("session-bind@openssh.com", b); err != nil && strings.HasPrefix(err.Error(), "panic") {
-			t.Fatal(err)
+		log := &lockedBuffer{}
+		srv := *s
+		srv.Log = slog.New(slog.NewJSONHandler(log, nil))
+		_ = agent.ServeAgent(&conn{s: &srv, c: us.(*net.UnixConn), r: claude(100)}, struct {
+			io.Reader
+			io.Writer
+		}{bytes.NewReader(b), io.Discard})
+		if strings.Contains(log.String(), "panicked") {
+			t.Fatal(log.String())
 		}
-		c.binds = append(c.binds, &bind{hostKey: host.PublicKey(), sid: []byte("sid")})
-		_, _ = c.classify(b)
-		_, _ = parseUserauth(b)
-		_, _ = parseSSHSIG(b)
 	})
 }

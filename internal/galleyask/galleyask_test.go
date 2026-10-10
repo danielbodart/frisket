@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -124,6 +125,24 @@ func TestAnAnswerFromAPeerOutsideGalleysCgroupIsNobody(t *testing.T) {
 	}
 }
 
+func TestAnAnswerFromAPeerWithAnotherUIDIsNobody(t *testing.T) {
+	g := startGalley(t, golden(t, "answer-extra.json"), true)
+	other, err := user.Lookup("nobody")
+	if err != nil {
+		t.Skip("no user nobody")
+	}
+	if other.Uid == strconv.Itoa(os.Getuid()) {
+		t.Skip("running as nobody")
+	}
+	if err := os.Symlink(filepath.Join(socketDir, g.user+".sock"), filepath.Join(socketDir, "nobody.sock")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Ask(context.Background(), "nobody", Question{Title: "ssh to server"})
+	if !errors.Is(err, ErrNobody) || !strings.Contains(err.Error(), "galley peer uid") {
+		t.Fatalf("got %v, want nobody for the peer's uid", err)
+	}
+}
+
 func TestNoSocketIsNobody(t *testing.T) {
 	g := startGalley(t, "", true)
 	socketDir = shortDir(t)
@@ -195,7 +214,7 @@ func TestEveryGoldenAnswerLineDecodesToItsResult(t *testing.T) {
 			if a.Allowed != c.allowed || a.For != c.for_ || string(a.Password) != c.pw {
 				t.Errorf("got allowed %v for %v password %q", a.Allowed, a.For, a.Password)
 			}
-			if a.Galley.Pid != os.Getpid() || a.Galley.Start == 0 {
+			if a.Galley.Pid != os.Getpid() || a.Galley.Start == 0 || a.Galley.Cgroup == "" {
 				t.Errorf("galley pid %d start %d, want pid %d", a.Galley.Pid, a.Galley.Start, os.Getpid())
 			}
 		})

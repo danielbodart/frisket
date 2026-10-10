@@ -204,6 +204,21 @@ func TestAFileThatDoesNotParseIsSkippedAndTheRestLoad(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "junk.tpm"), []byte("-----BEGIN TSS2 PRIVATE KEY-----\nnope\n"), 0o600)
 	os.WriteFile(filepath.Join(dir, "empty.tpm"), nil, 0o600)
 	os.WriteFile(filepath.Join(dir, "good.pub"), []byte("not a key file"), 0o600)
+	good, err := os.ReadFile(filepath.Join(dir, "good.tpm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*keyfile.TPMKey){
+		"passphrase.tpm":  func(k *keyfile.TPMKey) { k.EmptyAuth = false },
+		"endorsement.tpm": func(k *keyfile.TPMKey) { k.Parent = tpm2.TPMRHEndorsement },
+	} {
+		k, err := keyfile.Decode(good)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change(k)
+		os.WriteFile(filepath.Join(dir, name), k.Bytes(), 0o600)
+	}
 
 	var log bytes.Buffer
 	keys, err := Load(dir, slog.New(slog.NewJSONHandler(&log, nil)))
@@ -213,7 +228,7 @@ func TestAFileThatDoesNotParseIsSkippedAndTheRestLoad(t *testing.T) {
 	if len(keys) != 1 || filepath.Base(keys[0].Path) != "good.tpm" {
 		t.Fatalf("loaded %v, want only good.tpm", keys)
 	}
-	for _, name := range []string{"rsa.tpm", "junk.tpm", "empty.tpm"} {
+	for _, name := range []string{"rsa.tpm", "junk.tpm", "empty.tpm", "passphrase.tpm", "endorsement.tpm"} {
 		if strings.Count(log.String(), name) != 1 {
 			t.Errorf("want one log line for %s:\n%s", name, log.String())
 		}

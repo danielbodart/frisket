@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"pgregory.net/rapid"
 )
 
@@ -59,8 +60,12 @@ func TestAGrantDoesNotSurviveASuspendLongerThanItsTime(t *testing.T) {
 	if g.Use(github) {
 		t.Error("the grant survived a two-hour suspend")
 	}
-	if a, b := Now(), Now(); b < a || a == 0 {
-		t.Errorf("CLOCK_BOOTTIME read %v then %v", a, b)
+	var before, after unix.Timespec
+	unix.ClockGettime(unix.CLOCK_BOOTTIME, &before)
+	now := Now()
+	unix.ClockGettime(unix.CLOCK_BOOTTIME, &after)
+	if now < time.Duration(before.Nano()) || now > time.Duration(after.Nano()) {
+		t.Errorf("Now is %v, not between CLOCK_BOOTTIME's %v and %v", now, before.Nano(), after.Nano())
 	}
 }
 

@@ -286,6 +286,7 @@ func (c *conn) ask(req *request) verdict {
 	watching := make(chan struct{})
 	go func() {
 		defer close(watching)
+		defer c.refusePanic(new(error))
 		c.watchHangUp(stop, cancel)
 	}()
 	defer func() {
@@ -297,14 +298,16 @@ func (c *conn) ask(req *request) verdict {
 
 	answers := make(chan answered, 1)
 	go func() {
-		a, err := c.s.ask(ctx, c.s.User, req.question)
-		answers <- answered{a, err}
+		var got answered
+		defer func() { answers <- got }()
+		defer c.refusePanic(&got.err)
+		got.a, got.err = c.s.ask(ctx, c.s.User, req.question)
 	}()
 	for {
 		changed := c.s.Grants.Changed()
 		if req.grantable && c.s.Grants.Use(req.grant) {
 			cancel()
-			<-answers
+			c.keep(req, <-answers)
 			return verdict{sign: true, source: "grant"}
 		}
 		select {
@@ -317,12 +320,16 @@ func (c *conn) ask(req *request) verdict {
 			case !got.a.Allowed:
 				return verdict{source: "galley", answer: got.a}
 			}
-			if req.grantable && got.a.For > 0 {
-				c.s.Grants.Grant(req.grant, grant.Now()+got.a.For)
-			}
+			c.keep(req, got)
 			return verdict{sign: true, source: "galley", answer: got.a}
 		case <-changed:
 		}
+	}
+}
+
+func (c *conn) keep(req *request, got answered) {
+	if req.grantable && got.err == nil && got.a.Allowed && got.a.For > 0 {
+		c.s.Grants.Grant(req.grant, grant.Now()+got.a.For)
 	}
 }
 
@@ -355,7 +362,7 @@ func (c *conn) record(req *request, v verdict) {
 		"destination", req.dest, "key", req.keyFP, "class", req.class, "namespace", req.namespace,
 		"forwarded", req.fwd, "lines", strings.Split(req.question.Text, "\n"),
 		"outcome", outcome, "source", v.source, "for", v.answer.For.String(),
-		"galley_pid", v.answer.Galley.Pid, "galley_start", v.answer.Galley.Start,
+		"galley_pid", v.answer.Galley.Pid, "galley_cgroup", v.answer.Galley.Cgroup,
 	}
 	if v.err != nil {
 		attrs = append(attrs, "err", v.err.Error())
@@ -483,14 +490,15 @@ func chainText(r *peer.Requester) string {
 	return strings.Join(parts, " ← ")
 }
 
-// clean cuts s at maxArg characters and escapes control and bidi characters.
+// clean cuts s at maxArg characters and escapes control, bidi and line
+// separator characters.
 func clean(s string) string {
 	if r := []rune(s); len(r) > maxArg {
 		s = string(r[:maxArg])
 	}
 	var b strings.Builder
 	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control, unicode.Zl, unicode.Zp) {
 			fmt.Fprintf(&b, `\u%04x`, r)
 			continue
 		}

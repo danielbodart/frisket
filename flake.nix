@@ -55,11 +55,17 @@
         ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
         excludedPackages = [ "tests/fakegalley" "tests/agenttamper" "cmd/frisket-signer" ];
 
-        # buildGoModule runs `go test ./...` here. The namespace tests create a
+        # `go test ./...` rather than buildGoModule's own check, which would
+        # leave out the excluded packages' tests. The namespace tests create a
         # user+network namespace with clone flags and skip cleanly where the
         # kernel refuses, so this passes in the Nix sandbox and means something
         # on a machine where it does not have to.
         doCheck = true;
+        checkPhase = ''
+          runHook preCheck
+          go test ./...
+          runHook postCheck
+        '';
         # The ruleset lib.steering writes is loaded by nft, in a namespace of
         # the test's own, to see a relayed port reach the session's listener.
         nativeCheckInputs = [ pkgs.nftables pkgs.swtpm ];
