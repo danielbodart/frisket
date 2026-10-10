@@ -615,6 +615,34 @@ func TestACutChainIsAllowOnceWithTheWarningLevel(t *testing.T) {
 	}
 }
 
+func TestACutTabChainIsNeverSilent(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	c := h.dial(links(tab().Chain[:4]...))
+	if err := c.bind(t, h.github, []byte("sid"), false); err != nil {
+		t.Fatal(err)
+	}
+	done := c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(0), nil))
+	a := h.next()
+	if a.q.Grantable || a.q.Level != "warning" {
+		t.Errorf("asked %+v", a.q)
+	}
+	a.reply <- answered{}
+	wait(t, done)
+}
+
+func TestARequestNamingAnotherKeyIsRefused(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	h.frisket.Store(true)
+	c := h.dial(claude(100))
+	if err := c.bind(t, h.github, []byte("sid"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait(t, c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(1), nil))); err == nil {
+		t.Error("a request naming another key was signed")
+	}
+	h.nothingAsked()
+}
+
 func TestATabToAnUnknownHostIsAskedAndGrantable(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	c := h.dial(tab())

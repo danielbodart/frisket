@@ -10,13 +10,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/danielbodart/frisket/internal/peer"
 	"github.com/danielbodart/galley/wire"
 	"golang.org/x/sys/unix"
 )
@@ -78,11 +77,12 @@ func Ask(ctx context.Context, name string, q Question) (Answer, error) {
 	defer conn.Close()
 	defer context.AfterFunc(ctx, func() { conn.Close() })()
 
-	var a Answer
-	if a.Galley.Pid, a.Galley.Start, err = checkPeer(conn, uid); err != nil {
+	l, err := checkPeer(conn, uid)
+	if err != nil {
 		return Answer{}, fmt.Errorf("%w: %v", ErrNobody, err)
 	}
-	a.Galley.Cgroup = cgroupOf(a.Galley.Pid)
+	var a Answer
+	a.Galley.Pid, a.Galley.Start, a.Galley.Cgroup = l.Pid, l.Start, l.Cgroup
 
 	it := item(name, q)
 	line, err := json.Marshal(wire.Hello{Galley: wire.Needs(it), Item: it})
@@ -105,81 +105,26 @@ func Ask(ctx context.Context, name string, q Question) (Answer, error) {
 	return answer(q, w, a), nil
 }
 
-func checkPeer(c *net.UnixConn, uid int) (int, uint64, error) {
-	rc, err := c.SyscallConn()
+func checkPeer(c *net.UnixConn, uid int) (peer.Link, error) {
+	r, err := peer.FromConn(c)
 	if err != nil {
-		return 0, 0, err
+		return peer.Link{}, fmt.Errorf("galley peer: %w", err)
 	}
-	var cred *unix.Ucred
-	var credErr, pidfdErr error
-	var pidfd int
-	if err := rc.Control(func(fd uintptr) {
-		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-		pidfd, pidfdErr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PEERPIDFD)
-	}); err != nil {
-		return 0, 0, err
+	if r.PeerUID != uid {
+		return peer.Link{}, fmt.Errorf("galley peer uid %d is not %d", r.PeerUID, uid)
 	}
-	if pidfdErr != nil {
-		return 0, 0, fmt.Errorf("SO_PEERPIDFD: %w", pidfdErr)
+	if len(r.Chain) == 0 {
+		return peer.Link{}, errors.New("galley peer cannot be read")
 	}
-	defer unix.Close(pidfd)
-	if credErr != nil {
-		return 0, 0, fmt.Errorf("SO_PEERCRED: %w", credErr)
-	}
-	if int(cred.Uid) != uid {
-		return 0, 0, fmt.Errorf("galley peer uid %d is not %d", cred.Uid, uid)
-	}
-
-	want := uint64(unix.PIDFD_INFO_PID | unix.PIDFD_INFO_CGROUPID)
-	info := unix.PidfdInfo{Mask: want}
-	if err := unix.IoctlPidfdInfo(pidfd, &info); err != nil {
-		return 0, 0, fmt.Errorf("galley peer: %w", err)
-	}
-	if info.Mask&want != want {
-		return 0, 0, errors.New("galley peer has exited")
-	}
-	pid := int(info.Pid)
+	l := r.Chain[0]
 	galley, err := galleyCgroup(uid)
 	if err != nil {
-		return 0, 0, fmt.Errorf("galley.service: %w", err)
+		return peer.Link{}, fmt.Errorf("galley.service: %w", err)
 	}
-	if info.Cgroupid != galley {
-		return 0, 0, fmt.Errorf("galley peer pid %d is in %s, not galley.service", pid, cgroupOf(pid))
+	if r.CgroupID != galley {
+		return peer.Link{}, fmt.Errorf("galley peer pid %d is in %s, not galley.service", l.Pid, l.Cgroup)
 	}
-
-	start, err := startTime(pid)
-	if err != nil {
-		return 0, 0, fmt.Errorf("galley peer pid %d: %w", pid, err)
-	}
-	fds := []unix.PollFd{{Fd: int32(pidfd), Events: unix.POLLIN}}
-	if n, err := unix.Poll(fds, 0); err != nil || n != 0 {
-		return 0, 0, fmt.Errorf("galley peer pid %d has exited", pid)
-	}
-	return pid, start, nil
-}
-
-func startTime(pid int) (uint64, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0, err
-	}
-	i := strings.LastIndexByte(string(b), ')')
-	if i < 0 {
-		return 0, errors.New("stat has no comm")
-	}
-	f := strings.Fields(string(b[i+1:]))
-	if len(f) < 20 {
-		return 0, errors.New("stat is short")
-	}
-	return strconv.ParseUint(f[19], 10, 64)
-}
-
-func cgroupOf(pid int) string {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
-	if err != nil {
-		return "an unreadable cgroup"
-	}
-	return strings.TrimPrefix(strings.TrimSpace(string(b)), "0::")
+	return l, nil
 }
 
 func item(name string, q Question) *wire.Item {

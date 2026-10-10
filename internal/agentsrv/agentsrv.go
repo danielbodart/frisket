@@ -155,7 +155,7 @@ func (c *conn) Sign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
 
 func (c *conn) SignWithFlags(key ssh.PublicKey, data []byte, _ agent.SignatureFlags) (sig *ssh.Signature, err error) {
 	defer c.refusePanic(&err)
-	req, err := c.classify(data)
+	req, err := c.classify(key, data)
 	if err != nil {
 		c.s.Log.Warn("refused", "reason", err.Error(), "chain", c.r.Chain, "anchor", c.r.Anchor)
 		return nil, err
@@ -224,7 +224,7 @@ func (c *conn) find(key ssh.PublicKey) (Key, bool) {
 	return Key{}, false
 }
 
-func (c *conn) classify(data []byte) (*request, error) {
+func (c *conn) classify(key ssh.PublicKey, data []byte) (*request, error) {
 	req := &request{}
 	for _, b := range c.binds {
 		req.fwd = req.fwd || b.fwd
@@ -236,6 +236,9 @@ func (c *conn) classify(data []byte) (*request, error) {
 	u, err := parseUserauth(data)
 	if err != nil {
 		return nil, errors.New("neither a userauth request nor SSHSIG")
+	}
+	if !bytes.Equal(u.key, key.Marshal()) {
+		return nil, errors.New("the request names another key")
 	}
 	if len(c.binds) == 0 {
 		req.class, req.claimed = classUnbound, u.hostKey
@@ -257,7 +260,7 @@ func (c *conn) decide(req *request) verdict {
 	if req.class != classSSHSIG && c.s.frisket(r) {
 		return verdict{sign: true, source: "frisket"}
 	}
-	if req.class == classBound && !req.fwd && r.Terminal && req.known && c.s.Terminal == Allow {
+	if req.class == classBound && !req.fwd && r.Terminal && !r.Cut && req.known && c.s.Terminal == Allow {
 		return verdict{sign: true, source: "terminal"}
 	}
 	if req.class == classSSHSIG && !req.fwd && c.s.SSHSIG[req.namespace] == Allow {

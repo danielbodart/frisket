@@ -17,6 +17,7 @@ const (
 
 type userauth struct {
 	sid     []byte
+	key     []byte
 	hostKey []byte
 }
 
@@ -82,7 +83,7 @@ func parseUserauth(data []byte) (*userauth, error) {
 		return nil, errMalformed
 	}
 	r.bytes()
-	r.bytes()
+	u.key = r.bytes()
 	switch method {
 	case methodPublickey:
 	case methodHostbound:

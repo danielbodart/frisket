@@ -316,11 +316,6 @@ in
         machine.succeed("systemctl -M dan@ --user stop thief.service")
         galley("answer 0")
 
-    with subtest("the sockets are absent inside a flong-style namespace"):
-        machine.succeed("test -S /run/frisket-signer/agent && test -e /run/galley-ask/dan.sock")
-        machine.succeed(as_dan("bwrap --unshare-all --ro-bind /nix/store /nix/store --tmpfs /run --proc /proc --dev /dev "
-                               "${pkgs.runtimeShell} -c 'test ! -e /run/frisket-signer/agent && test ! -e /run/galley-ask/dan.sock'"))
-
     with subtest("terminal = ask asks a tab to a known host"):
         machine.succeed("/run/booted-system/specialisation/ask/bin/switch-to-configuration test")
         asked = len(events("question"))

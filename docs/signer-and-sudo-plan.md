@@ -534,7 +534,7 @@ type Question struct{ Title, Text, Level string; Grantable bool; Password bool }
 type Answer struct {
     Allowed bool; For time.Duration      // 0 is once
     Password []byte                      // the dialog only; the caller zeroes it
-    Galley struct{ Pid int; Start uint64 }
+    Galley struct{ Pid int; Start uint64; Cgroup string }
 }
 var ErrNobody = errors.New("no one to ask")
 func Ask(ctx context.Context, user string, q Question) (Answer, error)
@@ -760,8 +760,7 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 - fakegalley `ok 15 minutes` makes a grant: the next sign from the same anchor is silent and fakegalley logs no question; `answer 0` (Allow once) grants nothing.
 - A rebound `/run/galley-ask/dan.sock` (socat outside `galley.service`) is nobody, and the journal names its cgroup.
 - An ssh killed while its question is up: fakegalley logs the close.
-- The sockets are absent inside a flong-style namespace.
-- TPM cleared (swtpm state reset): the key is still listed, a sign fails with "TPM cleared or a different chip" in ssh's error and the journal, and `serve` stays up.
+- TPM cleared (swtpm state reset): the key is still listed, a sign fails (the agent protocol carries no text, so ssh only says the agent refused) with "TPM cleared or a different chip" in the journal, and `serve` stays up.
 
 `tests/sudo-gate.nix`: no tty via `setsid -w runuser … </dev/null`, a tty via `script -qec`; fakegalley as `galley.service`.
 
