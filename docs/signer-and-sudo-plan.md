@@ -328,7 +328,7 @@ A grantable question is a form with the time control; an Allow-once question (§
   "buttons":[{"answer":"cancel","label":"Refuse","underline":-1},
              {"answer":"extra","index":0,"label":"Allow once","underline":-1},
              {"answer":"ok","label":"Allow for","underline":-1}],
-  "default":-1,
+  "default":2,
   "forms":{"fields":[{"kind":"entry","label":"Allow for","text":"15"},
                      {"kind":"combo","label":"","values":["minutes","hours"]}]}}}
 ```
@@ -338,7 +338,7 @@ A grantable question is a form with the time control; an Allow-once question (§
   "text":"launched through systemd --user\nsystemd --user ← ssh",
   "buttons":[{"answer":"cancel","label":"Refuse","underline":-1},
              {"answer":"extra","index":0,"label":"Allow once","underline":-1}],
-  "default":-1}}
+  "default":1}}
 ```
 
 | Answer line | Result |
@@ -348,6 +348,7 @@ A grantable question is a form with the time control; an Allow-once question (§
 | anything else, `cancel`, `close` | Refuse |
 | an error, EOF | nobody to ask |
 
+- Every question's default is its last button, an Allow, so Enter allows, danger included; galley never takes the focus by itself, so only a question dan has opened takes an Enter.
 - Text is plain: control and bidi characters escaped, each argv cut at 1000 characters.
 - While asking, the signer polls the ssh connection for `POLLRDHUP` and closes the galley connection on hang-up.
 
@@ -480,7 +481,7 @@ The question:
   "text":"touches a unit that guards this machine\n\nclaude (pid 5113) ← bash\n/run/current-system/sw/bin/systemctl stop sshd.service",
   "buttons":[{"answer":"cancel","label":"Refuse","underline":-1},
              {"answer":"extra","index":0,"label":"Allow","underline":-1}],
-  "default":-1}}
+  "default":1}}
 ```
 
 ### Danger catalogue

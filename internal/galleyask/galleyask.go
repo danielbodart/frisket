@@ -131,14 +131,12 @@ func item(name string, q Question) *wire.Item {
 	it := &wire.Item{
 		Kind: wire.KindQuestion, Level: q.Level, Title: q.Title, Text: q.Text,
 		Buttons: []wire.Button{button(wire.AnswerCancel, "Refuse"), button(wire.AnswerExtra, "Allow once")},
-		Default: -1,
 	}
 	units := wire.Field{Kind: wire.FieldCombo, Values: []string{"minutes", "hours"}}
 	switch {
 	case q.Password:
 		it.Kind = wire.KindForms
 		it.Buttons = []wire.Button{button(wire.AnswerCancel, "Cancel"), button(wire.AnswerOK, "Allow")}
-		it.Default = 1
 		fields := []wire.Field{{Kind: wire.FieldPassword, Label: "Password for " + name}}
 		if q.Grantable {
 			fields = append(fields, wire.Field{Kind: wire.FieldEntry, Label: "Remember the password for this claude for", Text: "15"}, units)
@@ -149,6 +147,7 @@ func item(name string, q Question) *wire.Item {
 		it.Buttons = append(it.Buttons, button(wire.AnswerOK, "Allow for"))
 		it.Forms = &wire.Forms{Fields: []wire.Field{{Kind: wire.FieldEntry, Label: "Allow for", Text: "15"}, units}}
 	}
+	it.Default = len(it.Buttons) - 1
 	return it
 }
 

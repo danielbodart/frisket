@@ -1,1 +1,1 @@
-{"galley":3,"item":{"kind":"question","title":"ssh to server","text":"launched through systemd --user\nsystemd --user ← ssh","buttons":[{"answer":"cancel","label":"Refuse","underline":-1},{"answer":"extra","label":"Allow once","underline":-1}],"default":-1,"level":"warning"}}
+{"galley":3,"item":{"kind":"question","title":"ssh to server","text":"launched through systemd --user\nsystemd --user ← ssh","buttons":[{"answer":"cancel","label":"Refuse","underline":-1},{"answer":"extra","label":"Allow once","underline":-1}],"default":1,"level":"warning"}}
