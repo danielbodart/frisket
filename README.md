@@ -247,6 +247,8 @@ A route can do more than add a bearer token. Each is in
 | `services.frisket.user` / `group` | `frisket` | Who the daemon runs as: the owner of the credential files. |
 | `services.frisket.policies.<name>.allow` | `[ ]` | Names a sandbox may resolve: `name`, `*.name` (any depth below) or `*`. |
 | `services.frisket.policies.<name>.routes.<route>` | `{ }` | An intercepted host: `host`, `upstream`, `credentialFile`, `placeholder`, `paths`, … See [docs/routes.md](docs/routes.md). |
+| `services.frisket.policies.<name>.gitSigning` | `false` | Serve `/run/frisket-sign/<name>/agent`, which signs git commits through `gitSigning.agent` and nothing else. See [docs/signer.md](docs/signer.md#commit-signing-from-a-sandbox). |
+| `services.frisket.gitSigning.agent` | `null` | The agent those sockets pass git signs on to, such as `/run/frisket-signer/agent`. |
 | `services.frisket.asker` | `null` | The program a question goes to; `null` refuses every question. |
 | `services.frisket.askerConcurrent` / `askerPerSession` | `1` / `1` | Questions open at once, and per session; a recording session's wait rather than being refused. |
 | `services.frisket.dns` | host's `resolv.conf` | Where frisket resolves allowed names. |

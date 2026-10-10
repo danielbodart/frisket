@@ -267,6 +267,26 @@ func statusUID(status []byte) (int, error) {
 	return 0, errors.New("no Uid in status")
 }
 
+// Cred is the peer's SO_PEERCRED: its uid in this user namespace and its pid
+// in this pid namespace, as the kernel recorded them at connect.
+func Cred(c *net.UnixConn) (*unix.Ucred, error) {
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	var cred *unix.Ucred
+	var credErr error
+	if err := rc.Control(func(fd uintptr) {
+		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return nil, err
+	}
+	if credErr != nil {
+		return nil, fmt.Errorf("SO_PEERCRED: %w", credErr)
+	}
+	return cred, nil
+}
+
 func credentials(c *net.UnixConn) (*unix.Ucred, int, error) {
 	rc, err := c.SyscallConn()
 	if err != nil {

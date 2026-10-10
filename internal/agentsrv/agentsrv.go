@@ -1,6 +1,7 @@
-// Package agentsrv serves the SSH agent protocol for frisket-signer: each
+// Package agentsrv serves the SSH agent protocol: for frisket-signer, each
 // connection's session binds, the userauth and SSHSIG parsers, and the fixed
-// order in which a sign is made silently or asked.
+// order in which a sign is made silently or asked; and for frisket, a policy's
+// git signing socket in front of the signer.
 package agentsrv
 
 import (
@@ -283,22 +284,11 @@ type answered struct {
 func (c *conn) ask(req *request) verdict {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop, err := unix.Eventfd(0, unix.EFD_CLOEXEC)
+	stop, err := watchHangUp(c.c, c.s.Log, cancel)
 	if err != nil {
 		return verdict{source: "nobody", err: err}
 	}
-	watching := make(chan struct{})
-	go func() {
-		defer close(watching)
-		defer c.refusePanic(new(error))
-		c.watchHangUp(stop, cancel)
-	}()
-	defer func() {
-		one := binary.NativeEndian.AppendUint64(nil, 1)
-		_, _ = unix.Write(stop, one)
-		<-watching
-		unix.Close(stop)
-	}()
+	defer stop()
 
 	answers := make(chan answered, 1)
 	go func() {
@@ -337,10 +327,35 @@ func (c *conn) keep(req *request, got answered) {
 	}
 }
 
-func (c *conn) watchHangUp(stop int, cancel func()) {
-	rc, err := c.c.SyscallConn()
+// watchHangUp calls hungUp if c's peer hangs up before stop is called.
+func watchHangUp(c *net.UnixConn, log *slog.Logger, hungUp func()) (stop func(), err error) {
+	efd, err := unix.Eventfd(0, unix.EFD_CLOEXEC)
 	if err != nil {
-		return
+		return nil, err
+	}
+	watching := make(chan struct{})
+	go func() {
+		defer close(watching)
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("request panicked", "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+			}
+		}()
+		if pollHangUp(c, efd) {
+			hungUp()
+		}
+	}()
+	return func() {
+		_, _ = unix.Write(efd, binary.NativeEndian.AppendUint64(nil, 1))
+		<-watching
+		unix.Close(efd)
+	}, nil
+}
+
+func pollHangUp(c *net.UnixConn, stop int) (hungUp bool) {
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return false
 	}
 	_ = rc.Control(func(fd uintptr) {
 		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLRDHUP}, {Fd: int32(stop), Events: unix.POLLIN}}
@@ -349,10 +364,9 @@ func (c *conn) watchHangUp(stop int, cancel func()) {
 				break
 			}
 		}
-		if fds[0].Revents != 0 {
-			cancel()
-		}
+		hungUp = fds[0].Revents != 0
 	})
+	return hungUp
 }
 
 func (c *conn) record(req *request, v verdict) {

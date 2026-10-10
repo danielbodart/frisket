@@ -850,7 +850,7 @@ After M2 has settled on both hosts, delete the M0.5 branch from nix-config. The 
 ### Later tracks, not designed here
 
 - **Remote sudo** through the forwarded agent and `pam_rssh`, asked in galley: after the signer's rollout (never with the stock agent, which signs forwarded requests silently), with the normal key; the question needn't show the remote command; starts with a small spike. It must revisit the sudo auth stack assertion.
-- **Commit signing from inside containers**: frisket offers each session a narrow agent socket (SSHSIG namespace `git` only) that names the session to the signer, decided by frisket's per-tier config; flong mounts the socket.
+- **Commit signing from inside containers**, built: a policy with `gitSigning` gets `/run/frisket-sign/<policy>/agent` from frisket, which lists the signer's keys, passes on SSHSIG signs in the `git` namespace, refuses everything else (session-bind included), and answers only frisket's user; the signer sees frisket asking and signs under `sshsig.git`. chase binds the directory into the tier's container. The signer is not told which session asked; frisket's journal says which policy and pid.
 - **Allow-with-notice sudo class** (e.g. `nixos-rebuild switch`, run without a question but posted as a galley notice): parked; it would need a root-owned-PATH check.
 - **A TPM-held age identity.**
 

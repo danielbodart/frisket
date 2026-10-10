@@ -92,6 +92,33 @@ key, the outcome, and its `source` (`frisket`, `terminal`, `sshsig`,
 `grant`, `galley`, `nobody`, `hung up`). A failed sign is one `sign failed`
 line with the TPM's cause; ssh itself only says `agent refused operation`.
 
+## Commit signing from a sandbox
+
+frisket serves a policy's sandboxes an agent socket that only signs git
+commits:
+
+```nix
+services.frisket = {
+  gitSigning.agent = "/run/frisket-signer/agent";
+  policies.strict.gitSigning = true;
+};
+```
+
+```
+$ ls -l /run/frisket-sign/strict
+srw------- 1 alice users 0 ... agent
+```
+
+Bind `/run/frisket-sign/<policy>` into the sandbox at the same path and set
+`SSH_AUTH_SOCK=/run/frisket-sign/<policy>/agent`. The socket lists the
+signer's keys and passes on a sign whose data is an SSHSIG in the `git`
+namespace, which the signer makes under `sshsig.git`. Every other sign,
+key management, lock and every extension, `session-bind` among them, is
+refused. Only `services.frisket.user` may connect, from any user namespace.
+The directory is kept across a restart of frisket, so a bind of it stays
+good. Each request is one `decision` line in frisket's journal, with the
+policy, the peer's pid, the namespace and the outcome.
+
 ## Recovery
 
 **TPM cleared, firmware update or new board.** Every sign fails with `TPM

@@ -206,6 +206,43 @@
             assert nixpkgs.lib.assertMsg (got == want) "flong protect is ${builtins.toJSON got}, want ${builtins.toJSON want}";
             pkgs.writeText "frisket-flong-protect" "ok";
 
+          # A policy with gitSigning gets its socket under /run/frisket-sign,
+          # in a directory systemd keeps across a restart, and needs the agent.
+          git-signing =
+            let
+              eval = extra: nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  self.nixosModules.default
+                  {
+                    boot.isContainer = true;
+                    system.stateVersion = "26.05";
+                    users.users.alice = { isNormalUser = true; group = "users"; };
+                    services.frisket = { enable = true; user = "alice"; policies.strict = { }; };
+                  }
+                  extra
+                ];
+              };
+              unit = c: c.config.systemd.services.frisket.serviceConfig;
+              failed = c: map (a: a.message) (builtins.filter (a: ! a.assertion) c.config.assertions);
+              on = eval {
+                services.frisket.policies.trusted.gitSigning = true;
+                services.frisket.gitSigning.agent = "/run/frisket-signer/agent";
+              };
+              off = eval { };
+              noAgent = eval { services.frisket.policies.trusted.gitSigning = true; };
+              has = sub: nixpkgs.lib.hasInfix sub (unit on).ExecStart;
+              wrong = builtins.filter (x: ! x.ok) [
+                { case = "flags"; ok = has "\"-git-signing\" \"trusted\"" && has "\"-git-signing-agent\" \"/run/frisket-signer/agent\"" && ! has "\"strict\""; }
+                { case = "runtime directory"; ok = (unit on).RuntimeDirectory == "frisket-sign" && (unit on).RuntimeDirectoryPreserve == "yes"; }
+                { case = "assertions"; ok = failed on == [ ]; }
+                { case = "off"; ok = ! nixpkgs.lib.hasInfix "-git-signing" (unit off).ExecStart && ! (unit off) ? RuntimeDirectory; }
+                { case = "no agent"; ok = builtins.any (nixpkgs.lib.hasInfix "gitSigning.agent") (failed noAgent); }
+              ];
+            in
+            assert nixpkgs.lib.assertMsg (wrong == [ ]) "git signing judged wrongly: ${builtins.toJSON (map (x: x.case) wrong)}";
+            pkgs.writeText "frisket-git-signing" "ok";
+
           # A launcher's policyFile is a path template, not a shell word: an
           # absolute path with at most one {machine} and no other brace. Each
           # is read on its own, in one evaluation, since the refusal is the

@@ -386,9 +386,13 @@ in
         esac
         exit 1
       ''}";
+      # Her agent, as the git signing sockets' upstream: it signs anything,
+      # so what the socket refuses is frisket's refusal.
+      gitSigning.agent = agentSocket;
       # The trusted shape: every name, and the same route still intercepted.
       policies.trusted = {
         allow = [ "*" ];
+        gitSigning = true;
         routes.api = config.services.frisket.policies.test.routes.api;
         # Through the module, and so through the build's `frisket check`: a
         # wildcard route with a session key, whose private half is nowhere.
@@ -713,6 +717,18 @@ in
       postStart = mark;
     };
     services.frisket.flong.record = { policy = "test"; policyFile = "/srv/policies/record.json"; };
+
+    # A session with its policy's git signing directory bound in, as chase
+    # binds a tier's.
+    flong.signing = {
+      container = "strict";
+      user = "alice";
+      inherit workspace;
+      command = [ "bash" "-c" ];
+      binds = hook "sign-dir" "echo /run/frisket-sign/trusted";
+      postStart = mark;
+    };
+    services.frisket.flong.signing.policy = "trusted";
   };
 
   testScript = { nodes, ... }:
@@ -1876,6 +1892,35 @@ in
           out = machine.succeed(as_workload(leader, "curl -sS -m 5 http://allowed.test/"))
           assert "upstream-body" in out, out
           release(name)
+
+      with subtest("a session with the git signing directory bound signs in the git namespace and nothing else, across a restart"):
+          signing = "${lib.getExe nodes.machine.flong.signing.launcher}"
+          machine.wait_for_unit("test-ssh-agent.service")
+          assert machine.succeed("stat -c '%U %a' /run/frisket-sign/trusted /run/frisket-sign/trusted/agent").split() == ["alice", "700", "alice", "600"]
+          machine.succeed("install -o alice -g users -m 0644 ${sshKeys}/client.pub /srv/work/signing.pub")
+          machine.succeed("echo hello > /srv/work/msg && chown alice:users /srv/work/msg && rm -f /srv/work/msg.sig")
+          agent = "SSH_AUTH_SOCK=/run/frisket-sign/trusted/agent"
+          sign = lambda ns: f"{agent} ssh-keygen -Y sign -f signing.pub -n {ns} msg"
+          out = machine.succeed(as_user(f"{signing} " + shlex.quote(
+              f"{agent} ssh-add -l; {sign('git')} && echo git-signed; mv msg.sig git.sig; {sign('file')} || echo file-refused")))
+          assert "alice (ED25519)" in out and "git-signed" in out and "file-refused" in out, out
+          machine.succeed("ssh-keygen -Y check-novalidate -n git -s /srv/work/git.sig < /srv/work/msg")
+          ds = [m for m in lines_of("decision") if m.get("policy") == "trusted"]
+          assert any(d["op"] == "sign" and d["namespace"] == "git" and d["outcome"] == "forwarded" for d in ds), ds
+          assert any(d["op"] == "sign" and d["namespace"] == "file" and d["outcome"] == "refuse" for d in ds), ds
+          # Not on the host either: the socket answers alice alone.
+          machine.fail(f"{agent} ssh-add -l")
+
+          machine.succeed("rm -f /srv/work/go /srv/work/msg.sig /srv/work/signed-after-restart /tmp/last-leader")
+          payload = f"while [ ! -e go ]; do sleep 0.1; done; {sign('git')} && touch signed-after-restart"
+          machine.succeed(f"{as_user(f'{signing} {shlex.quote(payload)}')} >/tmp/sign-hold.out 2>&1 &")
+          machine.wait_until_succeeds("test -s /tmp/last-leader")
+          inode = machine.succeed("stat -c %i /run/frisket-sign/trusted")
+          machine.succeed("systemctl restart frisket.service")
+          machine.wait_for_unit("frisket.service")
+          assert machine.succeed("stat -c %i /run/frisket-sign/trusted") == inode
+          machine.succeed("touch /srv/work/go")
+          machine.wait_until_succeeds("test -e /srv/work/signed-after-restart")
 
       with subtest("a session restored after a switch is served under the policy as now configured"):
           name, leader = hold("${strict}", "ip link show frisket0")

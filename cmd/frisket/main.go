@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/danielbodart/frisket/internal/agentsrv"
 	"github.com/danielbodart/frisket/internal/ask"
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/dns"
@@ -56,7 +57,10 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         service's file-descriptor store. -asker names the program questions
         go to, -asker-concurrent and -asker-per-session how many may be open
         at once and per session, and -record-dir where a recording session's
-        lines may be appended.
+        lines may be appended. -git-signing POLICY, repeatable, serves
+        that policy's git signing socket at /run/frisket-sign/POLICY/agent:
+        the identities of -git-signing-agent, and its signatures in the git
+        SSHSIG namespace, and nothing else.
 
   frisket steer -netns PATH -mntns PATH -roots BUNDLE -steering FILE -name NAME -policy DOCUMENT [-param K=V]...
         The launcher's first step, from its hook: create the session's
@@ -185,6 +189,9 @@ func runServe(argv []string) error {
 	askerConcurrent := fs.Int("asker-concurrent", 1, "questions open at once, daemon-wide; the rest wait their turn")
 	askerPerSession := fs.Int("asker-per-session", 1, "questions one session may have queued or open; another is refused at once, but a recording session's waits")
 	recordDir := fs.String("record-dir", "", "the directory a recording session's sink may be in (none: a document with a sink is refused)")
+	var gitPolicies policyNames
+	fs.Var(&gitPolicies, "git-signing", "a policy whose git signing socket is served at "+gitSigningDir+"/POLICY/agent; repeatable")
+	gitAgent := fs.String("git-signing-agent", "", "the agent a git signing socket's git signatures are made by")
 	var level slog.Level
 	fs.TextVar(&level, "log-level", slog.LevelInfo, "debug adds each intercepted request's headers, credentials described and never shown")
 	if err := fs.Parse(argv); err != nil {
@@ -223,6 +230,17 @@ func runServe(argv []string) error {
 			return err
 		}
 		deps.Asker = asker
+	}
+	if len(gitPolicies) > 0 && !filepath.IsAbs(*gitAgent) {
+		return fmt.Errorf("-git-signing needs -git-signing-agent, by absolute path; got %q", *gitAgent)
+	}
+	for _, name := range gitPolicies {
+		ln, err := listenGitSigning(gitSigningDir, name)
+		if err != nil {
+			return err
+		}
+		g := &agentsrv.Git{Policy: name, UID: os.Getuid(), Upstream: *gitAgent, Log: log}
+		go func() { log.Error("git signing socket", "policy", name, "err", g.Serve(ln).Error()) }()
 	}
 	policies, err := store.NewStore(cfg, deps)
 	if err != nil {

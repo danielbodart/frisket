@@ -22,6 +22,8 @@ let
   # daemon's own file says only where names are resolved.
   configFile = pkgs.writeText "frisket.json" (builtins.toJSON { inherit (cfg) dns; });
 
+  gitSigning = lib.attrNames (lib.filterAttrs (_: p: p.gitSigning) cfg.policies);
+
   document = name: p: {
     inherit name;
     inherit (p) allow;
@@ -583,8 +585,30 @@ in
               credential. Each host must be on `allow`.
             '';
           };
+          gitSigning = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Serve /run/frisket-sign/<name>/agent, an SSH agent socket for a
+              sandbox under this policy to sign git commits with: it lists
+              `gitSigning.agent`'s keys and passes on a sign in the git SSHSIG
+              namespace, and refuses everything else. Only `user` may connect.
+              The directory is kept across a restart, so a bind of it into a
+              sandbox stays good.
+            '';
+          };
         };
       });
+    };
+
+    gitSigning.agent = mkOption {
+      type = types.nullOr (types.strMatching "/.*");
+      default = null;
+      example = "/run/frisket-signer/agent";
+      description = ''
+        The SSH agent the policies' git signing sockets pass signs on to,
+        dialled for each request. Required when a policy sets `gitSigning`.
+      '';
     };
 
     policyRoots = mkOption {
@@ -817,7 +841,17 @@ in
           assertion = cfg.group == config.users.users.${cfg.user}.group;
           message = "services.frisket.group is ${cfg.group}, not ${cfg.user}'s primary group: the control socket could read no launcher's user namespace, and would refuse every one.";
         }
-      ] ++ lib.concatLists (lib.mapAttrsToList
+        {
+          assertion = gitSigning == [ ] || cfg.gitSigning.agent != null;
+          message = "services.frisket.policies.{${lib.concatStringsSep "," gitSigning}}.gitSigning needs services.frisket.gitSigning.agent.";
+        }
+      ] ++ map
+        (name: {
+          assertion = builtins.match "[A-Za-z0-9_][A-Za-z0-9_.-]*" name != null;
+          message = "services.frisket.policies.${name}.gitSigning: the name is a directory under /run/frisket-sign, so letters, digits, _, . and -, not starting with . or -.";
+        })
+        gitSigning
+      ++ lib.concatLists (lib.mapAttrsToList
         (name: p:
           map
             (w: {
@@ -913,7 +947,9 @@ in
             "/var/lib/frisket/records"
           ]
           ++ lib.concatMap (r: [ "-policy-root" r ]) ([ "/etc/frisket/policies" ] ++ cfg.policyRoots)
-          ++ lib.optionals (cfg.maxConnections > 0) [ "-max-conns" (toString cfg.maxConnections) ]);
+          ++ lib.optionals (cfg.maxConnections > 0) [ "-max-conns" (toString cfg.maxConnections) ]
+          ++ lib.concatMap (name: [ "-git-signing" name ]) gitSigning
+          ++ lib.optionals (gitSigning != [ ]) [ "-git-signing-agent" cfg.gitSigning.agent ]);
           User = cfg.user;
           Group = cfg.group;
           Restart = "on-failure";
@@ -935,6 +971,13 @@ in
           # binds none of /var/lib, reaches it.
           StateDirectory = "frisket/records";
           StateDirectoryMode = "0700";
+
+          # The git signing sockets' directories, which sandboxes bind: kept
+          # across a restart, so a bind made before it still reaches the
+          # socket made again inside.
+          RuntimeDirectory = lib.mkIf (gitSigning != [ ]) "frisket-sign";
+          RuntimeDirectoryMode = "0700";
+          RuntimeDirectoryPreserve = "yes";
 
           # Everything else it could reach, taken away. It dials out from the
           # host's network namespace, so the network stays; it receives
