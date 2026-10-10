@@ -15,6 +15,7 @@ import (
 
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/nsnet"
+	"github.com/danielbodart/frisket/internal/peer"
 	"github.com/danielbodart/frisket/internal/sdnotify"
 	"golang.org/x/sys/unix"
 )
@@ -65,7 +66,7 @@ type Daemon struct {
 	own uint64
 	// userns is this process's user namespace, read at Run: the only one a
 	// control peer may be in.
-	userns nsKey
+	userns peer.Userns
 	// dst replaces the destination lookup, for tests that have no ruleset.
 	dst func(*net.TCPConn) netip.AddrPort
 
@@ -91,7 +92,7 @@ func (d *Daemon) Run(ctx context.Context, ctl *net.UnixListener, inherited []sdn
 		}
 		d.own = c
 	}
-	u, err := ownUserns()
+	u, err := peer.OwnUserns()
 	if err != nil {
 		return fmt.Errorf("reading this process's user namespace: %w", err)
 	}
@@ -153,7 +154,7 @@ func (d *Daemon) handle(c *net.UnixConn) {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(30 * time.Second))
 
-	if err := d.checkPeer(c); err != nil {
+	if err := peer.Check(c, d.ControlUID, d.userns); err != nil {
 		d.Log.Warn("control refused", "error", err.Error())
 		// Read and discard the request first -- closing any descriptors it
 		// carried -- or closing a socket with unread data resets it, and the
