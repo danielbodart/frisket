@@ -35,10 +35,11 @@
         # hostile DNS, vishvananda/netlink for the routing steer and connect
         # make inside a sandbox, go-jose for the JWTs a session key signs, and
         # x/crypto for ssh, both ends of an SSH route's connection, which is
-        # hostile input from the sandbox and from the machine alike.
+        # hostile input from the sandbox and from the machine alike, and galley's
+        # wire, for the questions the signer and the sudo gate put to galley.
         # vendorHash = null is a nice property
         # and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-xlAC4rD0FXWIdqMr85L1SfzqlI/uzuUc4m9IiCZrIkY=";
+        vendorHash = "sha256-xYruouvCOI9JBZBKC5CCkXW/0zlkeMHEI50CpmYFrAk=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has
@@ -49,6 +50,7 @@
         env.CGO_ENABLED = 0;
 
         ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
+        excludedPackages = [ "tests/fakegalley" ];
 
         # buildGoModule runs `go test ./...` here. The namespace tests create a
         # user+network namespace with clone flags and skip cleanly where the
@@ -94,6 +96,14 @@
         rec {
           frisket = mkFrisket pkgs;
           default = frisket;
+          # galley's services socket in the VM tests, answering from a script.
+          fakegalley = (mkFrisket pkgs).overrideAttrs (old: {
+            pname = "fakegalley";
+            subPackages = [ "tests/fakegalley" ];
+            excludedPackages = [ ];
+            doCheck = false;
+            meta = old.meta // { mainProgram = "fakegalley"; };
+          });
         });
 
       devShells = forAllSystems (system:

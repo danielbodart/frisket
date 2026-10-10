@@ -1,3 +1,5 @@
+github.com/danielbodart/galley v0.24.15 h1:Yi+YxxkGdZkGNXWvMbTh5vP3AR/+toR6iF9rCMwnVhc=
+github.com/danielbodart/galley v0.24.15/go.mod h1:LG67o+3WXE7Kj9BQ0WclOtCq0Fbx46NP3pe6PqrLzs8=
 github.com/go-jose/go-jose/v4 v4.1.5 h1:RjgjO2LOtWOJKUC5wpwY9LR3B3vwVAz6JS2YHfYU6eA=
 github.com/go-jose/go-jose/v4 v4.1.5/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/vishvananda/netlink v1.3.1 h1:3AEMt62VKqz90r0tmNhog0r/PpWKmrEShJU0wJW6bV0=
