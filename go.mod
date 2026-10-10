@@ -9,7 +9,9 @@ go 1.26.0
 
 require (
 	github.com/danielbodart/galley v0.24.15
+	github.com/foxboron/go-tpm-keyfiles v0.0.0-20260427185012-515ba073c4c1
 	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/google/go-tpm v0.9.9-0.20260124013517-8f8f42cba0de
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0

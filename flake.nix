@@ -35,11 +35,12 @@
         # hostile DNS, vishvananda/netlink for the routing steer and connect
         # make inside a sandbox, go-jose for the JWTs a session key signs, and
         # x/crypto for ssh, both ends of an SSH route's connection, which is
-        # hostile input from the sandbox and from the machine alike, and galley's
-        # wire, for the questions the signer and the sudo gate put to galley.
+        # hostile input from the sandbox and from the machine alike, galley's
+        # wire, for the questions the signer and the sudo gate put to galley,
+        # and go-tpm with go-tpm-keyfiles for the signer's TPM keys.
         # vendorHash = null is a nice property
         # and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-xYruouvCOI9JBZBKC5CCkXW/0zlkeMHEI50CpmYFrAk=";
+        vendorHash = "sha256-Q5QxeMr9j0Pc3GdJSxp6l8DbYUHAv7w9UleRsU0C2bg=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has
@@ -48,6 +49,8 @@
         # nsswitch.conf says -- exactly the kind of implicit configuration this
         # is trying to remove.
         env.CGO_ENABLED = 0;
+        # One swtpm per TPM test; set, they fail rather than skip without it.
+        env.FRISKET_REQUIRE_SWTPM = "1";
 
         ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
         excludedPackages = [ "tests/fakegalley" ];
@@ -59,7 +62,7 @@
         doCheck = true;
         # The ruleset lib.steering writes is loaded by nft, in a namespace of
         # the test's own, to see a relayed port reach the session's listener.
-        nativeCheckInputs = [ pkgs.nftables ];
+        nativeCheckInputs = [ pkgs.nftables pkgs.swtpm ];
 
         meta = {
           description = "Keeps credentials out of sandboxes by adding them on the wire";
@@ -112,7 +115,7 @@
           default = pkgs.mkShell {
             # nft, for the test that loads a session's ruleset in a namespace
             # of its own; it skips without one.
-            packages = [ pkgs.go pkgs.gopls pkgs.golangci-lint pkgs.nftables ];
+            packages = [ pkgs.go pkgs.gopls pkgs.golangci-lint pkgs.nftables pkgs.swtpm ];
             # The same setting the package builds with, so a `go build` in the
             # shell produces the same binary the flake does rather than a
             # dynamically linked one that works here and nowhere else.
