@@ -53,7 +53,7 @@
         env.FRISKET_REQUIRE_SWTPM = "1";
 
         ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
-        excludedPackages = [ "tests/fakegalley" "cmd/frisket-signer" ];
+        excludedPackages = [ "tests/fakegalley" "tests/agenttamper" "cmd/frisket-signer" ];
 
         # buildGoModule runs `go test ./...` here. The namespace tests create a
         # user+network namespace with clone flags and skip cleanly where the
@@ -93,6 +93,10 @@
         imports = [ (import ./nix/module.nix self) ];
       };
       nixosModules.flong = import ./nix/flong.nix self;
+      nixosModules.signer = {
+        key = "github:danielbodart/frisket#nixosModules.signer";
+        imports = [ (import ./nix/signer.nix self) ];
+      };
 
       packages = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
@@ -106,6 +110,14 @@
             excludedPackages = [ ];
             doCheck = false;
             meta = old.meta // { mainProgram = "fakegalley"; };
+          });
+          # A client that binds one session and signs for another, for the signer's VM test.
+          agenttamper = (mkFrisket pkgs).overrideAttrs (old: {
+            pname = "agenttamper";
+            subPackages = [ "tests/agenttamper" ];
+            excludedPackages = [ ];
+            doCheck = false;
+            meta = old.meta // { mainProgram = "agenttamper"; };
           });
           frisket-signer = (mkFrisket pkgs).overrideAttrs (old: {
             pname = "frisket-signer";
@@ -152,12 +164,41 @@
                   flong.nixosModules.default
                   self.nixosModules.default
                   self.nixosModules.flong
+                  self.nixosModules.signer
+                  self.nixosModules.signer
                   { boot.isContainer = true; system.stateVersion = "26.05"; }
                 ];
               };
             in
             pkgs.writeText "frisket-modules"
-              (builtins.toJSON { inherit (eval.config.services.frisket) enable; });
+              (builtins.toJSON { inherit (eval.config.services.frisket) enable; signer = eval.config.services.frisket.signer.enable; });
+
+          # Every flong session is kept from the signer's and galley's sockets
+          # while the signer is enabled, and only then.
+          flong-protect =
+            let
+              protect = signer: (nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  flong.nixosModules.default
+                  self.nixosModules.flong
+                  self.nixosModules.signer
+                  {
+                    boot.isContainer = true;
+                    system.stateVersion = "26.05";
+                    services.frisket.flong.box.policy = "p";
+                    services.frisket.signer.enable = signer;
+                  }
+                ];
+              }).config.flong.box.protect;
+              want = {
+                on = [ "/run/frisket" "/run/frisket-signer" "/run/galley-ask" ];
+                off = [ "/run/frisket" ];
+              };
+              got = { on = protect true; off = protect false; };
+            in
+            assert nixpkgs.lib.assertMsg (got == want) "flong protect is ${builtins.toJSON got}, want ${builtins.toJSON want}";
+            pkgs.writeText "frisket-flong-protect" "ok";
 
           # A launcher's policyFile is a path template, not a shell word: an
           # absolute path with at most one {machine} and no other brace. Each
@@ -293,6 +334,37 @@
 
           # frisket in flong's real shape, end to end, in two VMs.
           flong = pkgs.testers.runNixOSTest (import ./tests/flong.nix { inherit self flong; });
+
+          # No login user may be in tss while the signer is enabled, however
+          # the membership is spelled.
+          signer-tss =
+            let
+              refused = user: group: (builtins.any (a: ! a.assertion)
+                (nixpkgs.lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.signer
+                    {
+                      boot.isContainer = true;
+                      system.stateVersion = "26.05";
+                      services.frisket.signer.enable = true;
+                      users.users.alice = { isNormalUser = true; } // user;
+                      users.groups.tss = group;
+                    }
+                  ];
+                }).config.assertions);
+              wrong = builtins.filter (x: x.got != x.want) [
+                { case = "none"; got = refused { } { }; want = false; }
+                { case = "extraGroups"; got = refused { extraGroups = [ "tss" ]; } { }; want = true; }
+                { case = "members"; got = refused { } { members = [ "alice" ]; }; want = true; }
+                { case = "primary"; got = refused { group = "tss"; } { }; want = true; }
+              ];
+            in
+            assert nixpkgs.lib.assertMsg (wrong == [ ]) "tss assertion judged wrongly: ${builtins.toJSON wrong}";
+            pkgs.writeText "frisket-signer-tss" "ok";
+
+          # frisket-signer with a software TPM, two sshds and fakegalley, in a VM.
+          signer = pkgs.testers.runNixOSTest (import ./tests/signer.nix { inherit self; });
 
           # `frisket dns` on a host, behind systemd-resolved, in a VM.
           host-dns = pkgs.testers.runNixOSTest (import ./tests/host-dns.nix { inherit self; });

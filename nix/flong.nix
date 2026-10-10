@@ -142,7 +142,8 @@ in
           # The control socket's directory is the one way into a session from
           # outside, and no bind may reach it: a workload that could open the
           # socket would steer sessions, its own included.
-          protect = [ (dirOf cfg.controlSocket) ];
+          protect = [ (dirOf cfg.controlSocket) ]
+            ++ lib.optionals (cfg.signer.enable or false) [ "/run/frisket-signer" "/run/galley-ask" ];
           # Listeners, handed over, the rules, and the session's CA in its
           # mount namespace. A failure here ends the session: flong ends a
           # session whose hook exits non-zero.
