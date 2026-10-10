@@ -647,7 +647,7 @@ Both states:
 - `users.users.dan.openssh.authorizedKeys.keyFiles` holds both hosts' `admins/*/ssh-tpm.pub`. `admins/<host>/ssh.pub` stays in the repo (`age.pub` derives from it) and is authorized only on the gateway.
 - `programs.ssh.knownHosts.server` and `.mac`.
 - Before the gate is enabled, the boot menu keeps at least 5 generations: `boot.lanzaboote.configurationLimit` on dan-blade and `boot.loader.systemd-boot.configurationLimit` on dan-desktop are null (unlimited, today's value) or `>= 5`.
-- galley: `services.galley.services = { ssh-signer = "SSH signer"; sudo-gate = "sudo"; }`; `systemd.tmpfiles.rules = [ "d /run/galley-ask 0755 dan dan -" ]`.
+- galley: `services.galley.services = { ssh-signer = "SSH signer"; sudo-gate = "sudo"; }`; `systemd.tmpfiles.rules = [ "d /run/galley-ask 0755 dan users -" ]`.
 - Claude Code: `permissions.allow = [ "Bash(sudo:*)" ]` stays, and no deny rules are added. `env.SUDO_ASKPASS` is unset when `sudoGate.enable` and stays `sudo-askpass.sh` when it is off; left set, a no-tty sudo the gate does not take (gate stopped, `-v`) would run the askpass [H4].
 - Hosts set `services.frisket.sudoGate.enable` directly.
 
@@ -819,7 +819,7 @@ galley items 1-8 merged and deployed; `services.galley.services` and the tmpfile
 
 ### M2: signer
 
-1. `sshSigner.enable = true` on one host and switch; dan leaves `tss`, and the signer starts with no keys. Then `sudo install -o ssh-signer -g ssh-signer -m 0600 ~/.ssh/id_ecdsa.tpm /var/lib/frisket-signer/` and `sudo systemctl restart frisket-signer`. Log out and in; `id` in a new tab shows no `tss`.
+1. `sshSigner.enable = true` on one host and switch; dan leaves `tss`, and the signer starts with no keys. Then `sudo systemctl start frisket-signer` (its first start makes the key directory), `sudo install -o ssh-signer -g ssh-signer -m 0600 ~/.ssh/id_ecdsa.tpm /var/lib/frisket-signer/` and `sudo systemctl restart frisket-signer`. Log out and in; `id` in a new tab shows no `tss`.
 2. Check by hand: a tab's `ssh server true` is silent; Claude Code's `git push` is asked and a 15-minute grant holds; `systemd-run --user ssh server true` is asked with the warning; a chase session's push is silent; a signed commit is silent.
 3. Read the journal for a few days and tune in code. Then the other host.
 

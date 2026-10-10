@@ -34,10 +34,12 @@ services.galley.services = { ssh-signer = "SSH signer"; };   # home-manager
 systemd.tmpfiles.rules = [ "d /run/galley-ask 0755 alice alice -" ];
 ```
 
-The signer starts with no keys. Move a key made by stock
-`ssh-tpm-keygen` into place:
+The signer starts with no keys, and on its first connection, which makes
+its key directory. Start it, then move a key made by stock `ssh-tpm-keygen`
+into place:
 
 ```
+sudo systemctl start frisket-signer
 sudo install -o ssh-signer -g ssh-signer -m 0600 ~/.ssh/id_ecdsa.tpm /var/lib/frisket-signer/
 sudo systemctl restart frisket-signer
 ssh-add -l
