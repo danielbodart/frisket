@@ -103,6 +103,10 @@
         key = "github:danielbodart/frisket#nixosModules.signer";
         imports = [ (import ./nix/signer.nix self) ];
       };
+      nixosModules.sudoGate = {
+        key = "github:danielbodart/frisket#nixosModules.sudoGate";
+        imports = [ (import ./nix/sudo-gate.nix self) ];
+      };
 
       packages = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
@@ -187,36 +191,43 @@
                   self.nixosModules.flong
                   self.nixosModules.signer
                   self.nixosModules.signer
+                  self.nixosModules.sudoGate
+                  self.nixosModules.sudoGate
                   { boot.isContainer = true; system.stateVersion = "26.05"; }
                 ];
               };
             in
             pkgs.writeText "frisket-modules"
-              (builtins.toJSON { inherit (eval.config.services.frisket) enable; signer = eval.config.services.frisket.signer.enable; });
+              (builtins.toJSON {
+                inherit (eval.config.services.frisket) enable;
+                signer = eval.config.services.frisket.signer.enable;
+                sudoGate = eval.config.services.frisket.sudoGate.enable;
+              });
 
-          # Every flong session is kept from the signer's and galley's sockets
-          # while the signer is enabled, and only then.
+          # Every flong session is kept from the signer's, the gate's and
+          # galley's sockets while the signer or the gate is enabled, and
+          # only then.
           flong-protect =
             let
-              protect = signer: (nixpkgs.lib.nixosSystem {
+              protect = signer: sudoGate: (nixpkgs.lib.nixosSystem {
                 inherit system;
                 modules = [
                   flong.nixosModules.default
                   self.nixosModules.flong
                   self.nixosModules.signer
+                  self.nixosModules.sudoGate
                   {
                     boot.isContainer = true;
                     system.stateVersion = "26.05";
                     services.frisket.flong.box.policy = "p";
                     services.frisket.signer.enable = signer;
+                    services.frisket.sudoGate.enable = sudoGate;
                   }
                 ];
               }).config.flong.box.protect;
-              want = {
-                on = [ "/run/frisket" "/run/frisket-signer" "/run/galley-ask" ];
-                off = [ "/run/frisket" ];
-              };
-              got = { on = protect true; off = protect false; };
+              on = [ "/run/frisket" "/run/frisket-signer" "/run/galley-ask" "/run/frisket-sudo" ];
+              want = { signer = on; sudoGate = on; off = [ "/run/frisket" ]; };
+              got = { signer = protect true false; sudoGate = protect false true; off = protect false false; };
             in
             assert nixpkgs.lib.assertMsg (got == want) "flong protect is ${builtins.toJSON got}, want ${builtins.toJSON want}";
             pkgs.writeText "frisket-flong-protect" "ok";
@@ -420,6 +431,69 @@
             in
             assert nixpkgs.lib.assertMsg (wrong == [ ]) "tss assertion judged wrongly: ${builtins.toJSON wrong}";
             pkgs.writeText "frisket-signer-tss" "ok";
+
+          # The gate refuses a sudo set-up it cannot gate safely: any auth
+          # rule beside the helper, pam_unix and pam_deny, another
+          # timestamp_type, rootpw, targetpw, runaspw, intercept,
+          # log_subcmds, or ptrace_scope 0.
+          sudo-gate-eval =
+            let
+              refused = extra: builtins.any (a: ! a.assertion)
+                (nixpkgs.lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.sudoGate
+                    {
+                      boot.isContainer = true;
+                      system.stateVersion = "26.05";
+                      services.frisket.sudoGate.enable = true;
+                    }
+                    extra
+                  ];
+                }).config.assertions;
+              sudoers = text: { security.sudo.extraConfig = text; };
+              wrong = builtins.filter (x: refused x.extra != x.want) [
+                { case = "none"; extra = { }; want = false; }
+                { case = "negated"; extra = sudoers "Defaults !rootpw, !intercept\nDefaults intercept_verify"; want = false; }
+                { case = "extra auth rule"; extra = { security.pam.services.sudo.fprintAuth = true; }; want = true; }
+                { case = "timestamp_type=global"; extra = sudoers "Defaults timestamp_type=global"; want = true; }
+                { case = "rootpw"; extra = sudoers "Defaults rootpw"; want = true; }
+                { case = "targetpw"; extra = sudoers "Defaults:dan targetpw"; want = true; }
+                { case = "runaspw"; extra = sudoers "Defaults runaspw"; want = true; }
+                { case = "intercept"; extra = sudoers "Defaults intercept"; want = true; }
+                { case = "log_subcmds"; extra = sudoers "Defaults log_subcmds"; want = true; }
+                { case = "ptrace_scope 0"; extra = { boot.kernel.sysctl."kernel.yama.ptrace_scope" = 0; }; want = true; }
+              ];
+            in
+            assert nixpkgs.lib.assertMsg (wrong == [ ]) "sudo gate assertions judged wrongly: ${builtins.toJSON (map (x: x.case) wrong)}";
+            pkgs.writeText "frisket-sudo-gate-eval" "ok";
+
+          # sudo.conf is not built from a plugin sudo would not load as
+          # frisket-sudo's audit plugin: a file that is not a library, a
+          # wrong symbol, or a plugin of another type (sudoers' policy).
+          sudo-conf =
+            let
+              plugin = self.packages.${system}.frisket-sudo-plugin;
+              conf = args: import ./nix/sudo-conf.nix { inherit pkgs plugin; } ({ version = pkgs.sudo.version; user = "dan"; } // args);
+              fails = args: pkgs.testers.testBuildFailure (conf args);
+            in
+            pkgs.runCommand "frisket-sudo-conf"
+              {
+                good = conf { };
+                broken = fails { so = "${pkgs.writeText "not-a-plugin.so" "not a library"}"; };
+                symbol = fails { symbol = "frisket_approval"; };
+                type = fails { so = "${pkgs.sudo}/libexec/sudo/sudoers.so"; symbol = "sudoers_policy"; };
+              }
+              ''
+                grep -qx "Plugin frisket_audit ${plugin}/lib/frisket_sudo.so user=dan" $good
+                grep -q "cannot load" $broken/testBuildFailure.log
+                grep -q "no symbol frisket_approval" $symbol/testBuildFailure.log
+                grep -q "is plugin type 1, not 3 (audit)" $type/testBuildFailure.log
+                touch $out
+              '';
+
+          # frisket-sudo as nixosModules.sudoGate runs it, with fakegalley, in a VM.
+          sudo-gate = pkgs.testers.runNixOSTest (import ./tests/sudo-gate.nix { inherit self; });
 
           # frisket-signer with a software TPM, two sshds and fakegalley, in a VM.
           signer = pkgs.testers.runNixOSTest (import ./tests/signer.nix { inherit self; });

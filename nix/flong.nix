@@ -143,7 +143,8 @@ in
           # outside, and no bind may reach it: a workload that could open the
           # socket would steer sessions, its own included.
           protect = [ (dirOf cfg.controlSocket) ]
-            ++ lib.optionals (cfg.signer.enable or false) [ "/run/frisket-signer" "/run/galley-ask" ];
+            ++ lib.optionals (cfg.signer.enable or false || cfg.sudoGate.enable or false)
+            [ "/run/frisket-signer" "/run/galley-ask" "/run/frisket-sudo" ];
           # Listeners, handed over, the rules, and the session's CA in its
           # mount namespace. A failure here ends the session: flong ends a
           # session whose hook exits non-zero.
