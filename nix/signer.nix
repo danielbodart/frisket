@@ -99,7 +99,7 @@ in
       description = "frisket-signer: a new key in the TPM, in /var/lib/frisket-signer/new";
       serviceConfig = tpm // {
         Type = "oneshot";
-        ExecStart = utils.escapeSystemdExecArgs [ signer "keygen" "-out" "/var/lib/frisket-signer/new" ];
+        ExecStart = utils.escapeSystemdExecArgs [ signer "keygen" "-out" "/var/lib/frisket-signer/new" "-comment" "${cfg.forUser}@${config.networking.hostName}" ];
         StateDirectory = [ "frisket-signer" "frisket-signer/new" ];
         StateDirectoryMode = "0700";
       };

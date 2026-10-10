@@ -82,6 +82,7 @@ Measured on both hosts (dan-blade, dan-desktop) unless marked; a file source is 
 - A checkout's devShell is code from whoever wrote the checkout; entering it in a host tab runs it as dan.
 - A trusted-tier session can write the host's `~/.claude`, `~/.codex` and cc-socks and so reach host sessions. Accepted: the end state is that nothing runs with host access.
 - Remote sudo (`ssh host 'sudo -S …'`) takes the stock exit before PAM [spike: one-hop-sudo S3 (approval variant), N4b]. Detached remote sudo (`ssh host 'setsid -f sh -c "sudo -S …"'`) loses its ssh ancestry [spike: R1], so it is gated locally: asked on the desktop, its `-S` password ignored, or refused with nobody to ask.
+- A git signature through a forwarder that sends no session-bind (OpenSSH before 8.9, an x/crypto tool) looks like a local `ssh-keygen -Y sign` and is silent. Only an unsandboxed dan process can run one; flong hides the socket. Stock signs silently.
 - An ssh blocked on the agent after the server's `LoginGraceTime` keeps its row until its launcher kills it.
 - A process that frisket.service starts (the asker, a hook) can double-fork to ppid 1 and name itself `frisket`, and then signs silently as frisket's main process. Stock signs for any dan process.
 - During M0.5, dan is in `tss`: dan-uid code can sign with the key and drive DA lockout. That is stock `ssh-tpm-agent`.

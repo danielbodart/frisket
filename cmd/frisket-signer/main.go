@@ -7,6 +7,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	stdlog "log"
 	"log/slog"
 	"net"
 	"os"
@@ -114,6 +116,7 @@ func runServe(argv []string) error {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	slog.SetDefault(log)
+	stdlog.SetOutput(io.Discard)
 
 	ln, err := agentListener()
 	if err != nil {
