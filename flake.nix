@@ -53,7 +53,7 @@
         env.FRISKET_REQUIRE_SWTPM = "1";
 
         ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
-        excludedPackages = [ "tests/fakegalley" ];
+        excludedPackages = [ "tests/fakegalley" "cmd/frisket-signer" ];
 
         # buildGoModule runs `go test ./...` here. The namespace tests create a
         # user+network namespace with clone flags and skip cleanly where the
@@ -106,6 +106,13 @@
             excludedPackages = [ ];
             doCheck = false;
             meta = old.meta // { mainProgram = "fakegalley"; };
+          });
+          frisket-signer = (mkFrisket pkgs).overrideAttrs (old: {
+            pname = "frisket-signer";
+            subPackages = [ "cmd/frisket-signer" ];
+            excludedPackages = [ ];
+            doCheck = false;
+            meta = old.meta // { mainProgram = "frisket-signer"; };
           });
         });
 
