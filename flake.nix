@@ -432,10 +432,7 @@
             assert nixpkgs.lib.assertMsg (wrong == [ ]) "tss assertion judged wrongly: ${builtins.toJSON wrong}";
             pkgs.writeText "frisket-signer-tss" "ok";
 
-          # The gate refuses a sudo set-up it cannot gate safely: any auth
-          # rule beside the helper, pam_unix and pam_deny, another
-          # timestamp_type, rootpw, targetpw, runaspw, intercept,
-          # log_subcmds, or ptrace_scope 0.
+          # The gate refuses a sudo set-up it cannot gate safely.
           sudo-gate-eval =
             let
               refused = extra: builtins.any (a: ! a.assertion)
@@ -457,20 +454,24 @@
                 { case = "negated"; extra = sudoers "Defaults !rootpw, !intercept\nDefaults intercept_verify"; want = false; }
                 { case = "extra auth rule"; extra = { security.pam.services.sudo.fprintAuth = true; }; want = true; }
                 { case = "timestamp_type=global"; extra = sudoers "Defaults timestamp_type=global"; want = true; }
+                { case = "!tty_tickets"; extra = sudoers "Defaults !tty_tickets"; want = true; }
+                { case = "tty_tickets"; extra = sudoers "Defaults tty_tickets"; want = false; }
                 { case = "rootpw"; extra = sudoers "Defaults rootpw"; want = true; }
                 { case = "targetpw"; extra = sudoers "Defaults:dan targetpw"; want = true; }
                 { case = "runaspw"; extra = sudoers "Defaults runaspw"; want = true; }
                 { case = "intercept"; extra = sudoers "Defaults intercept"; want = true; }
                 { case = "log_subcmds"; extra = sudoers "Defaults log_subcmds"; want = true; }
+                { case = "INTERCEPT tag"; extra = sudoers "dan ALL=(ALL) INTERCEPT: ALL"; want = true; }
+                { case = "LOG_SUBCMDS tag"; extra = sudoers "dan ALL=(ALL) LOG_SUBCMDS: ALL"; want = true; }
+                { case = "NOINTERCEPT tag"; extra = sudoers "dan ALL=(ALL) NOINTERCEPT: ALL"; want = false; }
+                { case = "INTERCEPT in extraRules"; extra = { security.sudo.extraRules = [{ users = [ "dan" ]; commands = [{ command = "ALL"; options = [ "INTERCEPT" ]; }]; }]; }; want = true; }
                 { case = "ptrace_scope 0"; extra = { boot.kernel.sysctl."kernel.yama.ptrace_scope" = 0; }; want = true; }
               ];
             in
             assert nixpkgs.lib.assertMsg (wrong == [ ]) "sudo gate assertions judged wrongly: ${builtins.toJSON (map (x: x.case) wrong)}";
             pkgs.writeText "frisket-sudo-gate-eval" "ok";
 
-          # sudo.conf is not built from a plugin sudo would not load as
-          # frisket-sudo's audit plugin: a file that is not a library, a
-          # wrong symbol, or a plugin of another type (sudoers' policy).
+          # sudo.conf is never built from a plugin sudo would not load.
           sudo-conf =
             let
               plugin = self.packages.${system}.frisket-sudo-plugin;

@@ -172,10 +172,11 @@ func cut16(b []byte) (field, rest []byte, ok bool) {
 }
 
 func writeReply(w io.Writer, kind byte, msg []byte) error {
-	b := make([]byte, 3, 3+len(msg))
+	b := make([]byte, 3+len(msg))
 	b[0] = kind
 	binary.BigEndian.PutUint16(b[1:], uint16(len(msg)))
-	_, err := w.Write(append(b, msg...))
+	copy(b[3:], msg)
+	_, err := w.Write(b)
 	clear(b)
 	return err
 }

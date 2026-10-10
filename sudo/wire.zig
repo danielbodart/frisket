@@ -1,11 +1,4 @@
 //! The sudo wire, version 1, between the Zig and the gate.
-//!
-//!   request := "FSUD" | u8 version=1 | u8 kind | u32be length | body
-//!   body    := record*      record := u8 tag | u32be len | bytes[len]
-//!   reply   := u8 'Y'|'N'|'W' | u16be len | bytes[len]
-//!
-//! user_info, settings, command_info, run_argv and run_envp go one record
-//! per entry, in order.
 
 const std = @import("std");
 const chain = @import("chain");

@@ -33,26 +33,31 @@ func rootOwned(program, user string) bool {
 }
 
 // dangers are the catalogue's reasons for words, a shell's -c string and
-// env's command classified by every simple command in them.
-func dangers(rules *execrule.Rules, words []string) []string {
+// env's command classified by every simple command in them. shell says
+// words run a shell whatever its name, as sudo -s and -i do. A shell run
+// any other way than with -c and then its string cannot be read.
+func dangers(rules *execrule.Rules, words []string, shell bool) []string {
 	words = slices.Clone(words)
 	words[0] = filepath.Base(words[0])
 	switch {
-	case (words[0] == "sh" || words[0] == "bash") && len(words) >= 3 && words[1] == "-c":
+	case shell || words[0] == "sh" || words[0] == "bash":
+		if len(words) < 3 || words[1] != "-c" || strings.HasPrefix(words[2], "-") || strings.HasPrefix(words[2], "+") {
+			return []string{unreadable}
+		}
 		cmds, ok := rules.Parse(words[2])
 		if !ok {
 			return []string{unreadable}
 		}
 		var reasons []string
 		for _, c := range cmds {
-			reasons = append(reasons, dangers(rules, c.Words)...)
+			reasons = append(reasons, dangers(rules, c.Words, false)...)
 		}
 		return reasons
 	case words[0] == "env" && len(words) > 1:
 		if strings.HasPrefix(words[1], "-") || strings.Contains(words[1], "=") {
 			return []string{unreadable}
 		}
-		return dangers(rules, words[1:])
+		return dangers(rules, words[1:], false)
 	}
 	if d := rules.DecideWords(words); d.Outcome == execrule.Ask && d.Rule != execrule.RuleUnmatched && d.Operation != nil {
 		return []string{d.Operation.Summary}

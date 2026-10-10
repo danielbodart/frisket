@@ -1,7 +1,4 @@
-//! The chain above sudo, read from /proc as root: from sudo's parent up the
-//! ppids to 16 links, pid 1, or the first link that cannot be read. Each
-//! link reads stat before and after its cmdline, and a starttime change
-//! cuts the chain there.
+//! The chain above sudo, read from /proc as root.
 
 const std = @import("std");
 const fd = @import("fd");

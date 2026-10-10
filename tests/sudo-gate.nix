@@ -341,7 +341,7 @@ in
         machine.succeed("touch /run/fakegalley/go")
         machine.wait_until_succeeds("grep -q rc= /run/fakegalley/ticket.out")
         out = machine.succeed("cat /run/fakegalley/ticket.out")
-        assert "rc=0" not in out and gate_not_running in out, out
+        assert "rc=0" not in out and "frisket_audit: unable to log accept event: gate not running" in out, out
         start_gate()
 
     with subtest("-v and -l fail as stock with no check-in, and the next sudo is asked"):

@@ -57,8 +57,9 @@ The module sets `Defaults noninteractive_auth` and `Defaults
 timestamp_type=tty`, and evaluation fails when:
 
 - sudo's auth stack is anything but the helper, `pam_unix`, `pam_deny`;
-- sudoers sets another `timestamp_type`, or `rootpw`, `targetpw`,
-  `runaspw`, `intercept` or `log_subcmds`;
+- sudoers sets another `timestamp_type` (`!tty_tickets` included), or
+  `rootpw`, `targetpw`, `runaspw`, `intercept` or `log_subcmds` (as
+  options or as `INTERCEPT:` and `LOG_SUBCMDS:` tags);
 - `kernel.yama.ptrace_scope` is 0.
 
 `/etc/sudo.conf` is built only once `frisket-sudo-check-plugin` has loaded
@@ -83,8 +84,10 @@ the one checked. `sudo -n` gets the dialog too.
 - **Danger**: a `systemctl` on `frisket*`, `galley*`, `sshd*`,
   `nftables*` or `debug-shell*`, a program outside
   `/run/current-system/sw/bin`, `/run/wrappers/bin` and
-  `/etc/profiles/per-user/<user>/bin`, or an `sh -c` or `env` whose inner
-  command is either or cannot be read. Shown with galley's danger banner,
+  `/etc/profiles/per-user/<user>/bin`, or an `sh -c`, `bash -c`, `sudo -s`,
+  `sudo -i` or `env` whose inner command is either or cannot be read. A
+  shell run any other way (`bash -lc`, `bash script.sh`, a bare `sudo -s`)
+  cannot be read. Shown with galley's danger banner,
   always asked, never opens a window; its dialog has no time field.
 - **Warning**: a process chain cut short, or launched straight from
   `systemd --user`. No time field.

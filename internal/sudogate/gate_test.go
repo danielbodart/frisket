@@ -358,6 +358,14 @@ func TestAnAOrVOffACheckInConnectionIsRefused(t *testing.T) {
 	c.send(frame(kindCheckIn))
 	c.want(replyNo, "")
 	h.none()
+
+	c = h.sudo(502)
+	c.send(approval(restart(claude(100), "foo")))
+	h.next().reply <- answered{}
+	c.want(replyNo, "cancelled")
+	c.send(approval(restart(claude(100), "foo")))
+	c.want(replyNo, "")
+	h.none()
 }
 
 func TestAWrongPasswordBringsTheDialogBack(t *testing.T) {
@@ -406,6 +414,7 @@ func TestCancelAndNobodyAreRefusals(t *testing.T) {
 	c.send(approval(restart(claude(100), "foo")))
 	h.next().reply <- answered{}
 	c.want(replyNo, "cancelled")
+	c = h.sudo(501)
 	c.send(approval(restart(claude(100), "foo")))
 	h.next().reply <- answered{err: galleyask.ErrNobody}
 	c.want(replyNo, "no one to ask; use a terminal")
@@ -568,9 +577,11 @@ func TestTheWindowCountsOnlyAnswersFromThePinnedGalley(t *testing.T) {
 	if log := h.log.String(); !strings.Contains(log, `"source":"not the pinned galley"`) || !strings.Contains(log, `"pin_pid":900`) {
 		t.Errorf("the journal does not name the pin:\n%s", h.log.String())
 	}
+	c = h.sudo(501)
 	c.send(approval(restart(claude(100), "foo")))
 	h.next().reply <- allow(900)
 	c.want(replyYes, "")
+	c = h.sudo(502)
 	c.send(approval(restart(claude(100), "foo")))
 	h.next().reply <- answered{}
 	c.want(replyNo, "refused")
@@ -622,6 +633,7 @@ func TestTheDialogShowsTheChainAndTheResolvedCommand(t *testing.T) {
 	}
 	a.reply <- answered{}
 	c.read()
+	c = h.sudo(501)
 	c.send(approval(restart(claude(100), "sshd.service")))
 	a = h.next()
 	want = "touches a unit that guards this machine\n\nclaude (pid 100) ← bash\n/run/current-system/sw/bin/systemctl restart sshd.service"
@@ -710,6 +722,15 @@ func TestShellAndEnvWrappersAreClassifiedByEveryInnerCommand(t *testing.T) {
 		{sudoCmd{program: bin + "env", argv: []string{"env", "sh", "-c", "env systemctl stop sshd"}}, []string{guard}},
 		{sudoCmd{program: bin + "bash", argv: []string{"-bash", "-c", `systemctl stop sshd\.service`}, settings: []string{"login_shell=true"}}, []string{guard}},
 		{sudoCmd{program: bin + "bash", argv: []string{"bash", "-c", `ls\ \-l`}, settings: []string{"run_shell=true"}}, nil},
+		{sudoCmd{program: bin + "zsh", argv: []string{"zsh", "-c", `systemctl\ stop\ sshd`}, settings: []string{"run_shell=true"}}, []string{guard}},
+		{sudoCmd{program: bin + "zsh", argv: []string{"zsh"}, settings: []string{"run_shell=true"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "bash", argv: []string{"bash", "-ec", "systemctl stop sshd"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "bash", argv: []string{"bash", "-x", "-c", "systemctl stop sshd"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "sh", argv: []string{"sh", "-c", "--", "systemctl stop sshd"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "bash", argv: []string{"bash", "-c", `"$0" stop sshd`, "systemctl"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "bash", argv: []string{"bash"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "bash", argv: []string{"bash", "/tmp/x.sh"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "env", argv: []string{"env", "bash", "-lc", "id"}}, []string{unreadable}},
 	} {
 		tc.cmd.links = claude(100)
 		a := h.describe(tc.cmd)
@@ -764,9 +785,25 @@ func FuzzNoRequestCrashesTheGate(f *testing.F) {
 		}
 		defer cc.Close()
 		go func() {
+			defer cc.(*net.UnixConn).CloseWrite()
+			for len(b) >= 10 {
+				n := 10 + uint64(binary.BigEndian.Uint32(b[6:10]))
+				if n > uint64(len(b)) {
+					break
+				}
+				if _, err := cc.Write(b[:n]); err != nil {
+					return
+				}
+				b = b[n:]
+				var h [3]byte
+				if _, err := io.ReadFull(cc, h[:]); err != nil {
+					return
+				}
+				if _, err := io.CopyN(io.Discard, cc, int64(binary.BigEndian.Uint16(h[1:]))); err != nil {
+					return
+				}
+			}
 			cc.Write(b)
-			cc.(*net.UnixConn).CloseWrite()
-			io.Copy(io.Discard, cc)
 		}()
 		log := &lockedBuffer{}
 		g := &Gate{

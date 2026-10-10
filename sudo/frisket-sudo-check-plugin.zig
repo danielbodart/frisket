@@ -1,7 +1,5 @@
-//! frisket-sudo-check-plugin SO SYMBOL SUDO_VERSION, at build time: loads the
-//! plugin as sudo would and fails unless SYMBOL is an audit plugin of this
-//! sudo_plugin.h's API major, built for SUDO_VERSION. sudo loads a plugin
-//! of the wrong type without complaint and every sudo then segfaults.
+//! frisket-sudo-check-plugin SO SYMBOL SUDO_VERSION: fails unless SYMBOL is
+//! an audit plugin of this API major built for SUDO_VERSION.
 
 const std = @import("std");
 const abi = @import("abi");

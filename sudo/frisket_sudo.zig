@@ -1,11 +1,4 @@
-//! frisket_audit, the audit plugin sudo loads from sudo.conf with the
-//! option user=<forUser>. open(), before PAM, decides whether this sudo is
-//! gated and checks it in with the gate; accept(), on the policy plugin's
-//! accept, asks the gate and, when the gate passes on the dialog's password,
-//! verifies it on the frisket-sudo PAM service.
-//!
-//! open() always returns 1: 0 would unload the plugin and -1 is fatal to
-//! every sudo. It touches no handle until it has decided to gate.
+//! frisket_audit, the audit plugin sudo loads with the option user=<forUser>.
 
 const std = @import("std");
 const abi = @import("abi");
@@ -50,8 +43,7 @@ fn lookup(a: wire.CArray, key: []const u8) ?[*:0]const u8 {
     return null;
 }
 
-/// The gating test without the mode: the invoking user is the user= option,
-/// there is no tty, and the chain is not remote. Fills `links`; the count.
+/// The gating test without the mode. Fills `links`; the count.
 fn local(user: [*:0]const u8) ?usize {
     const name = lookup(user_info, "user") orelse return null;
     if (!std.mem.eql(u8, std.mem.span(name), std.mem.span(user))) return null;
@@ -102,8 +94,7 @@ fn checkIn() !fd.Sock {
 
 const Got = struct { reply: wire.Reply, body: []u8 };
 
-/// A reply into reply_buf, NUL-terminated after its body. A reply cut off
-/// leaves none of its bytes there.
+/// A reply into reply_buf, NUL-terminated after its body.
 fn readReply(s: fd.Sock, password_ok: bool) !Got {
     errdefer std.crypto.secureZero(u8, &reply_buf);
     var h: [3]u8 = undefined;
@@ -204,12 +195,8 @@ fn verify(user: [*:0]const u8, password: [*:0]const u8) bool {
     return rc == c.PAM_SUCCESS;
 }
 
-/// Whether sudo's arguments say -v or -l, read before submit_optind as
-/// sudo's getopt_long reads them (src/parse_args.c): an option's argument
-/// is skipped, attached or separate; a word that is no option, an
-/// environment assignment or -h's host, is passed over; `--` ends the
-/// options; and a long option is any unambiguous prefix of its name.
-/// Invoked as sudoedit, neither can be given.
+/// Whether sudo's arguments before submit_optind say -v or -l, as sudo's
+/// getopt_long reads them (src/parse_args.c).
 pub fn listOrValidate(argv: [*c]const [*c]u8, optind: c_int) bool {
     if (argv == null or argv[0] == null or optind < 1) return false;
     if (sudoedit(std.mem.span(@as([*:0]const u8, argv[0])))) return false;
@@ -282,9 +269,7 @@ const long_opts = [_]Long{
     .{ .name = "version", .arg = .none, .short = 'V' },
 };
 
-/// glibc's getopt_long match: the exact name, else the option a prefix
-/// names. An ambiguous prefix is an error to sudo, which then never calls
-/// open().
+/// glibc's getopt_long match: the exact name, else the first prefix match.
 fn long(name: []const u8) ?Long {
     for (long_opts) |o| {
         if (std.mem.eql(u8, o.name, name)) return o;

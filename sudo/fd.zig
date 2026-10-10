@@ -1,11 +1,5 @@
-//! The descriptors frisket-sudo keeps, as generation-checked handles: flong's
-//! src/fd.zig cut down to the one kind the plugin and the PAM helper hold, a
-//! connection to the gate. A handle is a slot and a generation, so a copy
-//! used after `close` panics instead of reaching whatever reused the number.
-//!
-//! `readFile` is the one other way a descriptor is opened, and it never
-//! leaves the function: open() reads /proc with it before deciding whether
-//! to gate, when it may touch no handle.
+//! flong's src/fd.zig cut down to the gate connection, as generation-checked
+//! handles; readFile's descriptor never leaves it.
 
 const std = @import("std");
 const linux = std.os.linux;

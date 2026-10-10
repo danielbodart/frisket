@@ -4,6 +4,7 @@
 package sudogate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -48,8 +49,6 @@ type window struct {
 	until  time.Duration
 	galley proc
 }
-
-const maxWindow = 24 * time.Hour
 
 func (g *Gate) Serve(ln *net.UnixListener) error {
 	if err := g.init(); err != nil {
@@ -107,6 +106,7 @@ type session struct {
 	g       *Gate
 	c       *net.UnixConn
 	peer    peer.Proc
+	asked   bool
 	pending *sudoReq
 }
 
@@ -150,7 +150,8 @@ func (s *session) run() {
 			return
 		}
 		switch {
-		case req.kind == kindApproval && s.pending == nil:
+		case req.kind == kindApproval && !s.asked:
+			s.asked = true
 			s.approve(req)
 		case req.kind == kindVerify && s.pending != nil:
 			s.verify(req)
@@ -232,10 +233,11 @@ func (g *Gate) describe(req *request) (*sudoReq, error) {
 	if !rootOwned(program, g.User) {
 		a.danger = append(a.danger, outsideLine(program))
 	}
-	if (settings["run_shell"] == "true" || settings["login_shell"] == "true") && len(words) >= 3 && words[1] == "-c" {
+	shell := settings["run_shell"] == "true" || settings["login_shell"] == "true"
+	if shell && len(words) >= 3 && words[1] == "-c" {
 		words[2] = unescape(words[2])
 	}
-	for _, d := range dangers(g.danger, words) {
+	for _, d := range dangers(g.danger, words, shell) {
 		if !slices.Contains(a.danger, d) {
 			a.danger = append(a.danger, d)
 		}
@@ -362,7 +364,7 @@ func (s *session) verify(req *request) {
 		s.reply(replyYes, "")
 		return
 	}
-	until := a.answeredAt + min(a.answer.For, maxWindow)
+	until := a.answeredAt + a.answer.For
 	pin := proc{a.answer.Galley.Pid, a.answer.Galley.Start}
 	s.g.open(proc{a.r.Anchor.Pid, a.r.Anchor.Start}, window{until: until, galley: pin})
 	at := time.Now().Add(until - s.g.now()).Format("15:04")
@@ -398,7 +400,7 @@ func (s *session) decide(a *sudoReq, wrong bool) {
 			a.answer = got
 			s.record(a, "refuse", "cancelled", nil)
 			s.reply(replyNo, "cancelled")
-		case len(got.Password) == 0 || len(got.Password) > maxPassword || strings.ContainsAny(string(got.Password), "\x00\n"):
+		case len(got.Password) == 0 || len(got.Password) > maxPassword || bytes.ContainsAny(got.Password, "\x00\n"):
 			clear(got.Password)
 			continue
 		default:

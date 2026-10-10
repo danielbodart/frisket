@@ -19,8 +19,9 @@ let
 
   sudoers = lib.filter (l: !lib.hasPrefix "#" (lib.trim l)) (lib.splitString "\n" config.security.sudo.configFile);
   matches = re: lib.concatMap (l: lib.filter lib.isList (builtins.split re l)) sudoers;
-  timestampTypes = lib.unique (map lib.head (matches "timestamp_type[[:space:]]*=[[:space:]]*\"?([A-Za-z]*)"));
-  refused = lib.unique (map (m: lib.elemAt m 1) (matches "(^|[^!A-Za-z_])(rootpw|targetpw|runaspw|intercept|log_subcmds)([^A-Za-z_]|$)"));
+  timestampTypes = lib.unique (map lib.head (matches "timestamp_type[[:space:]]*=[[:space:]]*\"?([A-Za-z]*)")
+    ++ map (_: "global") (matches "(^|[^!])![[:space:]]*(tty_tickets)([^A-Za-z_]|$)"));
+  refused = lib.unique (map (m: lib.elemAt m 1) (matches "(^|[^!A-Za-z_])(rootpw|targetpw|runaspw|intercept|log_subcmds|INTERCEPT|LOG_SUBCMDS)([^A-Za-z_]|$)"));
 
   ptraceScope = config.boot.kernel.sysctl."kernel.yama.ptrace_scope" or null;
 in
