@@ -68,6 +68,34 @@ func TestADeadPidfdIsNeverRoot(t *testing.T) {
 	}
 }
 
+func TestAPeerProcIsItsPidAndParentWithTheirStarttimes(t *testing.T) {
+	c, cmd := accept(t, "exit")
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := ProcOf(c); err == nil {
+		t.Errorf("a reaped peer resolved to %+v", p)
+	}
+
+	c, cmd = accept(t, "stay")
+	p, err := ProcOf(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := readStat("/proc/self")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.UID != os.Getuid() || p.Pid != cmd.Process.Pid || p.PPid != os.Getpid() || p.PPidStart != self.Start || !Alive(p.Pid, p.Start) {
+		t.Errorf("a live peer resolved to %+v", p)
+	}
+	c.Close()
+	_ = cmd.Wait()
+	if Alive(p.Pid, p.Start) {
+		t.Error("a reaped peer is alive")
+	}
+}
+
 func TestOnlyFrisketsMainProcessIsTrusted(t *testing.T) {
 	cgroupRoot = t.TempDir()
 	t.Cleanup(func() { cgroupRoot = "/sys/fs/cgroup" })

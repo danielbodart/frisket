@@ -1,0 +1,7 @@
+[
+  {"command":"systemctl **","arg":"frisket*","ask":true,"operation":{"id":"guard-unit","summary":"touches a unit that guards this machine"}},
+  {"command":"systemctl **","arg":"galley*","ask":true,"operation":{"id":"guard-unit","summary":"touches a unit that guards this machine"}},
+  {"command":"systemctl **","arg":"sshd*","ask":true,"operation":{"id":"guard-unit","summary":"touches a unit that guards this machine"}},
+  {"command":"systemctl **","arg":"nftables*","ask":true,"operation":{"id":"guard-unit","summary":"touches a unit that guards this machine"}},
+  {"command":"systemctl **","arg":"debug-shell*","ask":true,"operation":{"id":"guard-unit","summary":"touches a unit that guards this machine"}}
+]

@@ -87,6 +87,44 @@ func FromConn(c *net.UnixConn) (*Requester, error) {
 	return r, nil
 }
 
+// Proc is a peer process alone: its SO_PEERCRED uid, and its pid and kernel
+// ppid from SO_PEERPIDFD, each with its starttime. PPidStart is 0 when the
+// parent cannot be read.
+type Proc struct {
+	UID, Pid, PPid   int
+	Start, PPidStart uint64
+}
+
+func ProcOf(c *net.UnixConn) (Proc, error) {
+	cred, pidfd, err := credentials(c)
+	if err != nil {
+		return Proc{}, err
+	}
+	defer unix.Close(pidfd)
+	info, err := pidfdInfo(pidfd)
+	if err != nil {
+		return Proc{}, err
+	}
+	self, err := readStat("/proc/" + strconv.Itoa(int(info.Pid)))
+	if err != nil {
+		return Proc{}, err
+	}
+	if _, err := pidfdInfo(pidfd); err != nil {
+		return Proc{}, err
+	}
+	p := Proc{UID: int(cred.Uid), Pid: int(info.Pid), PPid: int(info.Ppid), Start: self.Start}
+	if parent, err := readStat("/proc/" + strconv.Itoa(p.PPid)); err == nil {
+		p.PPidStart = parent.Start
+	}
+	return p, nil
+}
+
+// Alive is whether pid is still the process that started at start.
+func Alive(pid int, start uint64) bool {
+	l, err := readStat("/proc/" + strconv.Itoa(pid))
+	return err == nil && l.Start == start
+}
+
 // FromLinks resolves a chain collected elsewhere, leaf first.
 func FromLinks(links []Link) *Requester {
 	r := resolve(links)

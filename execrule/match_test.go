@@ -1,6 +1,7 @@
 package execrule
 
 import (
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -680,6 +681,22 @@ func TestAReadableCommandIsDecidedByItsOnlyMatchingRule(t *testing.T) {
 		command := pad + strings.Join(ws, pad+" ") + pad
 		if d := decide([]rule{r}, Refuse, command); d.Outcome != outcome || d.Rule != pattern {
 			t.Fatalf("%q under %q: got %v by %q", command, pattern, d.Outcome, d.Rule)
+		}
+	})
+}
+
+// A command read as one simple command is decided by its words as Decide
+// decides the string.
+func TestDecideWordsAgreesWithDecideOnReadableStrings(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		r := &Rules{rules: drawRules(t), unmatched: rapid.SampledFrom([]Outcome{Ask, Refuse}).Draw(t, "unmatched")}
+		command := drawCommand(t)
+		cmds, ok := r.Parse(command)
+		if !ok || len(cmds) != 1 {
+			t.Skip("not one readable simple command")
+		}
+		if got, want := r.DecideWords(cmds[0].Words), r.Decide(command); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%q: DecideWords(%q) = %+v, Decide = %+v", command, cmds[0].Words, got, want)
 		}
 	})
 }

@@ -53,7 +53,7 @@
         env.FRISKET_REQUIRE_SWTPM = "1";
 
         ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
-        excludedPackages = [ "tests/fakegalley" "tests/agenttamper" "cmd/frisket-signer" ];
+        excludedPackages = [ "tests/fakegalley" "tests/agenttamper" "cmd/frisket-signer" "cmd/frisket-sudo" ];
 
         # `go test ./...` rather than buildGoModule's own check, which would
         # leave out the excluded packages' tests. The namespace tests create a
@@ -131,6 +131,13 @@
             excludedPackages = [ ];
             doCheck = false;
             meta = old.meta // { mainProgram = "frisket-signer"; };
+          });
+          frisket-sudo = (mkFrisket pkgs).overrideAttrs (old: {
+            pname = "frisket-sudo";
+            subPackages = [ "cmd/frisket-sudo" ];
+            excludedPackages = [ ];
+            doCheck = false;
+            meta = old.meta // { mainProgram = "frisket-sudo"; };
           });
         });
 

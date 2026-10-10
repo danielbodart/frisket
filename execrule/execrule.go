@@ -184,11 +184,28 @@ func checkEnv(names []string) ([]string, error) {
 func (r *Rules) Decide(command string) Decision {
 	cmds, ok := r.Parse(command)
 	if !ok {
-		if r.shell {
-			return Decision{Outcome: Refuse, Rule: RuleUnmatched}
-		}
-		return Decision{Outcome: r.unmatched, Rule: RuleUnmatched}
+		return r.unreadable()
 	}
+	return r.decision(cmds)
+}
+
+// DecideWords is the rules' answer for one simple command already split into
+// words, as Decide gives for a command it reads as those words.
+func (r *Rules) DecideWords(words []string) Decision {
+	if len(words) == 0 {
+		return r.unreadable()
+	}
+	return r.decision([]Simple{{Words: words}})
+}
+
+func (r *Rules) unreadable() Decision {
+	if r.shell {
+		return Decision{Outcome: Refuse, Rule: RuleUnmatched}
+	}
+	return Decision{Outcome: r.unmatched, Rule: RuleUnmatched}
+}
+
+func (r *Rules) decision(cmds []Simple) Decision {
 	var (
 		d   Decision
 		ops []*policy.Operation

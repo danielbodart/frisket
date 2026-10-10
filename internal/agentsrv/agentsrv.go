@@ -11,23 +11,19 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime/debug"
 	"strings"
-	"unicode"
 
 	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/internal/grant"
 	"github.com/danielbodart/frisket/internal/peer"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/sys/unix"
 )
 
 type Rule string
@@ -57,10 +53,7 @@ type Server struct {
 	ask     func(context.Context, string, galleyask.Question) (galleyask.Answer, error)
 }
 
-const (
-	maxBinds = 16
-	maxArg   = 1000
-)
+const maxBinds = 16
 
 const (
 	classBound   = "bound userauth"
@@ -284,7 +277,7 @@ type answered struct {
 func (c *conn) ask(req *request) verdict {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop, err := watchHangUp(c.c, c.s.Log, cancel)
+	stop, err := galleyask.WatchHangUp(c.c, c.s.Log, cancel)
 	if err != nil {
 		return verdict{source: "nobody", err: err}
 	}
@@ -327,48 +320,6 @@ func (c *conn) keep(req *request, got answered) {
 	}
 }
 
-// watchHangUp calls hungUp if c's peer hangs up before stop is called.
-func watchHangUp(c *net.UnixConn, log *slog.Logger, hungUp func()) (stop func(), err error) {
-	efd, err := unix.Eventfd(0, unix.EFD_CLOEXEC)
-	if err != nil {
-		return nil, err
-	}
-	watching := make(chan struct{})
-	go func() {
-		defer close(watching)
-		defer func() {
-			if p := recover(); p != nil {
-				log.Error("request panicked", "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
-			}
-		}()
-		if pollHangUp(c, efd) {
-			hungUp()
-		}
-	}()
-	return func() {
-		_, _ = unix.Write(efd, binary.NativeEndian.AppendUint64(nil, 1))
-		<-watching
-		unix.Close(efd)
-	}, nil
-}
-
-func pollHangUp(c *net.UnixConn, stop int) (hungUp bool) {
-	rc, err := c.SyscallConn()
-	if err != nil {
-		return false
-	}
-	_ = rc.Control(func(fd uintptr) {
-		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLRDHUP}, {Fd: int32(stop), Events: unix.POLLIN}}
-		for {
-			if _, err := unix.Poll(fds, -1); err != unix.EINTR {
-				break
-			}
-		}
-		hungUp = fds[0].Revents != 0
-	})
-	return hungUp
-}
-
 func (c *conn) record(req *request, v verdict) {
 	outcome := "refuse"
 	if v.sign {
@@ -396,14 +347,8 @@ func (c *conn) describe(req *request) {
 	req.keyFP = ssh.FingerprintSHA256(pub)
 
 	var title string
-	var lines []string
-	if r.SessionRoot {
-		lines = append(lines, "launched through "+sessionRoot(r.Anchor))
-	}
-	if r.Cut {
-		lines = append(lines, "the process chain was cut short")
-	}
-	lines = append(lines, chainText(r), fmt.Sprintf("key %s (%s)", req.keyFP, clean(req.key.Comment)))
+	lines := galleyask.Warnings(r)
+	lines = append(lines, chainText(r), fmt.Sprintf("key %s (%s)", req.keyFP, galleyask.Clean(req.key.Comment)))
 	if req.fwd {
 		lines = append(lines, "forwarded")
 	}
@@ -414,7 +359,7 @@ func (c *conn) describe(req *request) {
 		req.known = len(names) > 0
 		if req.known {
 			for i, n := range names {
-				names[i] = clean(n)
+				names[i] = galleyask.Clean(n)
 			}
 			req.dest = strings.Join(names, ", ")
 		} else {
@@ -433,7 +378,7 @@ func (c *conn) describe(req *request) {
 		}
 	case classSSHSIG:
 		title = "SSHSIG signature"
-		lines = append(lines, fmt.Sprintf("SSHSIG namespace %q", clean(req.namespace)))
+		lines = append(lines, fmt.Sprintf("SSHSIG namespace %q", galleyask.Clean(req.namespace)))
 	}
 	if req.grantable {
 		req.grant = grant.Key{
@@ -444,7 +389,7 @@ func (c *conn) describe(req *request) {
 		if req.fwd {
 			what = "forwarded signs to " + req.dest
 		}
-		lines = append(lines, fmt.Sprintf("A grant covers %s from %s (pid %d).", what, name(*r.Anchor), r.Anchor.Pid))
+		lines = append(lines, fmt.Sprintf("A grant covers %s from %s (pid %d).", what, galleyask.Name(*r.Anchor), r.Anchor.Pid))
 	}
 	level := "normal"
 	if r.Cut || r.SessionRoot {
@@ -471,16 +416,6 @@ func (c *conn) knownHosts() map[string][]string {
 	return names
 }
 
-func sessionRoot(a *peer.Link) string {
-	switch {
-	case a.Pid == 1:
-		return "pid 1"
-	case a.Comm == ".kgx-wrapped":
-		return "the terminal server"
-	}
-	return "systemd --user"
-}
-
 // chainText runs from the anchor, or the top of the chain, down to the
 // leaf, leaving out the shells between them.
 func chainText(r *peer.Requester) string {
@@ -495,14 +430,14 @@ func chainText(r *peer.Requester) string {
 		l := r.Chain[i]
 		switch {
 		case i == top:
-			parts = append(parts, name(l))
+			parts = append(parts, galleyask.Name(l))
 		case i == 0 || !shells[l.Comm]:
 			args := make([]string, len(l.Cmdline))
 			for j, a := range l.Cmdline {
-				args[j] = clean(a)
+				args[j] = galleyask.Clean(a)
 			}
 			if len(args) == 0 {
-				args = []string{clean(l.Comm)}
+				args = []string{galleyask.Clean(l.Comm)}
 			}
 			parts = append(parts, strings.Join(args, " "))
 		}
@@ -511,29 +446,3 @@ func chainText(r *peer.Requester) string {
 }
 
 var shells = map[string]bool{"bash": true, "sh": true, "zsh": true, "fish": true, "dash": true}
-
-// name is the program a link runs, by its argv0, since comm is cut at 15
-// characters and a wrapped program's comm is its wrapper's.
-func name(l peer.Link) string {
-	if len(l.Cmdline) > 0 && l.Cmdline[0] != "" {
-		return clean(filepath.Base(l.Cmdline[0]))
-	}
-	return clean(l.Comm)
-}
-
-// clean cuts s at maxArg characters and escapes control, bidi and line
-// separator characters.
-func clean(s string) string {
-	if r := []rune(s); len(r) > maxArg {
-		s = string(r[:maxArg])
-	}
-	var b strings.Builder
-	for _, r := range s {
-		if unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control, unicode.Zl, unicode.Zp) {
-			fmt.Fprintf(&b, `\u%04x`, r)
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}

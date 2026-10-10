@@ -7,6 +7,7 @@ import (
 	"net"
 	"runtime/debug"
 
+	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/internal/peer"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -96,7 +97,7 @@ func (c *gitConn) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.Sign
 }
 
 func (c *gitConn) Extension(typ string, _ []byte) ([]byte, error) {
-	c.refuse("extension "+clean(typ), "", "")
+	c.refuse("extension "+galleyask.Clean(typ), "", "")
 	return nil, agent.ErrExtensionUnsupported
 }
 
@@ -115,7 +116,7 @@ func (c *gitConn) upstream(f func(agent.ExtendedAgent) error) error {
 		return err
 	}
 	defer u.Close()
-	stop, err := watchHangUp(c.c, c.g.Log, func() { u.Close() })
+	stop, err := galleyask.WatchHangUp(c.c, c.g.Log, func() { u.Close() })
 	if err != nil {
 		return err
 	}
@@ -124,7 +125,7 @@ func (c *gitConn) upstream(f func(agent.ExtendedAgent) error) error {
 }
 
 func (c *gitConn) refuse(op, namespace, reason string) error {
-	c.g.Log.Info("decision", "policy", c.g.Policy, "pid", c.pid, "op", op, "namespace", clean(namespace), "outcome", "refuse", "reason", reason)
+	c.g.Log.Info("decision", "policy", c.g.Policy, "pid", c.pid, "op", op, "namespace", galleyask.Clean(namespace), "outcome", "refuse", "reason", reason)
 	return errRefused
 }
 

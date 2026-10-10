@@ -755,15 +755,6 @@ func TestTheQuestionNamesTheRequesterOnceAndLeavesOutTheShells(t *testing.T) {
 	wait(t, done)
 }
 
-func TestTextEscapesControlAndBidiCharactersAndCutsEachArgument(t *testing.T) {
-	if got := clean("a\x1b[2J\u202eb\n\u2028c\u2029"); got != `a\u001b[2J\u202eb\u000a\u2028c\u2029` {
-		t.Errorf("got %q", got)
-	}
-	if got := clean(strings.Repeat("é", 1500)); len([]rune(got)) != maxArg {
-		t.Errorf("cut to %d characters", len([]rune(got)))
-	}
-}
-
 func frame(typ byte, payload []byte) []byte {
 	return append(ssh.Marshal(struct {
 		N   uint32
