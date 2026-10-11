@@ -10,11 +10,12 @@ pub fn build(b: *std.Build) void {
     const dev = b.option(bool, "dev", "Enable the steps that need lazy dependencies: test, analyze") orelse false;
     const sudo_version = b.option([]const u8, "sudo-version", "The sudo version the plugin is built for");
     const misread = b.option(bool, "misread-mode", "Build a plugin whose mode test always says -v") orelse false;
+    const log_ids = b.option(bool, "log-ids", "Build a plugin that prints its ids before the drop and after the restore") orelse false;
     const oracle = b.option([]const u8, "oracle", "sudo's parse_args built as a test oracle (sudo/oracle)");
 
     const install = b.getInstallStep();
     if (sudo_version) |v| {
-        const cfg = config(b, gate_path, gate_uid, if (misread) .misread else .stock, v);
+        const cfg = config(b, gate_path, gate_uid, if (misread) .misread else if (log_ids) .log_ids else .stock, v);
         const lib = plugin(b, target, optimize, modules(b, target, optimize), cfg, true);
         install.dependOn(&b.addInstallFileWithDir(lib.getEmittedBin(), .lib, "frisket_sudo.so").step);
         b.installArtifact(pamHelper(b, target, optimize, cfg, true));
@@ -146,8 +147,8 @@ pub fn build(b: *std.Build) void {
 }
 
 /// A test build's misread mode test always says -v; its remote one takes
-/// every chain for remote.
-const Build = enum { stock, misread, remote };
+/// every chain for remote; its log_ids one prints the ids around the drop.
+const Build = enum { stock, misread, remote, log_ids };
 
 fn config(b: *std.Build, path: []const u8, uid: u32, kind: Build, sudo_version: []const u8) *std.Build.Module {
     const opts = b.addOptions();
@@ -155,6 +156,7 @@ fn config(b: *std.Build, path: []const u8, uid: u32, kind: Build, sudo_version: 
     opts.addOption(u32, "gate_uid", uid);
     opts.addOption(bool, "misread_mode", kind == .misread);
     opts.addOption(bool, "force_remote", kind == .remote);
+    opts.addOption(bool, "log_ids", kind == .log_ids);
     opts.addOption([]const u8, "sudo_version", sudo_version);
     return opts.createModule();
 }

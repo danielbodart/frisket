@@ -449,6 +449,7 @@
                   ];
                 }).config.assertions;
               sudoers = text: { security.sudo.extraConfig = text; };
+              remote = { services.frisket.sudoGate.remoteKeys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl a" ]; };
               wrong = builtins.filter (x: refused x.extra != x.want) [
                 { case = "none"; extra = { }; want = false; }
                 { case = "negated"; extra = sudoers "Defaults !rootpw, !intercept\nDefaults intercept_verify"; want = false; }
@@ -467,6 +468,8 @@
                 { case = "NOINTERCEPT tag"; extra = sudoers "dan ALL=(ALL) NOINTERCEPT: ALL"; want = false; }
                 { case = "INTERCEPT in extraRules"; extra = { security.sudo.extraRules = [{ users = [ "dan" ]; commands = [{ command = "ALL"; options = [ "INTERCEPT" ]; }]; }]; }; want = true; }
                 { case = "ptrace_scope 0"; extra = { boot.kernel.sysctl."kernel.yama.ptrace_scope" = 0; }; want = true; }
+                { case = "remote keys"; extra = remote; want = false; }
+                { case = "remote keys and an extra auth rule"; extra = { imports = [ remote ]; security.pam.services.sudo.fprintAuth = true; }; want = true; }
               ];
             in
             assert nixpkgs.lib.assertMsg (wrong == [ ]) "sudo gate assertions judged wrongly: ${builtins.toJSON (map (x: x.case) wrong)}";
@@ -482,12 +485,14 @@
             pkgs.runCommand "frisket-sudo-conf"
               {
                 good = conf { };
+                remote = conf { remote = true; };
                 broken = fails { so = "${pkgs.writeText "not-a-plugin.so" "not a library"}"; };
                 symbol = fails { symbol = "frisket_approval"; };
                 type = fails { so = "${pkgs.sudo}/libexec/sudo/sudoers.so"; symbol = "sudoers_policy"; };
               }
               ''
                 grep -qx "Plugin frisket_audit ${plugin}/lib/frisket_sudo.so user=dan" $good
+                grep -qx "Plugin frisket_audit ${plugin}/lib/frisket_sudo.so user=dan remote" $remote
                 grep -q "cannot load" $broken/testBuildFailure.log
                 grep -q "no symbol frisket_approval" $symbol/testBuildFailure.log
                 grep -q "is plugin type 1, not 3 (audit)" $type/testBuildFailure.log
@@ -496,6 +501,10 @@
 
           # frisket-sudo as nixosModules.sudoGate runs it, with fakegalley, in a VM.
           sudo-gate = pkgs.testers.runNixOSTest (import ./tests/sudo-gate.nix { inherit self; });
+
+          # frisket-sudo's remote mode: a client with the signer, a server with
+          # the gate and remoteKeys, and a second sshd, in three VMs.
+          sudo-remote = pkgs.testers.runNixOSTest (import ./tests/sudo-remote.nix { inherit self; });
 
           # frisket-signer with a software TPM, two sshds and fakegalley, in a VM.
           signer = pkgs.testers.runNixOSTest (import ./tests/signer.nix { inherit self; });

@@ -232,15 +232,29 @@ fn agentStep(m: wire.Signing) error{Drop}![]u8 {
     const uid = number(user_info, "uid") orelse return error.Drop;
     const gid = number(user_info, "gid") orelse return error.Drop;
     const groups = groupList(lookup(user_info, "groups") orelse return error.Drop) orelse return error.Drop;
+    if (config.log_ids) logIds("before the drop");
     const s = ids.connectAs(ids.Libc, agent_path, uid, gid, groups) catch |e| switch (e) {
         error.Connect => return wire.signFailed(&signature_request, "cannot connect to the forwarded agent"),
         error.Drop, error.Restore => return error.Drop,
     };
+    if (config.log_ids) logIds("after the restore");
     defer s.close();
     return switch (agent.sign(s, m.keys, m.message, &agent_buf)) {
         .signed => |x| wire.signature(&signature_request, x.key, x.signature),
         .failed => |why| wire.signFailed(&signature_request, why),
     };
+}
+
+var log_groups: [ids.max_groups]u32 = undefined;
+var log_line: [4096:0]u8 = undefined;
+
+fn logIds(when: []const u8) void {
+    var uid: [3]u32 = undefined;
+    var gid: [3]u32 = undefined;
+    if (!ids.Libc.getresuid(&uid) or !ids.Libc.getresgid(&gid)) return;
+    const groups = ids.Libc.getgroups(&log_groups) orelse return;
+    const line = std.fmt.bufPrintZ(&log_line, "frisket-sudo ids {s}: uid {any} gid {any} groups {any}", .{ when, uid, gid, groups }) catch return;
+    say(c.SUDO_CONV_ERROR_MSG, line);
 }
 
 /// user_info's groups=, comma-separated gids.

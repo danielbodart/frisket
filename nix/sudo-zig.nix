@@ -45,12 +45,14 @@ let
 
   sources = map (f: root + "/${f}") [ "abi.zig" "fd.zig" "wire.zig" "chain.zig" "agent.zig" "ids.zig" "frisket_sudo.zig" "frisket-sudo-pam.zig" "frisket-sudo-check-plugin.zig" ];
 
-  plugin = misread: zigBuild {
-    pname = if misread then "frisket-sudo-plugin-misread" else "frisket-sudo-plugin";
+  plugin = variant: zigBuild {
+    pname = "frisket-sudo-plugin" + lib.optionalString (variant != null) "-${variant}";
     files = sources;
     steps = "install";
-    flags = "-Dsudo-version=${sudo.version}" + lib.optionalString misread " -Dmisread-mode=true";
-    passthru = lib.optionalAttrs (!misread) { misread = plugin true; };
+    flags = "-Dsudo-version=${sudo.version}"
+      + lib.optionalString (variant == "misread") " -Dmisread-mode=true"
+      + lib.optionalString (variant == "log-ids") " -Dlog-ids=true";
+    passthru = lib.optionalAttrs (variant == null) { misread = plugin "misread"; logIds = plugin "log-ids"; };
   };
 
   # sudo's parse_args alone, the mode parse's test oracle.
@@ -70,8 +72,9 @@ let
   };
 in
 {
-  # passthru.misread's mode test always says -v, for the sudo VM.
-  package = plugin false;
+  # passthru.misread's mode test always says -v, for the sudo VM;
+  # passthru.logIds prints its ids around the drop, for the remote VM.
+  package = plugin null;
 
   check = zigBuild {
     pname = "frisket-sudo-zig-check";

@@ -52,6 +52,7 @@ previous generation.
 |---|---|---|
 | `enable` | `false` | The plugin line in `/etc/sudo.conf`, the PAM rule, the `frisket-sudo` PAM service, the sudoers defaults and the gate. |
 | `forUser` | `"dan"` | The gated user, and whose galley is asked. |
+| `remoteKeys` | `[ ]` | SSH public key lines whose signature approves a remote sudo (below); empty is remote mode off. |
 
 The module sets `Defaults noninteractive_auth` and `Defaults
 timestamp_type=tty`, and evaluation fails when:
@@ -71,7 +72,7 @@ would and found an audit plugin for this sudo's version.
 
 A sudo of `forUser`'s with no tty, not under an ssh login, and not `-v` or
 `-l`. Everything else is stock sudo: a terminal, another user, root,
-`ssh host 'sudo -S …'`.
+`ssh host 'sudo -S …'`, unless remote mode takes it.
 
 A gated sudo skips `pam_unix` and asks the gate. With no tty, `-S`, `-A`,
 a sudoers ticket and NOPASSWD are all ignored: the dialog's password is
@@ -109,6 +110,47 @@ that waits on you times out: a sudo waits until it is answered or killed.
 The check-in alone is bounded: a gate that does not answer it within
 250 ms is not running.
 
+## Remote mode
+
+```
+claude@laptop> ssh -A desktop sudo systemctl restart foo
+                                    # laptop's galley: "sudo on desktop"
+                                    #   /run/current-system/sw/bin/systemctl restart foo
+                                    #   [Refuse] [Allow]
+```
+
+On a host whose gate has `remoteKeys`, a sudo of `forUser`'s with no tty
+under an ssh login with a forwarded agent is approved by a signature from
+one of those keys:
+
+```nix
+services.frisket.sudoGate.remoteKeys = [ "ecdsa-sha2-nistp256 AAAA… alice@laptop" ];
+```
+
+The keys are written to `/etc/frisket-sudo/remote-keys` and `remote` is
+added to the plugin line; there are no new PAM lines. The client needs
+only `ForwardAgent` for the host.
+
+The gate classifies the command as for a local sudo and hands the plugin a
+message to sign: a nonce, the host's keys, the user, the runas user, the
+cwd, the resolved command, the level and the reasons. The plugin connects
+to the forwarded agent as the invoking user and asks for a plain signature
+with the first listed key the agent holds. frisket-signer on the client
+asks every time, naming the host from `/etc/ssh/ssh_known_hosts`, and
+refuses unless its forwarded session is bound to one of the message's host
+keys; no grant or window skips it. A stock agent holding a listed key
+signs without asking.
+
+A sudo with a tty (`ssh -t`) asks the host's own password, as stock. No
+forwarded agent, no `remoteKeys`, or the gate down is stock too: "a
+terminal is required". The agent refusing, failing or holding no listed
+key refuses the sudo:
+
+```
+frisket-sudo: the forwarded agent refused
+sudo: frisket_audit: unable to log accept event
+```
+
 ## Journal
 
 ```
@@ -119,6 +161,8 @@ One `decision` record per answer: the chain, the anchor, the program and
 argv, danger reasons, environment lines, the outcome, and its `source`
 (`galley`, `window`, `verified`, `wrong password`, `cancelled`, `nobody`,
 `not the pinned galley`, `hung up`). A password appears only as its length.
+A remote sudo's records have `remote` set, the message's fields, the host
+key fingerprints, the nonce, and the key that signed.
 
 ## Environment
 

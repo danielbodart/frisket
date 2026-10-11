@@ -37,7 +37,7 @@ let
         t = time.monotonic_ns()
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.connect("/run/frisket-sudo/gate.sock")
-        s.sendall(b"FSUD\x01" + kind + b"\0\0\0\0")
+        s.sendall(b"FSUD\x02" + kind + b"\0\0\0\0")
         r = s.recv(3)
         return s, (time.monotonic_ns() - t) / 1e6, r[:1]
 
@@ -436,7 +436,7 @@ in
 
     with subtest("detached remote sudo is gated locally"):
         asked = len(events("question"))
-        machine.succeed(f"{ssh} 'setsid -f sh -c \"/run/wrappers/bin/sudo -S id\" </dev/null >/dev/null 2>&1'")
+        machine.succeed(f"{ssh} 'setsid -f sh -c \"/run/wrappers/bin/sudo -S id\" </dev/null >/dev/null 2>&1' </dev/null")
         wait_questions(asked + 1)
         assert events("question")[asked]["kind"] == "forms"
         machine.sleep(2)

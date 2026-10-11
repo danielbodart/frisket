@@ -12,6 +12,7 @@ let
   sudoConf = import ./sudo-conf.nix { inherit pkgs plugin; } {
     version = config.security.sudo.package.version;
     user = cfg.forUser;
+    remote = cfg.remoteKeys != [ ];
   };
 
   auth = config.security.pam.services.sudo.rules.auth;
@@ -33,6 +34,11 @@ in
       type = types.str;
       default = "dan";
       description = "The gated user, and the user whose galley is asked.";
+    };
+    remoteKeys = mkOption {
+      type = types.listOf (types.strMatching "[^\n]+");
+      default = [ ];
+      description = "SSH public key lines whose signature approves forUser's remote sudo with no tty (`ssh -A host sudo x`); empty is remote mode off.";
     };
   };
 
@@ -68,6 +74,10 @@ in
     users.groups.sudo-gate.gid = 952;
 
     environment.etc."sudo.conf".source = sudoConf;
+    environment.etc."frisket-sudo/remote-keys" = lib.mkIf (cfg.remoteKeys != [ ]) {
+      text = lib.concatMapStrings (k: k + "\n") cfg.remoteKeys;
+      mode = "0644";
+    };
 
     security.sudo.extraConfig = ''
       Defaults noninteractive_auth
