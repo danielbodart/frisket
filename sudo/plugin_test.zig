@@ -190,9 +190,10 @@ test "a refusal prints the gate's message and refuses" {
     try testing.expectEqualStrings("cancelled", saidLine(0));
 }
 
-test "garbage, a message that is not printable and a password to 'C' are no answer" {
+test "garbage, a message that is not printable, an 'M' to a local 'A' and a password to 'C' are no answer" {
     for ([_][]const []const u8{
         &.{ "Y\x00\x00", "Q\x00\x00" },
+        &.{ "Y\x00\x00", "M\x00\x00\x00\x00" },
         &.{ "Y\x00\x00", "Y\x00\x02a\n" },
         &.{ "Y\x00\x00", "Y\x00\x05ab" },
     }) |replies| {

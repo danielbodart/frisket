@@ -27,8 +27,7 @@ fn checkedIn() !bool {
     try s.sendAll(wire.empty(&req, .did_check_in));
     var h: [3]u8 = undefined;
     if (try s.recvFull(&h) != h.len) return false;
-    const head = wire.head(h, false) orelse return false;
-    return head.reply == .yes;
+    return wire.replyKind(h[0], .yes_no) == .yes and wire.lengthOk(.yes, std.mem.readInt(u16, h[1..3], .big));
 }
 
 test "a tty, another service or another user skips nothing and asks no gate" {

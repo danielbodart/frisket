@@ -43,7 +43,7 @@ let
     hash = "sha256-GicN77r9Oh9xPqlIP5CS0/y2hSenxlM6thAiv1bjBW8=";
   };
 
-  sources = map (f: root + "/${f}") [ "abi.zig" "fd.zig" "wire.zig" "chain.zig" "frisket_sudo.zig" "frisket-sudo-pam.zig" "frisket-sudo-check-plugin.zig" ];
+  sources = map (f: root + "/${f}") [ "abi.zig" "fd.zig" "wire.zig" "chain.zig" "agent.zig" "ids.zig" "frisket_sudo.zig" "frisket-sudo-pam.zig" "frisket-sudo-check-plugin.zig" ];
 
   plugin = misread: zigBuild {
     pname = if misread then "frisket-sudo-plugin-misread" else "frisket-sudo-plugin";
@@ -75,7 +75,7 @@ in
 
   check = zigBuild {
     pname = "frisket-sudo-zig-check";
-    files = sources ++ map (f: root + "/${f}") [ "plugin_test.zig" "misread_test.zig" "planted_type.zig" "lint.zig" "analyze" ".zwanzig.json" ];
+    files = sources ++ map (f: root + "/${f}") [ "plugin_test.zig" "misread_test.zig" "remote_test.zig" "planted_type.zig" "lint.zig" "analyze" ".zwanzig.json" ];
     steps = "test lint fmt analyze";
     flags = "-Ddev=true -Doracle=${oracle}/bin/oracle";
     deps = true;

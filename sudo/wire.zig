@@ -1,23 +1,27 @@
-//! The sudo wire, version 1, between the Zig and the gate.
+//! The sudo wire, version 2, between the Zig and the gate.
 
 const std = @import("std");
 const chain = @import("chain");
+const agent = @import("agent");
 
 pub const magic = "FSUD";
-pub const version = 1;
+pub const version = 2;
 pub const max_request = 1 << 20;
 pub const max_message = 512;
 pub const max_password = 1023;
 /// The one timeout: 'C' and 'G', connect to reply. No person is waited on.
 pub const answer_within = 250 * std.time.ns_per_ms;
-const header_len = 10;
+pub const header_len = 10;
 const record_head = 5;
+/// An 'S': a key and a signature, each from one agent frame.
+pub const max_signature_request = header_len + 2 * (record_head + agent.max_frame);
 
 pub const Kind = enum(u8) {
     check_in = 'C',
     did_check_in = 'G',
     approval = 'A',
     verify = 'V',
+    signature = 'S',
 };
 
 pub const Tag = enum(u8) {
@@ -29,6 +33,10 @@ pub const Tag = enum(u8) {
     run_envp = 'e',
     result = 'r',
     truncated = 't',
+    remote = 'm',
+    key = 'p',
+    agent_signature = 'g',
+    agent_failed = 'f',
 };
 
 /// A NULL-terminated array of C strings, as sudo passes them.
@@ -69,10 +77,35 @@ const Out = struct {
     }
 };
 
-/// 'C' and 'G': no body.
+/// 'G', and a local 'C': no body.
 pub fn empty(buf: *[header_len]u8, kind: Kind) []u8 {
     var o: Out = .{ .buf = buf };
     o.header(kind);
+    return o.finish();
+}
+
+/// 'C', with an 'm' record when remote.
+pub fn checkIn(buf: *[header_len + record_head]u8, remote: bool) []u8 {
+    var o: Out = .{ .buf = buf };
+    o.header(.check_in);
+    if (remote) o.record(.remote, "");
+    return o.finish();
+}
+
+/// 'S' with the listed key the agent signed with and its signature.
+pub fn signature(buf: *[max_signature_request]u8, key: []const u8, sig: []const u8) []u8 {
+    var o: Out = .{ .buf = buf };
+    o.header(.signature);
+    o.record(.key, key);
+    o.record(.agent_signature, sig);
+    return o.finish();
+}
+
+/// 'S' saying the agent step failed, and why.
+pub fn signFailed(buf: *[max_signature_request]u8, why: []const u8) []u8 {
+    var o: Out = .{ .buf = buf };
+    o.header(.signature);
+    o.record(.agent_failed, why[0..@min(why.len, max_message)]);
     return o.finish();
 }
 
@@ -101,10 +134,12 @@ fn arraySize(a: CArray, n: usize) usize {
     return size;
 }
 
-/// 'A' within max_request: over it, run_envp entries go from the end, then
-/// cmdlines from the top of the chain, and a 't' record says so.
-pub fn approval(buf: *[max_request]u8, links: []const chain.Link, user_info: CArray, settings: CArray, command_info: CArray, run_argv: CArray, run_envp: CArray) Error![]u8 {
+/// 'A' within max_request, with an 'm' record when remote: over it,
+/// run_envp entries go from the end, then cmdlines from the top of the chain,
+/// and a 't' record says so.
+pub fn approval(buf: *[max_request]u8, links: []const chain.Link, user_info: CArray, settings: CArray, command_info: CArray, run_argv: CArray, run_envp: CArray, remote: bool) Error![]u8 {
     var size: usize = header_len;
+    if (remote) size += record_head;
     for (links) |*l| size += linkSize(l, true);
     for ([_]CArray{ user_info, settings, command_info, run_argv }) |a| size += arraySize(a, count(a));
     var envs = count(run_envp);
@@ -151,24 +186,57 @@ pub fn approval(buf: *[max_request]u8, links: []const chain.Link, user_info: CAr
     for (arrays) |x| {
         for (0..x[2]) |i| o.record(x[0], std.mem.span(x[1][i]));
     }
+    if (remote) o.record(.remote, "");
     if (truncated) o.record(.truncated, "");
     return o.finish();
 }
 
-pub const Reply = enum(u8) { yes = 'Y', no = 'N', password = 'W' };
+pub const Reply = enum(u8) { yes = 'Y', no = 'N', password = 'W', message = 'M' };
 
-pub const Head = struct { reply: Reply, len: u16 };
+/// What a reply answers: 'C', 'G' or 'S' (yes or no), a local 'A' or 'V'
+/// (also 'W'), or a remote 'A' ('M' or 'N').
+pub const Expect = enum { yes_no, local, remote };
 
-/// A reply's kind and length, or null for garbage. 'W' is a reply only to
-/// 'A' or 'V'.
-pub fn head(b: [3]u8, password_ok: bool) ?Head {
-    const len = std.mem.readInt(u16, b[1..3], .big);
-    const reply = std.meta.intToEnum(Reply, b[0]) catch return null;
-    switch (reply) {
-        .yes, .no => if (len > max_message) return null,
-        .password => if (!password_ok or len > max_password) return null,
-    }
-    return .{ .reply = reply, .len = len };
+/// The reply kind in `b`, if `e` allows it.
+pub fn replyKind(b: u8, e: Expect) ?Reply {
+    const r = std.meta.intToEnum(Reply, b) catch return null;
+    const ok = switch (r) {
+        .no => true,
+        .yes => e != .remote,
+        .password => e == .local,
+        .message => e == .remote,
+    };
+    return if (ok) r else null;
+}
+
+/// The size of a reply's length field: u32be for 'M', else u16be.
+pub fn lengthSize(r: Reply) usize {
+    return if (r == .message) 4 else 2;
+}
+
+/// Whether `len` is within the limit for a reply of kind `r`.
+pub fn lengthOk(r: Reply, len: u32) bool {
+    return len <= @as(u32, switch (r) {
+        .yes, .no => max_message,
+        .password => max_password,
+        .message => max_request,
+    });
+}
+
+/// An 'M' body: the message to sign and the listed keys.
+pub const Signing = struct {
+    message: []const u8,
+    /// uint32 n, string key blob × n, n ≥ 1.
+    keys: []const u8,
+};
+
+/// `string message | uint32 count | string key blob*`, with at least one key
+/// and no trailing bytes, or null.
+pub fn signing(body: []const u8) ?Signing {
+    var r: agent.Reader = .{ .b = body };
+    const message = r.string() orelse return null;
+    if (!agent.validKeys(r.b)) return null;
+    return .{ .message = message, .keys = r.b };
 }
 
 /// Whether a 'Y' or 'N' message is printable ASCII.
@@ -192,23 +260,33 @@ fn testLink(pid: u32, comm: []const u8, cmd: []const u8) chain.Link {
 
 var test_buf: [max_request]u8 = undefined;
 
-test "'C' and 'V' frame to their bytes" {
+test "'C', 'V' and 'S' frame to their bytes" {
     var c: [header_len]u8 = undefined;
-    try testing.expectEqualSlices(u8, "FSUD\x01C\x00\x00\x00\x00", empty(&c, .check_in));
+    try testing.expectEqualSlices(u8, "FSUD\x02C\x00\x00\x00\x00", empty(&c, .check_in));
+    var cm: [header_len + record_head]u8 = undefined;
+    try testing.expectEqualSlices(u8, "FSUD\x02C\x00\x00\x00\x00", checkIn(&cm, false));
+    try testing.expectEqualSlices(u8, "FSUD\x02C\x00\x00\x00\x05m\x00\x00\x00\x00", checkIn(&cm, true));
     var v: [header_len + record_head + 1]u8 = undefined;
-    try testing.expectEqualSlices(u8, "FSUD\x01V\x00\x00\x00\x06r\x00\x00\x00\x01\x01", verify(&v, true));
+    try testing.expectEqualSlices(u8, "FSUD\x02V\x00\x00\x00\x06r\x00\x00\x00\x01\x01", verify(&v, true));
+    try testing.expectEqualSlices(u8, "FSUD\x02S\x00\x00\x00\x0fp\x00\x00\x00\x02kbg\x00\x00\x00\x03sig", signature(&sig_buf, "kb", "sig"));
+    try testing.expectEqualSlices(u8, "FSUD\x02S\x00\x00\x00\x09f\x00\x00\x00\x04why?", signFailed(&sig_buf, "why?"));
 }
 
-test "'A' frames a link and one record per entry" {
+var sig_buf: [max_signature_request]u8 = undefined;
+
+test "'A' frames a link and one record per entry, and 'm' when remote" {
     const links = [_]chain.Link{testLink(7, "bash", "bash\x00-c\x00x")};
     const ui = [_:null]?[*:0]const u8{ "user=dan", "uid=1000" };
     const none = [_:null]?[*:0]const u8{};
     const argv = [_:null]?[*:0]const u8{"id"};
-    const req = try approval(&test_buf, &links, @ptrCast(&ui), @ptrCast(&none), @ptrCast(&none), @ptrCast(&argv), null);
-    const want = "FSUD\x01A\x00\x00\x00\x4f" ++
+    const req = try approval(&test_buf, &links, @ptrCast(&ui), @ptrCast(&none), @ptrCast(&none), @ptrCast(&argv), null, false);
+    const want = "FSUD\x02A\x00\x00\x00\x4f" ++
         "k\x00\x00\x00\x29\x00\x00\x00\x07\x00\x00\x00\x08\x01\x02\x03\x04\x05\x06\x07\x08\x00\x00\x03\xe8\x00\x00\x00\x00\x00\x04bash\x00\x09bash\x00-c\x00x" ++
         "u\x00\x00\x00\x08user=dan" ++ "u\x00\x00\x00\x08uid=1000" ++ "a\x00\x00\x00\x02id";
     try testing.expectEqualSlices(u8, want, req);
+    const remote = try approval(&test_buf, &links, @ptrCast(&ui), @ptrCast(&none), @ptrCast(&none), @ptrCast(&argv), null, true);
+    try testing.expectEqualSlices(u8, "FSUD\x02A\x00\x00\x00\x54", remote[0..10]);
+    try testing.expectEqualSlices(u8, want[10..] ++ "m\x00\x00\x00\x00", remote[10..]);
 }
 
 var big_buf: [max_request + 1]u8 = undefined;
@@ -225,26 +303,45 @@ test "an 'A' over the limit drops run_envp from its end first and says so" {
     const links = [_]chain.Link{testLink(7, "bash", "bash")};
     const envp = [_:null]?[*:0]const u8{ "A=1", env, env };
     const argv = [_:null]?[*:0]const u8{"id"};
-    const req = try approval(&test_buf, &links, null, null, null, @ptrCast(&argv), @ptrCast(&envp));
+    const req = try approval(&test_buf, &links, null, null, null, @ptrCast(&argv), @ptrCast(&envp), true);
     try testing.expect(req.len <= max_request);
     try testing.expect(std.mem.indexOf(u8, req, "e\x00\x00\x00\x03A=1") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, req, "X=yyyy"));
-    try testing.expect(std.mem.endsWith(u8, req, "t\x00\x00\x00\x00"));
+    try testing.expect(std.mem.endsWith(u8, req, "m\x00\x00\x00\x00t\x00\x00\x00\x00"));
     try testing.expectEqual(@as(u32, @intCast(req.len - header_len)), std.mem.readInt(u32, req[6..10], .big));
 }
 
 test "an argv that cannot fit is TooLong" {
     const argv = [_:null]?[*:0]const u8{big(max_request)};
-    try testing.expectError(error.TooLong, approval(&test_buf, &.{}, null, null, null, @ptrCast(&argv), null));
+    try testing.expectError(error.TooLong, approval(&test_buf, &.{}, null, null, null, @ptrCast(&argv), null, false));
 }
 
-test "a reply head is refused when its kind, length or place is wrong" {
-    try testing.expectEqual(Head{ .reply = .yes, .len = 512 }, head(.{ 'Y', 2, 0 }, false).?);
-    try testing.expect(head(.{ 'Y', 2, 1 }, false) == null);
-    try testing.expect(head(.{ 'W', 0, 4 }, false) == null);
-    try testing.expectEqual(Head{ .reply = .password, .len = 1023 }, head(.{ 'W', 3, 0xff }, true).?);
-    try testing.expect(head(.{ 'W', 4, 0 }, true) == null);
-    try testing.expect(head(.{ 'X', 0, 0 }, true) == null);
+test "a reply is refused when its kind, length or place is wrong" {
+    try testing.expectEqual(Reply.yes, replyKind('Y', .yes_no).?);
+    try testing.expectEqual(Reply.no, replyKind('N', .remote).?);
+    try testing.expect(replyKind('Y', .remote) == null);
+    try testing.expect(replyKind('W', .yes_no) == null);
+    try testing.expect(replyKind('W', .remote) == null);
+    try testing.expect(replyKind('M', .local) == null);
+    try testing.expect(replyKind('M', .yes_no) == null);
+    try testing.expectEqual(Reply.password, replyKind('W', .local).?);
+    try testing.expectEqual(Reply.message, replyKind('M', .remote).?);
+    try testing.expect(replyKind('X', .local) == null);
+    try testing.expectEqual(@as(usize, 4), lengthSize(.message));
+    try testing.expectEqual(@as(usize, 2), lengthSize(.no));
+    try testing.expect(lengthOk(.yes, 512) and !lengthOk(.yes, 513));
+    try testing.expect(lengthOk(.password, 1023) and !lengthOk(.password, 1024));
+    try testing.expect(lengthOk(.message, max_request) and !lengthOk(.message, max_request + 1));
     try testing.expect(printable("frisket-sudo: ok ~"));
     try testing.expect(!printable("a\nb"));
+}
+
+test "an 'M' body is a message and at least one key, with nothing after" {
+    const m = signing("\x00\x00\x00\x03msg\x00\x00\x00\x02\x00\x00\x00\x01a\x00\x00\x00\x02bc").?;
+    try testing.expectEqualStrings("msg", m.message);
+    try testing.expectEqualSlices(u8, "\x00\x00\x00\x02\x00\x00\x00\x01a\x00\x00\x00\x02bc", m.keys);
+    try testing.expect(signing("\x00\x00\x00\x03msg\x00\x00\x00\x00") == null);
+    try testing.expect(signing("\x00\x00\x00\x03msg\x00\x00\x00\x01\x00\x00\x00\x01ax") == null);
+    try testing.expect(signing("\x00\x00\x00\x09msg") == null);
+    try testing.expect(signing("") == null);
 }

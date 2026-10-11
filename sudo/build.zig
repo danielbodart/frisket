@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
 
     const install = b.getInstallStep();
     if (sudo_version) |v| {
-        const cfg = config(b, gate_path, gate_uid, misread, v);
+        const cfg = config(b, gate_path, gate_uid, if (misread) .misread else .stock, v);
         const lib = plugin(b, target, optimize, modules(b, target, optimize), cfg, true);
         install.dependOn(&b.addInstallFileWithDir(lib.getEmittedBin(), .lib, "frisket_sudo.so").step);
         b.installArtifact(pamHelper(b, target, optimize, cfg, true));
@@ -30,13 +30,13 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addFail("needs -Doracle=PATH, sudo's parse_args built as a test oracle").step);
     } else if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
         const uid = std.os.linux.getuid();
-        const cfg = config(b, "frisket-sudo-test-gate.sock", uid, false, "test");
-        for ([_][]const u8{ "fd", "wire", "chain" }) |name| {
+        const cfg = config(b, "frisket-sudo-test-gate.sock", uid, .stock, "test");
+        for ([_][]const u8{ "fd", "wire", "chain", "agent", "ids" }) |name| {
             const m = modules(b, target, optimize);
             const t = b.addTest(.{ .name = name, .root_module = m.get(name) });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
-        const pam_cfg = config(b, "frisket-sudo-test-pam.sock", uid, false, "test");
+        const pam_cfg = config(b, "frisket-sudo-test-pam.sock", uid, .stock, "test");
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "pam", .root_module = pamHelper(b, target, optimize, pam_cfg, false).root_module })).step);
 
         const opts = b.addOptions();
@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
         });
         test_step.dependOn(&b.addRunArtifact(pt).step);
 
-        const misread_cfg = config(b, "frisket-sudo-test-gate.sock", uid, true, "test");
+        const misread_cfg = config(b, "frisket-sudo-test-gate.sock", uid, .misread, "test");
         const mm = modules(b, target, optimize);
         const mt = b.addTest(.{
             .name = "misread",
@@ -75,6 +75,26 @@ pub fn build(b: *std.Build) void {
             }),
         });
         test_step.dependOn(&b.addRunArtifact(mt).step);
+
+        const remote_cfg = config(b, "frisket-sudo-test-remote-gate.sock", uid, .remote, "test");
+        const rm = modules(b, target, optimize);
+        const rt = b.addTest(.{
+            .name = "remote",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("remote_test.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "minish", .module = minish.module("minish") },
+                    .{ .name = "plugin", .module = plugin(b, target, optimize, rm, remote_cfg, false).root_module },
+                    .{ .name = "abi", .module = rm.abi },
+                    .{ .name = "agent", .module = rm.agent },
+                    .{ .name = "fd", .module = rm.fd },
+                },
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(rt).step);
 
         checkPluginCases(b, target, optimize, test_step);
     }
@@ -101,7 +121,7 @@ pub fn build(b: *std.Build) void {
         analyze_step.dependOn(&b.addFail("needs -Ddev=true").step);
     } else if (b.lazyDependency("zwanzig", .{ .target = b.graph.host, .optimize = .ReleaseFast })) |zw| {
         const exe = zw.artifact("zwanzig");
-        for ([_][]const u8{ "fd.zig", "wire.zig", "chain.zig", "frisket_sudo.zig", "frisket-sudo-pam.zig", "frisket-sudo-check-plugin.zig" }) |file| {
+        for ([_][]const u8{ "fd.zig", "wire.zig", "chain.zig", "agent.zig", "ids.zig", "frisket_sudo.zig", "frisket-sudo-pam.zig", "frisket-sudo-check-plugin.zig" }) |file| {
             const run = b.addRunArtifact(exe);
             run.addArg("--config");
             run.addFileArg(b.path(".zwanzig.json"));
@@ -125,11 +145,16 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-fn config(b: *std.Build, path: []const u8, uid: u32, misread: bool, sudo_version: []const u8) *std.Build.Module {
+/// A test build's misread mode test always says -v; its remote one takes
+/// every chain for remote.
+const Build = enum { stock, misread, remote };
+
+fn config(b: *std.Build, path: []const u8, uid: u32, kind: Build, sudo_version: []const u8) *std.Build.Module {
     const opts = b.addOptions();
     opts.addOption([]const u8, "gate_path", path);
     opts.addOption(u32, "gate_uid", uid);
-    opts.addOption(bool, "misread_mode", misread);
+    opts.addOption(bool, "misread_mode", kind == .misread);
+    opts.addOption(bool, "force_remote", kind == .remote);
     opts.addOption([]const u8, "sudo_version", sudo_version);
     return opts.createModule();
 }
@@ -139,6 +164,8 @@ const Modules = struct {
     fd: *std.Build.Module,
     wire: *std.Build.Module,
     chain: *std.Build.Module,
+    agent: *std.Build.Module,
+    ids: *std.Build.Module,
 
     fn get(m: Modules, name: []const u8) *std.Build.Module {
         inline for (@typeInfo(Modules).@"struct".fields) |f| {
@@ -160,13 +187,26 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .optimize = optimize,
         .imports = &.{.{ .name = "fd", .module = fd }},
     });
+    const agent = b.createModule(.{
+        .root_source_file = b.path("agent.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "fd", .module = fd }},
+    });
     const wire = b.createModule(.{
         .root_source_file = b.path("wire.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "chain", .module = chain }},
+        .imports = &.{ .{ .name = "chain", .module = chain }, .{ .name = "agent", .module = agent } },
     });
-    return .{ .abi = abi, .fd = fd, .wire = wire, .chain = chain };
+    const ids = b.createModule(.{
+        .root_source_file = b.path("ids.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "abi", .module = abi }, .{ .name = "fd", .module = fd } },
+    });
+    return .{ .abi = abi, .fd = fd, .wire = wire, .chain = chain, .agent = agent, .ids = ids };
 }
 
 fn plugin(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, m: Modules, cfg: *std.Build.Module, strip: bool) *std.Build.Step.Compile {
@@ -184,6 +224,8 @@ fn plugin(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
                 .{ .name = "fd", .module = m.fd },
                 .{ .name = "wire", .module = m.wire },
                 .{ .name = "chain", .module = m.chain },
+                .{ .name = "agent", .module = m.agent },
+                .{ .name = "ids", .module = m.ids },
                 .{ .name = "config", .module = cfg },
             },
         }),
@@ -229,7 +271,7 @@ fn checkPlugin(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 /// symbol, a wrong sudo version, a file that is no library and a plugin of
 /// the wrong type (planted_type.zig).
 fn checkPluginCases(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, step: *std.Build.Step) void {
-    const cfg = config(b, gate_path, gate_uid, false, "1.2.3");
+    const cfg = config(b, gate_path, gate_uid, .stock, "1.2.3");
     const check = checkPlugin(b, target, optimize, cfg, false);
     const so = plugin(b, target, optimize, modules(b, target, optimize), cfg, false).getEmittedBin();
     const planted = b.addLibrary(.{

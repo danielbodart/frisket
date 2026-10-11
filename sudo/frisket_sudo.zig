@@ -1,4 +1,5 @@
-//! frisket_audit, the audit plugin sudo loads with the option user=<forUser>.
+//! frisket_audit, the audit plugin sudo loads with the option user=<forUser>,
+//! and `remote` when the gate lists remote keys.
 
 const std = @import("std");
 const abi = @import("abi");
@@ -6,6 +7,8 @@ const c = abi.c;
 const fd = @import("fd");
 const wire = @import("wire");
 const chain = @import("chain");
+const agent = @import("agent");
+const ids = @import("ids");
 const config = @import("config");
 
 const gate_not_running = "frisket-sudo: gate not running (systemctl status frisket-sudo.socket); sudo in a terminal is not gated";
@@ -15,10 +18,16 @@ var gated_user: ?[*:0]const u8 = null;
 var user_info: wire.CArray = null;
 var settings: wire.CArray = null;
 var gate: ?fd.Sock = null;
+var remote_check_in = false;
+var agent_path_buf: [108]u8 = undefined;
+var agent_path: []const u8 = "";
 
 var links: [chain.max_links]chain.Link = undefined;
 var request: [wire.max_request]u8 = undefined;
 var reply_buf: [wire.max_password + 1]u8 = undefined;
+var agent_buf: [agent.max_frame]u8 = undefined;
+var signature_request: [wire.max_signature_request]u8 = undefined;
+var user_groups: [ids.max_groups]u32 = undefined;
 
 pub export var frisket_audit: c.struct_audit_plugin = .{
     .type = c.SUDO_AUDIT_PLUGIN,
@@ -43,15 +52,40 @@ fn lookup(a: wire.CArray, key: []const u8) ?[*:0]const u8 {
     return null;
 }
 
-/// The gating test without the mode. Fills `links`; the count.
-fn local(user: [*:0]const u8) ?usize {
+/// Whether a sudo array has the bare entry `word`.
+fn has(a: wire.CArray, word: []const u8) bool {
+    if (a == null) return false;
+    var i: usize = 0;
+    while (a[i]) |entry| : (i += 1) {
+        if (std.mem.eql(u8, std.mem.span(@as([*:0]const u8, entry)), word)) return true;
+    }
+    return false;
+}
+
+fn number(a: wire.CArray, key: []const u8) ?u32 {
+    return std.fmt.parseInt(u32, std.mem.span(lookup(a, key) orelse return null), 10) catch null;
+}
+
+const Gating = struct { links: usize, remote: bool };
+
+/// The gating test without the mode: the gated user with no tty. Fills
+/// `links`.
+fn gating(user: [*:0]const u8) ?Gating {
     const name = lookup(user_info, "user") orelse return null;
     if (!std.mem.eql(u8, std.mem.span(name), std.mem.span(user))) return null;
     if (lookup(user_info, "tty") != null) return null;
-    const uid = std.fmt.parseInt(u32, std.mem.span(lookup(user_info, "uid") orelse return null), 10) catch return null;
+    const uid = number(user_info, "uid") orelse return null;
     const n = chain.walk(@intCast(std.os.linux.getppid()), &links);
-    if (chain.remote(links[0..n], uid)) return null;
-    return n;
+    return .{ .links = n, .remote = config.force_remote or chain.remote(links[0..n], uid) };
+}
+
+/// Keeps a non-empty, absolute SSH_AUTH_SOCK that fits sun_path.
+fn keepAgentPath(user_env: wire.CArray) bool {
+    const p = std.mem.span(lookup(user_env, "SSH_AUTH_SOCK") orelse return false);
+    if (p.len == 0 or p[0] != '/' or p.len >= agent_path_buf.len) return false;
+    @memcpy(agent_path_buf[0..p.len], p);
+    agent_path = agent_path_buf[0..p.len];
+    return true;
 }
 
 fn open(
@@ -66,28 +100,36 @@ fn open(
     plugin_options: [*c]const [*c]u8,
     errstr: [*c][*c]const u8,
 ) callconv(.c) c_int {
-    _ = .{ version, conversation, submit_envp, errstr };
+    _ = .{ version, conversation, errstr };
     say_fn = plugin_printf;
     settings = settings_in;
     user_info = user_info_in;
+    remote_check_in = false;
+    agent_path = "";
     gated_user = lookup(plugin_options, "user");
     const user = gated_user orelse return 1;
     if (config.misread_mode or listOrValidate(submit_argv, submit_optind)) return 1;
-    _ = local(user) orelse return 1;
-    gate = checkIn() catch {
+    const g = gating(user) orelse return 1;
+    if (g.remote) {
+        if (!has(plugin_options, "remote") or !keepAgentPath(submit_envp)) return 1;
+        gate = checkIn(true) catch return 1;
+        remote_check_in = true;
+        return 1;
+    }
+    gate = checkIn(false) catch {
         say(c.SUDO_CONV_ERROR_MSG, gate_not_running);
         return 1;
     };
     return 1;
 }
 
-fn checkIn() !fd.Sock {
+fn checkIn(remote: bool) !fd.Sock {
     const s = try fd.connectUnix(config.gate_path, wire.answer_within);
     errdefer s.close();
     if (try s.peerUid() != config.gate_uid) return error.NotTheGate;
-    var req: [10]u8 = undefined;
-    try s.sendAll(wire.empty(&req, .check_in));
-    const r = try readReply(s, false);
+    var req: [15]u8 = undefined;
+    try s.sendAll(wire.checkIn(&req, remote));
+    const r = try readReply(s, .yes_no);
     if (r.reply != .yes) return error.NoCheckIn;
     try s.unbound();
     return s;
@@ -95,23 +137,31 @@ fn checkIn() !fd.Sock {
 
 const Got = struct { reply: wire.Reply, body: []u8 };
 
-/// A reply into reply_buf, NUL-terminated after its body.
-fn readReply(s: fd.Sock, password_ok: bool) !Got {
+/// A reply: 'M' into request, the others into reply_buf, NUL-terminated
+/// after its body.
+fn readReply(s: fd.Sock, expect: wire.Expect) !Got {
     errdefer std.crypto.secureZero(u8, &reply_buf);
-    var h: [3]u8 = undefined;
-    if (try s.recvFull(&h) != h.len) return error.NoAnswer;
-    const head = wire.head(h, password_ok) orelse return error.NoAnswer;
-    const body = reply_buf[0..head.len];
+    var k: [1]u8 = undefined;
+    if (try s.recvFull(&k) != 1) return error.NoAnswer;
+    const reply = wire.replyKind(k[0], expect) orelse return error.NoAnswer;
+    var l: [4]u8 = @splat(0);
+    const size = wire.lengthSize(reply);
+    if (try s.recvFull(l[4 - size ..]) != size) return error.NoAnswer;
+    const len = std.mem.readInt(u32, &l, .big);
+    if (!wire.lengthOk(reply, len)) return error.NoAnswer;
+    const body = if (reply == .message) request[0..len] else reply_buf[0..len];
     if (try s.recvFull(body) != body.len) return error.NoAnswer;
-    if (head.reply != .password and !wire.printable(body)) return error.NoAnswer;
-    reply_buf[head.len] = 0;
-    return .{ .reply = head.reply, .body = body };
+    if (reply == .message) return .{ .reply = reply, .body = body };
+    if (reply != .password and !wire.printable(body)) return error.NoAnswer;
+    reply_buf[len] = 0;
+    return .{ .reply = reply, .body = body };
 }
 
 fn close(status_type: c_int, status: c_int) callconv(.c) void {
     _ = .{ status_type, status };
     if (gate) |s| s.close();
     gate = null;
+    remote_check_in = false;
 }
 
 fn accept(
@@ -126,27 +176,22 @@ fn accept(
     if (plugin_type != c.SUDO_POLICY_PLUGIN) return 1;
     if (listOrValidateRun(command_info)) return 1;
     const user = gated_user orelse return 1;
-    const n = local(user) orelse return 1;
+    const g = gating(user) orelse return 1;
     const s = gate orelse {
+        if (g.remote) return 1;
         errstr.* = "gate not running";
         return 0;
     };
-    const req = wire.approval(&request, links[0..n], user_info, settings, command_info, run_argv, run_envp) catch {
+    const req = wire.approval(&request, links[0..g.links], user_info, settings, command_info, run_argv, run_envp, remote_check_in) catch {
         errstr.* = "command too long for the gate";
         return 0;
     };
     s.sendAll(req) catch return noAnswer(errstr);
+    if (remote_check_in) return remoteAnswer(s, errstr);
     while (true) {
-        const r = readReply(s, true) catch return noAnswer(errstr);
+        const r = readReply(s, .local) catch return noAnswer(errstr);
         switch (r.reply) {
-            .yes => {
-                if (r.body.len > 0) say(c.SUDO_CONV_ERROR_MSG, @ptrCast(r.body.ptr));
-                return 1;
-            },
-            .no => {
-                say(c.SUDO_CONV_ERROR_MSG, @ptrCast(r.body.ptr));
-                return 0;
-            },
+            .yes, .no, .message => return answer(r),
             .password => {
                 const ok = verify(user, reply_buf[0..r.body.len :0]);
                 std.crypto.secureZero(u8, &reply_buf);
@@ -155,6 +200,61 @@ fn accept(
             },
         }
     }
+}
+
+/// 'Y' prints a message it has and allows; 'N' prints its message and refuses.
+fn answer(r: Got) c_int {
+    if (r.reply == .yes) {
+        if (r.body.len > 0) say(c.SUDO_CONV_ERROR_MSG, @ptrCast(r.body.ptr));
+        return 1;
+    }
+    if (r.reply == .no) say(c.SUDO_CONV_ERROR_MSG, @ptrCast(r.body.ptr));
+    return 0;
+}
+
+/// After a remote 'A': the gate's 'M', the forwarded agent's signature in
+/// an 'S', and the gate's answer.
+fn remoteAnswer(s: fd.Sock, errstr: [*c][*c]const u8) c_int {
+    const r = readReply(s, .remote) catch return noAnswer(errstr);
+    if (r.reply != .message) return answer(r);
+    const m = wire.signing(r.body) orelse return noAnswer(errstr);
+    const req = agentStep(m) catch {
+        errstr.* = "cannot drop to the invoking user";
+        return 0;
+    };
+    s.sendAll(req) catch return noAnswer(errstr);
+    return answer(readReply(s, .yes_no) catch return noAnswer(errstr));
+}
+
+/// The 'S' for `m`: connect to the forwarded agent as the invoking user,
+/// then sign as sudo. error.Drop when a drop or restore failed.
+fn agentStep(m: wire.Signing) error{Drop}![]u8 {
+    const uid = number(user_info, "uid") orelse return error.Drop;
+    const gid = number(user_info, "gid") orelse return error.Drop;
+    const groups = groupList(lookup(user_info, "groups") orelse return error.Drop) orelse return error.Drop;
+    const s = ids.connectAs(ids.Libc, agent_path, uid, gid, groups) catch |e| switch (e) {
+        error.Connect => return wire.signFailed(&signature_request, "cannot connect to the forwarded agent"),
+        error.Drop, error.Restore => return error.Drop,
+    };
+    defer s.close();
+    return switch (agent.sign(s, m.keys, m.message, &agent_buf)) {
+        .signed => |x| wire.signature(&signature_request, x.key, x.signature),
+        .failed => |why| wire.signFailed(&signature_request, why),
+    };
+}
+
+/// user_info's groups=, comma-separated gids.
+fn groupList(list: [*:0]const u8) ?[]const u32 {
+    const l = std.mem.span(list);
+    if (l.len == 0) return user_groups[0..0];
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, l, ',');
+    while (it.next()) |g| {
+        if (n == user_groups.len) return null;
+        user_groups[n] = std.fmt.parseInt(u32, g, 10) catch return null;
+        n += 1;
+    }
+    return user_groups[0..n];
 }
 
 /// sudo's own command_info for a -l or -v that the policy allowed.
