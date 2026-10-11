@@ -56,14 +56,16 @@ previous generation.
 The module sets `Defaults noninteractive_auth` and `Defaults
 timestamp_type=tty`, and evaluation fails when:
 
-- sudo's auth stack is anything but the helper, `pam_unix`, `pam_deny`;
+- sudo's auth stack is anything but the helper, `pam_unix`, `pam_deny`,
+  or the `frisket-sudo` PAM service's anything but `pam_unix`, `pam_deny`;
 - sudoers sets another `timestamp_type` (`!tty_tickets` included), or
   `rootpw`, `targetpw`, `runaspw`, `intercept` or `log_subcmds` (as
   options or as `INTERCEPT:` and `LOG_SUBCMDS:` tags);
 - `kernel.yama.ptrace_scope` is 0.
 
-`/etc/sudo.conf` is built only once `frisket-sudo-check-plugin` has loaded
-the plugin as sudo would and found an audit plugin for this sudo's version.
+The plugin is built against `security.sudo.package`, and `/etc/sudo.conf`
+is built only once `frisket-sudo-check-plugin` has loaded the plugin as sudo
+would and found an audit plugin for this sudo's version.
 
 ## What is gated
 
@@ -84,11 +86,12 @@ the one checked. `sudo -n` gets the dialog too.
 - **Danger**: a `systemctl` on `frisket*`, `galley*`, `sshd*`,
   `nftables*` or `debug-shell*`, a program outside
   `/run/current-system/sw/bin`, `/run/wrappers/bin` and
-  `/etc/profiles/per-user/<user>/bin`, or an `sh -c`, `bash -c`, `sudo -s`,
-  `sudo -i` or `env` whose inner command is either or cannot be read. A
-  shell run any other way (`bash -lc`, `bash script.sh`, a bare `sudo -s`)
-  cannot be read. Shown with galley's danger banner,
-  always asked, never opens a window; its dialog has no time field.
+  `/etc/profiles/per-user/<user>/bin`, or a `<shell> -c STRING` (`sh`,
+  `bash`, `dash`, `zsh`, `ksh`, `mksh`, `fish`, …), `sudo -s`, `sudo -i`
+  or `env` whose inner command is either or cannot be read. A shell run
+  any other way (`bash -lc`, `sh -c -- …`, `bash script.sh`, a bare
+  `sudo -s`) cannot be read. Shown with galley's danger banner, always
+  asked, never opens a window; its dialog has no time field.
 - **Warning**: a process chain cut short, or launched straight from
   `systemd --user`. No time field.
 - Variables outside the allowlist (`HOME`, `PATH`, `TERM`, `LANG`,
@@ -100,8 +103,11 @@ A refusal is sudo's own line:
 sudo: frisket_audit: unable to log accept event: cancelled
 ```
 
-A sudo that is killed withdraws its item. Nothing times out: a sudo waits
-until it is answered or its caller kills it.
+A sudo that is killed withdraws its item; until it runs the command, sudo
+holds SIGTERM, SIGINT, SIGHUP and SIGQUIT, so only SIGKILL does. Nothing
+that waits on you times out: a sudo waits until it is answered or killed.
+The check-in alone is bounded: a gate that does not answer it within
+250 ms is not running.
 
 ## Journal
 
@@ -148,15 +154,16 @@ the gate has answered, so the gate never sees it.
 ## Recovery
 
 **No-tty sudo says `frisket-sudo: gate not running`.** The gate socket is
-down; sudo in a terminal works as before.
+down, or the gate is not answering (crash-looping or stuck); sudo in a
+terminal works as before.
 
 ```
 systemctl status frisket-sudo.socket frisket-sudo.service
 sudo systemctl restart frisket-sudo.socket
 ```
 
-**No-tty sudo hangs.** The gate is crash-looping or galley is not
-answering. Kill the sudo, then check `journalctl -u frisket-sudo`.
+**No-tty sudo hangs.** galley is not answering. Kill the sudo
+(`kill -KILL`), then check `journalctl -u frisket-sudo`.
 
 **`no one to ask; use a terminal`.** galley is not running, or the socket
 at `/run/galley-ask/<user>.sock` is not galley's.
