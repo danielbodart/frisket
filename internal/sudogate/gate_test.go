@@ -373,14 +373,14 @@ func TestAWrongPasswordBringsTheDialogBack(t *testing.T) {
 	c := h.sudo(500)
 	c.send(approval(restart(claude(100), "foo")))
 	a := h.next()
-	if !a.q.Password || !a.q.Grantable || strings.Contains(a.q.Text, "wrong password") {
+	if !a.q.Password || !a.q.Grantable || strings.Contains(a.q.Text, "Wrong password") {
 		t.Fatalf("first dialog %+v", a.q)
 	}
 	a.reply <- password("hunter2", 2*time.Hour, 900)
 	c.want(replyPassword, "hunter2")
 	c.send(verified(false))
 	a = h.next()
-	if !a.q.Password || !strings.HasSuffix(a.q.Text, "\nwrong password") {
+	if !a.q.Password || !strings.HasPrefix(a.q.Text, "Wrong password, try again\n\n") {
 		t.Fatalf("second dialog %+v", a.q)
 	}
 	a.reply <- password("correct", 15*time.Minute, 900)

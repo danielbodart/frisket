@@ -324,7 +324,7 @@ in
         assert rc == 0 and "password remembered for this claude until" in out, out
         qs = events("question")[asked:]
         assert len(qs) == 2 and all(is_dialog(q) for q in qs), qs
-        assert "wrong password" in qs[1]["text"].split("\n") and "wrong password" not in qs[0]["text"], qs
+        assert qs[1]["text"].startswith("Wrong password, try again\n") and "Wrong password" not in qs[0]["text"], qs
 
     with subtest("danger outside a window: the dialog with a password and no time, and no window after"):
         galley("ok " + pw, "ok " + pw + " 0")

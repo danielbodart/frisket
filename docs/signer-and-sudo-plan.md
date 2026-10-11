@@ -465,7 +465,7 @@ While asking, the gate polls the plugin's connection for `POLLRDHUP` and withdra
 ### The gate on 'V'
 
 - **1**: if the chosen time is above 0, the command is not danger and the chain is not Cut or SessionRoot, open the window: until = answer time + chosen (boottime; galleyask clamps the chosen time to 24 h), pinned to the dialog's galley process. Reply 'Y' "frisket-sudo: password remembered for this claude until 16:40", or 'Y' with no message when no window opened. A new window turns the claude's other waiting non-danger dialogs into plain questions (withdraw, post again).
-- **0**: post the dialog again with the line "wrong password", as on 'A' step 3.
+- **0**: post the dialog again with "Wrong password, try again" as its first line, as on 'A' step 3.
 
 The dialog:
 

@@ -265,6 +265,9 @@ func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
 		level = "warning"
 	}
 	var lines []string
+	if wrong && !inWindow {
+		lines = append(lines, "Wrong password, try again", "")
+	}
 	if len(a.danger) > 0 {
 		lines = append(lines, a.danger...)
 		lines = append(lines, "")
@@ -276,9 +279,6 @@ func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
 	}
 	lines = append(lines, a.command)
 	lines = append(lines, a.env...)
-	if wrong && !inWindow {
-		lines = append(lines, "wrong password")
-	}
 	return galleyask.Question{
 		Title: a.title, Text: strings.Join(lines, "\n"), Level: level,
 		Password: !inWindow, Grantable: !inWindow && a.grantable(),
