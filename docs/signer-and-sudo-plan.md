@@ -484,7 +484,7 @@ string   level                                 "", "warning" or "danger"
 uint32   n; string reason × n                  the danger or warning reason and the text lines (§4.6)
 ```
 
-- Over 256 KiB (OpenSSH's agent message limit) the gate answers 'N' "command too long for the gate".
+- When the sign request over it, with the longest listed key, would pass 256 KiB (OpenSSH's agent message limit), the gate answers 'N' "command too long for the gate"; an 'M' reply over the gate's 1 MiB is 'N' "too many remote keys for the gate".
 - It cannot be taken for userauth (starts with a session id, 20 to 64 bytes) or SSHSIG (raw `SSHSIG`).
 
 ### Plugin

@@ -225,3 +225,20 @@ func TestAnotherForwardedBoundSignIsAskedAllowOnceAndAnUnboundOneRefused(t *test
 		t.Error("an Allow made a grant")
 	}
 }
+
+func TestACutClientChainRaisesARemoteSudoToWarningAndSaysSo(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	for _, tc := range []struct{ level, want string }{{"", "warning"}, {"danger", "danger"}} {
+		c := h.dial(links(claude(100).Chain[:4]...))
+		if err := c.bind(t, h.github, []byte("sid"), true); err != nil {
+			t.Fatal(err)
+		}
+		done := c.signAsync(h.key(0), sudoMessage(t, tc.level, nil, h.github.PublicKey()))
+		a := h.next()
+		if a.q.Level != tc.want || !strings.HasPrefix(a.q.Text, "the process chain was cut short\n") {
+			t.Errorf("asked %q %q", a.q.Level, a.q.Text)
+		}
+		a.reply <- answered{}
+		wait(t, done)
+	}
+}

@@ -461,6 +461,7 @@ func (c *conn) describeRemoteSudo(req *request, keyLine string) {
 	for i, a := range m.Argv {
 		argv[i] = galleyask.Clean(a)
 	}
+	lines = append(lines, galleyask.Warnings(c.r)...)
 	lines = append(lines,
 		galleyask.ChainText(c.r),
 		strings.Join(argv, " "),
@@ -469,6 +470,9 @@ func (c *conn) describeRemoteSudo(req *request, keyLine string) {
 	level := m.Level
 	if level == "" {
 		level = "normal"
+		if c.r.Cut || c.r.SessionRoot {
+			level = "warning"
+		}
 	}
 	req.question = galleyask.Question{Title: "sudo on " + req.dest, Text: strings.Join(lines, "\n"), Level: level, Allow: "Allow"}
 }

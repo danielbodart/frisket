@@ -382,6 +382,39 @@ func TestARemoteCommandOverTheAgentLimitIsRefused(t *testing.T) {
 	c.want(replyNo, "command too long for the gate")
 }
 
+func TestARemoteMessageWhoseSignRequestIsOverTheAgentLimitIsRefused(t *testing.T) {
+	h := newHarness(t)
+	k := agentKey(t)
+	h.remote(k)
+	c := h.remoteSudo(500)
+	c.send(approval(remoteCmd("foo")))
+	base := len(c.readMessage().raw)
+	room := sudomsg.MaxSize - (1 + 4 + len(k.PublicKey().Marshal()) + 4 + 4) - base - 4
+	for _, tc := range []struct {
+		n    int
+		fits bool
+	}{{room, true}, {room + 1, false}} {
+		c := h.remoteSudo(501)
+		cmd := remoteCmd("foo")
+		cmd.argv = append(cmd.argv, strings.Repeat("x", tc.n))
+		c.send(approval(cmd))
+		if tc.fits {
+			c.readMessage()
+		} else {
+			c.want(replyNo, "command too long for the gate")
+		}
+	}
+}
+
+func TestAnMReplyOverItsLimitIsNo(t *testing.T) {
+	h := newHarness(t)
+	h.remote()
+	h.write("remote-keys", strings.Repeat(authorized(edKey(t)), 25000))
+	c := h.remoteSudo(500)
+	c.send(approval(remoteCmd("foo")))
+	c.want(replyNo, "too many remote keys for the gate")
+}
+
 func TestAMalformedRemoteFrameClosesTheConnection(t *testing.T) {
 	h := newHarness(t)
 	k := agentKey(t)

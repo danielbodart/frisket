@@ -63,7 +63,16 @@ func (s *session) approveRemote(req *request) {
 		Nonce: nonce, HostKeys: hosts, User: a.user, RunAs: a.runas, Cwd: a.cwd,
 		Argv: argv, Level: level, Reasons: reasons,
 	}
+	blobs := make([][]byte, len(listed))
+	longest := 0
+	for i, k := range listed {
+		blobs[i] = k.Marshal()
+		longest = max(longest, len(blobs[i]))
+	}
 	raw, err := m.Marshal()
+	if err == nil && 1+4+longest+4+len(raw)+4 > sudomsg.MaxSize {
+		err = sudomsg.ErrTooLong
+	}
 	if err != nil {
 		s.record(a, "refuse", "message", []any{"remote", true, "err", err.Error()})
 		if errors.Is(err, sudomsg.ErrTooLong) {
@@ -73,13 +82,10 @@ func (s *session) approveRemote(req *request) {
 		}
 		return
 	}
-	blobs := make([][]byte, len(listed))
-	for i, k := range listed {
-		blobs[i] = k.Marshal()
-	}
 	c := &challenge{a: a, msg: m, raw: raw, listed: listed}
 	if err := writeMessage(s.c, raw, blobs); err != nil {
 		s.recordRemote(c, "refuse", "message", "", []any{"err", err.Error()})
+		s.reply(replyNo, "too many remote keys for the gate")
 		return
 	}
 	s.challenge = c
