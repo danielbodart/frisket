@@ -208,7 +208,7 @@ func linkRecord(l peer.Link) []byte {
 	b = be.AppendUint32(b, l.TTY)
 	b = be.AppendUint16(b, uint16(len(l.Comm)))
 	b = append(b, l.Comm...)
-	cmdline := strings.Join(l.Cmdline, "\x00") + "\x00"
+	cmdline := strings.Join(l.Cmdline, "\x00")
 	b = be.AppendUint16(b, uint16(len(cmdline)))
 	return record('k', append(b, cmdline...))
 }
@@ -627,7 +627,7 @@ func TestTheDialogShowsTheChainAndTheResolvedCommand(t *testing.T) {
 	c := h.sudo(500)
 	c.send(approval(restart(claude(100), "foo")))
 	a := h.next()
-	want := "claude (pid 100) ← bash\n\n/run/current-system/sw/bin/systemctl restart foo"
+	want := "claude ← bash -c sudo x\n\n/run/current-system/sw/bin/systemctl restart foo"
 	if a.q.Title != "sudo systemctl restart foo" || a.q.Text != want {
 		t.Errorf("got %q\n%q", a.q.Title, a.q.Text)
 	}
@@ -636,7 +636,7 @@ func TestTheDialogShowsTheChainAndTheResolvedCommand(t *testing.T) {
 	c = h.sudo(501)
 	c.send(approval(restart(claude(100), "sshd.service")))
 	a = h.next()
-	want = "touches a unit that guards this machine\n\nclaude (pid 100) ← bash\n/run/current-system/sw/bin/systemctl restart sshd.service"
+	want = "touches a unit that guards this machine\n\nclaude ← bash -c sudo x\n/run/current-system/sw/bin/systemctl restart sshd.service"
 	if a.q.Text != want {
 		t.Errorf("got %q", a.q.Text)
 	}
@@ -731,12 +731,43 @@ func TestShellAndEnvWrappersAreClassifiedByEveryInnerCommand(t *testing.T) {
 		{sudoCmd{program: bin + "bash", argv: []string{"bash"}}, []string{unreadable}},
 		{sudoCmd{program: bin + "bash", argv: []string{"bash", "/tmp/x.sh"}}, []string{unreadable}},
 		{sudoCmd{program: bin + "env", argv: []string{"env", "bash", "-lc", "id"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "dash", argv: []string{"dash", "-c", "systemctl stop sshd"}}, []string{guard}},
+		{sudoCmd{program: bin + "ksh", argv: []string{"ksh", "-c", "id"}}, nil},
+		{sudoCmd{program: bin + "fish", argv: []string{"fish", "-c", "systemctl stop sshd"}}, []string{guard}},
+		{sudoCmd{program: bin + "mksh", argv: []string{"mksh", "-c", "id", "arg0"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "zsh", argv: []string{"zsh", "-c"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "dash", argv: []string{"dash", "-s"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "fish", argv: []string{"fish", "/tmp/x.fish"}}, []string{unreadable}},
+		{sudoCmd{program: bin + "ksh", argv: []string{"ksh", "-c", "-x"}}, []string{unreadable}},
 	} {
 		tc.cmd.links = claude(100)
 		a := h.describe(tc.cmd)
 		if strings.Join(a.danger, "|") != strings.Join(tc.want, "|") {
 			t.Errorf("%q: got %q, want %q", tc.cmd.argv, a.danger, tc.want)
 		}
+	}
+}
+
+func TestTheRequestLimitCountsTheHeaderAsThePluginDoes(t *testing.T) {
+	fits := frame(kindApproval, record('e', make([]byte, maxRequest-10-5)))
+	if _, err := readRequest(bytes.NewReader(fits)); err != nil {
+		t.Errorf("a request of exactly %d bytes: %v", len(fits), err)
+	}
+	over := frame(kindApproval, record('e', make([]byte, maxRequest-10-4)))
+	if _, err := readRequest(bytes.NewReader(over)); err == nil {
+		t.Errorf("a request of %d bytes was read", len(over))
+	}
+}
+
+func TestALinksCmdlineHasNoTrailingNulAndItsCommAtMost64Bytes(t *testing.T) {
+	l := peer.Link{Pid: 7, Comm: "bash", Cmdline: []string{"a", ""}}
+	req, err := readRequest(bytes.NewReader(frame(kindApproval, linkRecord(l))))
+	if err != nil || strings.Join(req.links[0].Cmdline, "|") != "a|" {
+		t.Errorf("got %v %q", err, req.links[0].Cmdline)
+	}
+	l.Comm = strings.Repeat("c", 65)
+	if _, err := readRequest(bytes.NewReader(frame(kindApproval, linkRecord(l)))); err == nil {
+		t.Error("a comm of 65 bytes was read")
 	}
 }
 

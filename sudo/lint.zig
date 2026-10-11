@@ -1,22 +1,5 @@
-//! lint: flong's fdlint (tools/fdlint.zig) with the rules frisket-sudo
-//! takes, over Zig's own tokens, so comments and strings never match.
-//!
-//!   lint [--skip DIR]... PATH...
-//!
-//! Prints "NAME:LINE:COL: RULE: why" per finding and exits 1 when there is
-//! any. A name is the path relative to the package root.
-//!
-//!   extern             extern fn, var or const, extern "lib", @extern,
-//!                      @cImport. Not in abi.zig
-//!   export             export. Not in frisket_sudo.zig, planted_type.zig
-//!   raw-number         .raw, a descriptor's number. Not in fd.zig,
-//!                      *_test.zig
-//!   handle-guts        .slot, .gen: a handle's fields. Not in fd.zig,
-//!                      *_test.zig
-//!   catch-unreachable  catch unreachable, unless its line says
-//!                      `// proven: ` and why
-//!   alloc              GeneralPurposeAllocator, DebugAllocator. Not in
-//!                      *_test.zig
+//! lint [--skip DIR]... PATH...: flong's fdlint with the rules frisket-sudo
+//! takes, over Zig's tokens.
 
 const std = @import("std");
 const Tag = std.zig.Token.Tag;

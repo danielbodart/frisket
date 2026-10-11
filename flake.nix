@@ -453,6 +453,7 @@
                 { case = "none"; extra = { }; want = false; }
                 { case = "negated"; extra = sudoers "Defaults !rootpw, !intercept\nDefaults intercept_verify"; want = false; }
                 { case = "extra auth rule"; extra = { security.pam.services.sudo.fprintAuth = true; }; want = true; }
+                { case = "extra frisket-sudo auth rule"; extra = { security.pam.services.frisket-sudo.fprintAuth = true; }; want = true; }
                 { case = "timestamp_type=global"; extra = sudoers "Defaults timestamp_type=global"; want = true; }
                 { case = "!tty_tickets"; extra = sudoers "Defaults !tty_tickets"; want = true; }
                 { case = "tty_tickets"; extra = sudoers "Defaults tty_tickets"; want = false; }

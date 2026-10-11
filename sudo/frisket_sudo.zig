@@ -82,13 +82,14 @@ fn open(
 }
 
 fn checkIn() !fd.Sock {
-    const s = try fd.connectUnix(config.gate_path);
+    const s = try fd.connectUnix(config.gate_path, wire.answer_within);
     errdefer s.close();
     if (try s.peerUid() != config.gate_uid) return error.NotTheGate;
     var req: [10]u8 = undefined;
     try s.sendAll(wire.empty(&req, .check_in));
     const r = try readReply(s, false);
     if (r.reply != .yes) return error.NoCheckIn;
+    try s.unbound();
     return s;
 }
 
@@ -123,6 +124,7 @@ fn accept(
 ) callconv(.c) c_int {
     _ = plugin_name;
     if (plugin_type != c.SUDO_POLICY_PLUGIN) return 1;
+    if (listOrValidateRun(command_info)) return 1;
     const user = gated_user orelse return 1;
     const n = local(user) orelse return 1;
     const s = gate orelse {
@@ -138,7 +140,7 @@ fn accept(
         const r = readReply(s, true) catch return noAnswer(errstr);
         switch (r.reply) {
             .yes => {
-                if (r.body.len > 0) say(c.SUDO_CONV_INFO_MSG, @ptrCast(r.body.ptr));
+                if (r.body.len > 0) say(c.SUDO_CONV_ERROR_MSG, @ptrCast(r.body.ptr));
                 return 1;
             },
             .no => {
@@ -153,6 +155,12 @@ fn accept(
             },
         }
     }
+}
+
+/// sudo's own command_info for a -l or -v that the policy allowed.
+fn listOrValidateRun(command_info: wire.CArray) bool {
+    const cmd = std.mem.span(lookup(command_info, "command") orelse return false);
+    return std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "validate");
 }
 
 fn noAnswer(errstr: [*c][*c]const u8) c_int {

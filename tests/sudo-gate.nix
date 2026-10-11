@@ -1,8 +1,5 @@
-# frisket-sudo as nixosModules.sudoGate runs it: the plugin in sudo.conf,
-# the PAM helper, the gate, and fakegalley as dan's galley.service. A sudo
-# with no tty runs under setsid -w runuser … </dev/null, or in a claude (bash
-# as claude, fed lines through a FIFO) when it needs the same anchor twice;
-# a sudo with a tty runs under script -qec.
+# frisket-sudo as nixosModules.sudoGate runs it, with fakegalley as dan's
+# galley.service.
 { self }:
 { lib, hostPkgs, ... }:
 
@@ -32,6 +29,44 @@ let
     users = [ "dan" ];
     commands = [{ command = "/run/current-system/sw/bin/true"; options = [ "NOPASSWD" ]; }];
   }];
+
+  latency = pkgs.writeText "gate-latency.py" ''
+    import os, socket, sys, time
+
+    def ask(kind):
+        t = time.monotonic_ns()
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect("/run/frisket-sudo/gate.sock")
+        s.sendall(b"FSUD\x01" + kind + b"\0\0\0\0")
+        r = s.recv(3)
+        return s, (time.monotonic_ns() - t) / 1e6, r[:1]
+
+    if sys.argv[1] == "cold":
+        s, ms, r = ask(b"C")
+        assert r == b"Y", r
+        print(f"{ms:.1f}")
+        sys.exit()
+    cs, gs = [], []
+    for _ in range(200):
+        s, ms, r = ask(b"C")
+        assert r == b"Y", r
+        cs.append(ms)
+        rd, wr = os.pipe()
+        if os.fork() == 0:
+            _, ms, r = ask(b"G")
+            os.write(wr, f"{ms} {r.decode()}".encode())
+            os._exit(0)
+        os.wait()
+        ms, r = os.read(rd, 64).decode().split()
+        assert r == "Y", r
+        gs.append(float(ms))
+        s.close()
+        os.close(rd)
+        os.close(wr)
+    cs.sort()
+    gs.sort()
+    print(f"C median {cs[100]:.2f} ms, max {cs[-1]:.2f} ms; G median {gs[100]:.2f} ms, max {gs[-1]:.2f} ms")
+  '';
 
   sleeper = { wantedBy = [ "multi-user.target" ]; serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity"; };
 in
@@ -73,7 +108,7 @@ in
       Slice = "app.slice";
     };
 
-    environment.systemPackages = [ pkgs.socat pkgs.gnutar ];
+    environment.systemPackages = [ pkgs.socat pkgs.gnutar pkgs.python3 ];
   };
 
   testScript = ''
@@ -163,6 +198,15 @@ in
     machine.succeed("install -d -o dan -g users -m 0755 /run/fakegalley")
     galley("ok " + pw + " 0")
 
+    with subtest("C and G answer well inside their 250 ms, from a cold gate too"):
+        cold = []
+        for i in range(5):
+            machine.succeed("systemctl stop frisket-sudo.service")
+            cold.append(float(machine.succeed("python3 ${latency} cold")))
+        warm = machine.succeed("python3 ${latency} warm").strip()
+        print(f"gate latency: cold C {cold} ms; warm {warm}")
+        assert max(cold) < 250, cold
+
     with subtest("sudo's auth stack is the helper, pam_unix, pam_deny"):
         auth = machine.succeed("grep '^auth' /etc/pam.d/sudo").splitlines()
         assert len(auth) == 3, auth
@@ -199,7 +243,7 @@ in
         q = qs[0]
         assert q["uid"] == 952 and is_dialog(q) and q["level"] == "normal" and q["title"] == "sudo systemctl restart foo", q
         lines = q["text"].split("\n")
-        assert lines[0].startswith("claude (pid ") and "/run/current-system/sw/bin/systemctl restart foo" in lines, q
+        assert lines[0] == "claude" and "/run/current-system/sw/bin/systemctl restart foo" in lines, q
         err = machine.succeed("cat /run/claude-a/err")
         assert "frisket-sudo: password remembered for this claude until" in err, err
         machine.fail(f"journalctl -o cat | grep -F {pw}")
@@ -212,6 +256,7 @@ in
         qs = events("question")[asked:]
         assert len(qs) == 2 and is_question(qs[0]) and is_dialog(qs[1]), qs
         assert [b["label"] for b in qs[0]["buttons"]] == ["Refuse", "Allow once"], qs[0]
+        assert qs[0]["text"].split("\n")[0] == "claude", qs[0]
 
     with subtest("danger inside the window is a danger question with no password"):
         asked = len(events("question"))
@@ -406,6 +451,12 @@ in
         assert rc == 0, out
         assert len(events("question")) == asked + 1
 
+    with subtest("a no-tty sudo -l the policy allows reaches accept() and passes silently"):
+        asked, ins = len(events("question")), checkins()
+        rc, out = notty("sudo -l")
+        assert rc == 0 and "frisket_audit" not in out and "frisket-sudo:" not in out, out
+        assert len(events("question")) == asked and checkins() == ins
+
     with subtest("NOPASSWD with a plugin that misreads the mode is refused at accept"):
         machine.succeed("/run/booted-system/specialisation/misread/bin/switch-to-configuration test")
         asked, ins = len(events("question")), checkins()
@@ -423,14 +474,31 @@ in
         assert machine.succeed("/run/wrappers/bin/sudo id -u").strip() == "0"
         start_gate()
 
-    with subtest("a crash-looping gate keeps the socket up: no-tty sudo waits until killed, tty sudo works"):
+    def timed_notty(cmd):
+        rc, out = notty(f"s=$(date +%s%N); {cmd}; echo rc=$? ms=$(( ($(date +%s%N) - s) / 1000000 ))")
+        return out, int(out.rsplit("ms=", 1)[1])
+
+    with subtest("a stuck gate fails a no-tty sudo fast; tty sudo works"):
+        machine.succeed("systemctl start frisket-sudo.service")
+        machine.succeed("kill -STOP $(systemctl show -P MainPID frisket-sudo.service)")
+        out, ms = timed_notty("sudo id -u")
+        print(f"no-tty sudo against a stuck gate: {ms} ms")
+        assert "rc=0" not in out and gate_not_running in out and ms < 2000, out
+        rc, out = tty("sudo id -u")
+        assert "\n0" in out.replace("\r", ""), out
+        machine.succeed("kill -CONT $(systemctl show -P MainPID frisket-sudo.service)")
+        rc, out = notty("sudo id -u")
+        assert rc == 0, out
+
+    with subtest("a crash-looping gate keeps the socket up: no-tty sudo fails fast, tty sudo works"):
         stop_gate()
         machine.succeed("mkdir -p /run/systemd/system/frisket-sudo.service.d && "
                         "printf '[Service]\\nExecStart=\\nExecStart=/run/current-system/sw/bin/false\\n' > /run/systemd/system/frisket-sudo.service.d/crash.conf && "
                         "systemctl daemon-reload")
         start_gate()
-        rc, out = notty("timeout -s KILL 15 sudo id -u")
-        assert rc == 137, (rc, out)
+        out, ms = timed_notty("sudo id -u")
+        print(f"no-tty sudo against a crash-looping gate: {ms} ms")
+        assert "rc=0" not in out and gate_not_running in out and ms < 2000, out
         machine.succeed("systemctl is-active frisket-sudo.socket")
         rc, out = tty("sudo id -u")
         assert "\n0" in out.replace("\r", ""), out

@@ -7,7 +7,7 @@ let
   cfg = config.services.frisket.sudoGate;
   inherit (lib) mkOption types;
   system = pkgs.stdenv.hostPlatform.system;
-  plugin = self.packages.${system}.frisket-sudo-plugin;
+  plugin = (import ./sudo-zig.nix { inherit pkgs; sudo = config.security.sudo.package; }).package;
   gate = lib.getExe self.packages.${system}.frisket-sudo;
   sudoConf = import ./sudo-conf.nix { inherit pkgs plugin; } {
     version = config.security.sudo.package.version;
@@ -15,7 +15,8 @@ let
   };
 
   auth = config.security.pam.services.sudo.rules.auth;
-  authStack = map (r: r.name) (lib.sort (a: b: a.order < b.order) (lib.filter (r: r.enable) (lib.attrValues auth)));
+  authStack = service: map (r: r.name) (lib.sort (a: b: a.order < b.order)
+    (lib.filter (r: r.enable) (lib.attrValues config.security.pam.services.${service}.rules.auth)));
 
   sudoers = lib.filter (l: !lib.hasPrefix "#" (lib.trim l)) (lib.splitString "\n" config.security.sudo.configFile);
   matches = re: lib.concatMap (l: lib.filter lib.isList (builtins.split re l)) sudoers;
@@ -38,8 +39,12 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = authStack == [ "frisket-sudo-pam" "unix" "deny" ];
-        message = "a conversation-free auth module would run on every terminal sudo -n: sudo's auth rules are ${toString authStack}, not frisket-sudo-pam unix deny";
+        assertion = authStack "sudo" == [ "frisket-sudo-pam" "unix" "deny" ];
+        message = "a conversation-free auth module would run on every terminal sudo -n: sudo's auth rules are ${toString (authStack "sudo")}, not frisket-sudo-pam unix deny";
+      }
+      {
+        assertion = authStack "frisket-sudo" == [ "unix" "deny" ];
+        message = "only the password may verify the sudo dialog: the frisket-sudo PAM service's auth rules are ${toString (authStack "frisket-sudo")}, not unix deny";
       }
       {
         assertion = timestampTypes == [ "tty" ];

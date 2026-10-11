@@ -1,7 +1,5 @@
-# frisket-sudo's Zig (sudo/), built as flong builds its own: zig_0_15,
-# ReleaseSafe, one zig build per derivation, the lazy dependencies (minish,
-# zwanzig) fetched once as a fixed output for the checks only.
-{ pkgs }:
+# frisket-sudo's Zig (sudo/), built as flong builds its own.
+{ pkgs, sudo ? pkgs.sudo }:
 let
   inherit (pkgs) lib;
   zig = pkgs.zig_0_15;
@@ -17,7 +15,7 @@ let
       };
       nativeBuildInputs = [ zig ];
       # sudo_plugin.h and pam_appl.h; neither is referenced by what is built.
-      buildInputs = [ pkgs.linux-pam pkgs.sudo.dev ];
+      buildInputs = [ pkgs.linux-pam sudo.dev ];
       dontUseZigBuild = true;
       doCheck = false;
       disallowedReferences = [ zig ];
@@ -51,15 +49,14 @@ let
     pname = if misread then "frisket-sudo-plugin-misread" else "frisket-sudo-plugin";
     files = sources;
     steps = "install";
-    flags = "-Dsudo-version=${pkgs.sudo.version}" + lib.optionalString misread " -Dmisread-mode=true";
+    flags = "-Dsudo-version=${sudo.version}" + lib.optionalString misread " -Dmisread-mode=true";
     passthru = lib.optionalAttrs (!misread) { misread = plugin true; };
   };
 
-  # sudo's own parse_args, built alone from the source of nixpkgs' sudo,
-  # for the mode parse's property test.
+  # sudo's parse_args alone, the mode parse's test oracle.
   oracle = pkgs.stdenv.mkDerivation {
     pname = "sudo-parse-args-oracle";
-    inherit (pkgs.sudo) version src;
+    inherit (sudo) version src;
     buildInputs = [ pkgs.linux-pam ];
     buildPhase = ''
       runHook preBuild
@@ -73,13 +70,9 @@ let
   };
 in
 {
-  # lib/frisket_sudo.so, bin/frisket-sudo-pam, bin/frisket-sudo-check-plugin.
-  # passthru.misread is the plugin whose mode test always says -v, for the
-  # sudo VM's Ticket case.
+  # passthru.misread's mode test always says -v, for the sudo VM.
   package = plugin false;
 
-  # The unit and property tests, the check-plugin's verdicts, lint, fmt and
-  # zwanzig with its planted bugs.
   check = zigBuild {
     pname = "frisket-sudo-zig-check";
     files = sources ++ map (f: root + "/${f}") [ "plugin_test.zig" "misread_test.zig" "planted_type.zig" "lint.zig" "analyze" ".zwanzig.json" ];

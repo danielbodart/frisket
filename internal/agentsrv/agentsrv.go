@@ -348,7 +348,7 @@ func (c *conn) describe(req *request) {
 
 	var title string
 	lines := galleyask.Warnings(r)
-	lines = append(lines, chainText(r), fmt.Sprintf("key %s (%s)", req.keyFP, galleyask.Clean(req.key.Comment)))
+	lines = append(lines, galleyask.ChainText(r), fmt.Sprintf("key %s (%s)", req.keyFP, galleyask.Clean(req.key.Comment)))
 	if req.fwd {
 		lines = append(lines, "forwarded")
 	}
@@ -415,34 +415,3 @@ func (c *conn) knownHosts() map[string][]string {
 	}
 	return names
 }
-
-// chainText runs from the anchor, or the top of the chain, down to the
-// leaf, leaving out the shells between them.
-func chainText(r *peer.Requester) string {
-	top := len(r.Chain) - 1
-	for i := range r.Chain {
-		if &r.Chain[i] == r.Anchor {
-			top = i
-		}
-	}
-	var parts []string
-	for i := top; i >= 0; i-- {
-		l := r.Chain[i]
-		switch {
-		case i == top:
-			parts = append(parts, galleyask.Name(l))
-		case i == 0 || !shells[l.Comm]:
-			args := make([]string, len(l.Cmdline))
-			for j, a := range l.Cmdline {
-				args[j] = galleyask.Clean(a)
-			}
-			if len(args) == 0 {
-				args = []string{galleyask.Clean(l.Comm)}
-			}
-			parts = append(parts, strings.Join(args, " "))
-		}
-	}
-	return strings.Join(parts, " ← ")
-}
-
-var shells = map[string]bool{"bash": true, "sh": true, "zsh": true, "fish": true, "dash": true}

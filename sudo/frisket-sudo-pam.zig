@@ -20,7 +20,7 @@ fn skip(tty: ?[]const u8, service: ?[]const u8, pam_user: ?[]const u8, user: []c
 }
 
 fn checkedIn() !bool {
-    const s = try fd.connectUnix(config.gate_path);
+    const s = try fd.connectUnix(config.gate_path, wire.answer_within);
     defer s.close();
     if (try s.peerUid() != config.gate_uid) return false;
     var req: [10]u8 = undefined;
@@ -37,4 +37,18 @@ test "a tty, another service or another user skips nothing and asks no gate" {
     try std.testing.expect(!skip(null, null, "dan", "dan"));
     try std.testing.expect(!skip(null, "sudo", "bob", "dan"));
     try std.testing.expect(!skip(null, "sudo", null, "dan"));
+}
+
+test "a gate that does not answer 'G' within 250 ms is no" {
+    std.posix.unlink(config.gate_path) catch |err| std.debug.assert(err == error.FileNotFound);
+    defer std.posix.unlink(config.gate_path) catch |err| std.debug.panic("unlink: {}", .{err});
+    const l = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+    defer std.posix.close(l);
+    const addr = try std.net.Address.initUnix(config.gate_path);
+    try std.posix.bind(l, &addr.any, addr.getOsSockLen());
+    try std.posix.listen(l, 1);
+    var t = try std.time.Timer.start();
+    try std.testing.expect(!(checkedIn() catch false));
+    const took = t.read();
+    try std.testing.expect(took >= 240 * std.time.ns_per_ms and took < 2 * std.time.ns_per_s);
 }

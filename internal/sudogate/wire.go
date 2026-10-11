@@ -13,8 +13,9 @@ import (
 const (
 	magic       = "FSUD"
 	version     = 1
-	maxBody     = 1 << 20
+	maxRequest  = 1 << 20
 	maxLinks    = 16
+	maxComm     = 64
 	maxCmdline  = 4096
 	maxMessage  = 512
 	maxPassword = 1023
@@ -58,7 +59,7 @@ func readRequest(r io.Reader) (*request, error) {
 	}
 	req := &request{kind: h[5]}
 	n := binary.BigEndian.Uint32(h[6:])
-	if n > maxBody {
+	if n > maxRequest-uint32(len(h)) {
 		return nil, fmt.Errorf("a body of %d bytes", n)
 	}
 	body := make([]byte, n)
@@ -150,12 +151,12 @@ func readLink(b []byte) (peer.Link, error) {
 	if !ok || len(b) != 0 {
 		return peer.Link{}, errors.New("a link's cmdline cut short or followed by more")
 	}
-	if len(cmdline) > maxCmdline {
-		return peer.Link{}, fmt.Errorf("a cmdline of %d bytes", len(cmdline))
+	if len(comm) > maxComm || len(cmdline) > maxCmdline {
+		return peer.Link{}, fmt.Errorf("a comm of %d bytes or a cmdline of %d", len(comm), len(cmdline))
 	}
 	l.Comm = string(comm)
-	if s := strings.TrimSuffix(string(cmdline), "\x00"); s != "" {
-		l.Cmdline = strings.Split(s, "\x00")
+	if len(cmdline) > 0 {
+		l.Cmdline = strings.Split(string(cmdline), "\x00")
 	}
 	return l, nil
 }

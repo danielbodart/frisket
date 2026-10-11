@@ -1,20 +1,8 @@
-//! frisket-sudo's Zig, built as flong builds its own.
-//!
-//!   install   lib/frisket_sudo.so, bin/frisket-sudo-pam and
-//!             bin/frisket-sudo-check-plugin; needs -Dsudo-version, the
-//!             sudo the plugin is built for, and takes -Dmisread-mode=true
-//!             for a plugin whose mode test always says -v (the sudo VM's
-//!             Ticket case)
-//!   test      unit and property tests, the mode parse held to sudo's own
-//!             parse_args (-Doracle=PATH), and the check-plugin's verdicts;
-//!             needs -Ddev=true
-//!   lint      lint.zig over the package
-//!   fmt       zig fmt --check
-//!   analyze   zwanzig over the package and its planted bugs; needs -Ddev=true
+//! frisket-sudo's Zig: install, test, lint, fmt and analyze steps.
 const std = @import("std");
 
 const gate_path = "/run/frisket-sudo/gate.sock";
-const gate_uid = 952;
+const gate_uid = 0;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -48,7 +36,8 @@ pub fn build(b: *std.Build) void {
             const t = b.addTest(.{ .name = name, .root_module = m.get(name) });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
-        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "pam", .root_module = pamHelper(b, target, optimize, cfg, false).root_module })).step);
+        const pam_cfg = config(b, "frisket-sudo-test-pam.sock", uid, false, "test");
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "pam", .root_module = pamHelper(b, target, optimize, pam_cfg, false).root_module })).step);
 
         const opts = b.addOptions();
         opts.addOption([]const u8, "path", oracle.?);

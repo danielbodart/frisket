@@ -35,13 +35,13 @@ func rootOwned(program, user string) bool {
 // dangers are the catalogue's reasons for words, a shell's -c string and
 // env's command classified by every simple command in them. shell says
 // words run a shell whatever its name, as sudo -s and -i do. A shell run
-// any other way than with -c and then its string cannot be read.
+// any other way than exactly <shell> -c STRING cannot be read.
 func dangers(rules *execrule.Rules, words []string, shell bool) []string {
 	words = slices.Clone(words)
 	words[0] = filepath.Base(words[0])
 	switch {
-	case shell || words[0] == "sh" || words[0] == "bash":
-		if len(words) < 3 || words[1] != "-c" || strings.HasPrefix(words[2], "-") || strings.HasPrefix(words[2], "+") {
+	case shell || galleyask.Shell(words[0]):
+		if len(words) != 3 || words[1] != "-c" || strings.HasPrefix(words[2], "-") || strings.HasPrefix(words[2], "+") {
 			return []string{unreadable}
 		}
 		cmds, ok := rules.Parse(words[2])

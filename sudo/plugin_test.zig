@@ -176,7 +176,7 @@ test "a gated sudo checks in, is allowed, and leaves no descriptor open after cl
     try testing.expectEqual(@as(u8, 'k'), r.gate.approval[0]);
     try testing.expect(std.mem.indexOf(u8, r.gate.approval[0..r.gate.approval_len], "command=/run/current-system/sw/bin/id") != null);
     try testing.expectEqual(@as(usize, 1), said_n);
-    try testing.expectEqual(@as(c_int, c.SUDO_CONV_INFO_MSG), said[0].kind);
+    try testing.expectEqual(@as(c_int, c.SUDO_CONV_ERROR_MSG), said[0].kind);
     try testing.expectEqualStrings("fine by me.", saidLine(0));
     var after_buf: [64]i32 = undefined;
     try testing.expectEqualSlices(i32, before, try openFds(&after_buf));
@@ -206,6 +206,48 @@ test "garbage, a message that is not printable and a password to 'C' are no answ
     try testing.expectEqual(@as(c_int, 0), r.rc);
     try testing.expectEqualStrings("gate not running", std.mem.span(errstr));
     try testing.expectEqualStrings("frisket-sudo: gate not running (systemctl status frisket-sudo.socket); sudo in a terminal is not gated", saidLine(0));
+}
+
+test "a gate that does not answer 'C' within 250 ms is not running, and the command is refused" {
+    const l = try listen();
+    defer {
+        std.posix.close(l);
+        std.posix.unlink(gate_path) catch {};
+    }
+    const m = me();
+    const ui = [_:null]?[*:0]const u8{ m.user, m.uid, "pid=1" };
+    const opts = [_:null]?[*:0]const u8{m.option};
+    const argv = [_:null]?[*:0]const u8{ "sudo", "id" };
+    said_n = 0;
+    var t = try std.time.Timer.start();
+    try testing.expectEqual(@as(c_int, 1), open(arr(&ui), arr(&opts), arr(&argv), 1));
+    const took = t.read();
+    try testing.expect(took >= 240 * std.time.ns_per_ms and took < 2 * std.time.ns_per_s);
+    try testing.expectEqualStrings("frisket-sudo: gate not running (systemctl status frisket-sudo.socket); sudo in a terminal is not gated", saidLine(0));
+    var errstr: [*c]const u8 = null;
+    try testing.expectEqual(@as(c_int, 0), accept(&errstr));
+    try testing.expectEqualStrings("gate not running", std.mem.span(errstr));
+    close();
+}
+
+test "sudo's accept for a -l or -v the policy allowed passes silently, with no check-in" {
+    std.posix.unlink(gate_path) catch {};
+    const m = me();
+    const ui = [_:null]?[*:0]const u8{ m.user, m.uid, "pid=1" };
+    const opts = [_:null]?[*:0]const u8{m.option};
+    for ([_][*:0]const u8{ "-l", "-v" }) |flag| {
+        const argv = [_:null]?[*:0]const u8{ "sudo", flag };
+        said_n = 0;
+        try testing.expectEqual(@as(c_int, 1), open(arr(&ui), arr(&opts), arr(&argv), 2));
+        for ([_][*:0]const u8{ "command=list", "command=validate" }) |cmd| {
+            const info = [_:null]?[*:0]const u8{cmd};
+            var errstr: [*c]const u8 = null;
+            try testing.expectEqual(@as(c_int, 1), plugin.frisket_audit.accept.?("sudoers", c.SUDO_POLICY_PLUGIN, arr(&info), arr(&argv), arr(&info), &errstr));
+            try testing.expect(errstr == null);
+        }
+        try testing.expectEqual(@as(usize, 0), said_n);
+        close();
+    }
 }
 
 test "an accept on behalf of sudo's front end, after the policy's, passes" {

@@ -270,7 +270,7 @@ func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
 		lines = append(lines, "")
 	}
 	lines = append(lines, galleyask.Warnings(a.r)...)
-	lines = append(lines, chainLine(a.r))
+	lines = append(lines, galleyask.ChainText(a.r))
 	if len(a.danger) == 0 {
 		lines = append(lines, "")
 	}
@@ -283,27 +283,6 @@ func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
 		Title: a.title, Text: strings.Join(lines, "\n"), Level: level,
 		Password: !inWindow, Grantable: !inWindow && a.grantable(),
 	}
-}
-
-// chainLine runs from the anchor, with its pid, or the top of the chain,
-// down to sudo's parent.
-func chainLine(r *peer.Requester) string {
-	top := len(r.Chain) - 1
-	for i := range r.Chain {
-		if &r.Chain[i] == r.Anchor {
-			top = i
-		}
-	}
-	var parts []string
-	for i := top; i >= 0; i-- {
-		l := r.Chain[i]
-		if &r.Chain[i] == r.Anchor {
-			parts = append(parts, fmt.Sprintf("%s (pid %d)", galleyask.Name(l), l.Pid))
-			continue
-		}
-		parts = append(parts, galleyask.Name(l))
-	}
-	return strings.Join(parts, " ← ")
 }
 
 // window is the galley process a's claude's window is pinned to, or nil
@@ -421,10 +400,8 @@ type answered struct {
 	err error
 }
 
-// post puts a's dialog or question until it is answered or the requester
-// hangs up. A dialog that a new window for its claude covers is withdrawn
-// and put again as the question; a danger dialog stays. pin is the window's
-// galley process when it was the question.
+// post asks until answered or hung up, re-posting a non-danger dialog as
+// the question when a new window covers it. pin is the window's galley.
 func (s *session) post(a *sudoReq, wrong bool) (got galleyask.Answer, pin *proc, hungUp bool, err error) {
 	for {
 		changed := s.g.windowsChanged()

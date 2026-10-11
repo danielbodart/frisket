@@ -25,6 +25,44 @@ func Name(l peer.Link) string {
 	return Clean(l.Comm)
 }
 
+// ChainText runs from the anchor, or the top of the chain, down to the
+// leaf, leaving out the shells between them.
+func ChainText(r *peer.Requester) string {
+	top := len(r.Chain) - 1
+	for i := range r.Chain {
+		if &r.Chain[i] == r.Anchor {
+			top = i
+		}
+	}
+	var parts []string
+	for i := top; i >= 0; i-- {
+		l := r.Chain[i]
+		switch {
+		case i == top:
+			parts = append(parts, Name(l))
+		case i == 0 || !Shell(l.Comm):
+			args := make([]string, len(l.Cmdline))
+			for j, a := range l.Cmdline {
+				args[j] = Clean(a)
+			}
+			if len(args) == 0 {
+				args = []string{Clean(l.Comm)}
+			}
+			parts = append(parts, strings.Join(args, " "))
+		}
+	}
+	return strings.Join(parts, " ← ")
+}
+
+// Shell is whether name is a shell's.
+func Shell(name string) bool {
+	switch name {
+	case "sh", "ash", "dash", "bash", "rbash", "zsh", "ksh", "mksh", "oksh", "pdksh", "yash", "posh", "csh", "tcsh", "fish":
+		return true
+	}
+	return false
+}
+
 // Warnings are the lines that open a question for a Cut or SessionRoot
 // chain.
 func Warnings(r *peer.Requester) []string {

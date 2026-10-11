@@ -8,6 +8,8 @@ pub const version = 1;
 pub const max_request = 1 << 20;
 pub const max_message = 512;
 pub const max_password = 1023;
+/// The one timeout: 'C' and 'G', connect to reply. No person is waited on.
+pub const answer_within = 250 * std.time.ns_per_ms;
 const header_len = 10;
 const record_head = 5;
 
@@ -99,10 +101,8 @@ fn arraySize(a: CArray, n: usize) usize {
     return size;
 }
 
-/// 'A': the chain and the run info, within max_request. Over it, run_envp
-/// loses entries from its end, then the links lose their cmdlines from the
-/// top of the chain down, and a 't' record says so; what still does not
-/// fit is TooLong.
+/// 'A' within max_request: over it, run_envp entries go from the end, then
+/// cmdlines from the top of the chain, and a 't' record says so.
 pub fn approval(buf: *[max_request]u8, links: []const chain.Link, user_info: CArray, settings: CArray, command_info: CArray, run_argv: CArray, run_envp: CArray) Error![]u8 {
     var size: usize = header_len;
     for (links) |*l| size += linkSize(l, true);
