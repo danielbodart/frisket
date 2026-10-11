@@ -852,7 +852,7 @@ Preconditions: `sudo-lockout` passes; `configurationLimit` is null or `>= 5` (§
 2. Check by hand: a first agent sudo (`-n` too) shows one dialog and runs; the next asks without a password; a wrong password shows the dialog again; `sudo systemctl stop galley.service` shows danger; terminal sudo prompts as before.
 3. Read the journal (dialogs, windows, questions per window) and tune. Then the other host.
 
-In progress: dan-desktop has the gate, with Claude Code's `SUDO_ASKPASS` and the graphical-sudo plugin gone, and is checked as in step 2: one dialog then a window, a plain question inside it, a wrong password asking again, danger shown inside a window, terminal sudo as before. dan-blade still has `sudoGate.enable = false`.
+Done: dan-desktop has the gate, with Claude Code's `SUDO_ASKPASS` and the graphical-sudo plugin gone, and is checked as in step 2: one dialog then a window, a plain question inside it, a wrong password asking again, danger shown inside a window, terminal sudo as before. dan-blade followed without the wait, so both hosts are in daily use and tuning comes from that.
 
 ### M4: stock agent removed
 
