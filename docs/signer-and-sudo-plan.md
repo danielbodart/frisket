@@ -852,6 +852,8 @@ Preconditions: `sudo-lockout` passes; `configurationLimit` is null or `>= 5` (§
 2. Check by hand: a first agent sudo (`-n` too) shows one dialog and runs; the next asks without a password; a wrong password shows the dialog again; `sudo systemctl stop galley.service` shows danger; terminal sudo prompts as before.
 3. Read the journal (dialogs, windows, questions per window) and tune. Then the other host.
 
+In progress: dan-desktop has the gate, with Claude Code's `SUDO_ASKPASS` and the graphical-sudo plugin gone, and is checked as in step 2: one dialog then a window, a plain question inside it, a wrong password asking again, danger shown inside a window, terminal sudo as before. dan-blade still has `sudoGate.enable = false`.
+
 ### M4: stock agent removed
 
 After M2 has settled on both hosts, delete the M0.5 branch from nix-config. The key files in `~/.ssh` stay; they are useless to dan outside `tss`.
@@ -871,7 +873,7 @@ After M2 has settled on both hosts, delete the M0.5 branch from nix-config. The 
 ### Later tracks, not designed here
 
 - **Remote sudo** through the forwarded agent and `pam_rssh`, asked in galley: comes right after M3, starting with its spike. The signer it waited on is live (M2); never with the stock agent, which signs forwarded requests silently. With the normal key; the question needn't show the remote command. It must revisit the sudo auth stack assertion.
-- **Commit signing from inside containers**, built: a policy with `gitSigning` gets `/run/frisket-sign/<policy>/agent` from frisket, which lists the signer's keys, passes on SSHSIG signs in the `git` namespace, refuses everything else (session-bind included), and answers only frisket's user; the signer sees frisket asking and signs under `sshsig.git`. chase binds the directory into the tier's container. The signer is not told which session asked; frisket's journal says which policy and pid.
+- **Commit signing from inside containers**, built: a policy with `gitSigning` gets `/run/frisket-sign/<policy>/agent` from frisket, which lists the signer's keys, passes on SSHSIG signs in the `git` namespace, refuses everything else (session-bind included), and answers only frisket's user; the signer sees frisket asking and signs under `sshsig.git`. chase binds the directory into the trusted tier's container; the strict tier gets no git config and no socket, and chase's flake check fails if it ever binds one. The signer is not told which session asked; frisket's journal says which policy and pid.
 - **Allow-with-notice sudo class** (e.g. `nixos-rebuild switch`, run without a question but posted as a galley notice): parked; it would need a root-owned-PATH check.
 - **A TPM-held age identity.**
 
