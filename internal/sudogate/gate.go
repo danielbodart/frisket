@@ -1,6 +1,7 @@
 // Package sudogate decides each no-tty sudo that frisket-sudo's plugin sends
-// it: check-ins, one galley item per command, and each claude's password
-// window, pinned to the galley process that took the password.
+// it: check-ins, one galley item per command, each claude's password
+// window, pinned to the galley process that took the password, and in remote
+// mode the message the forwarded agent signs in place of a password.
 package sudogate
 
 import (
@@ -32,6 +33,9 @@ type Gate struct {
 	ask   func(context.Context, string, galleyask.Question) (galleyask.Answer, error)
 	alive func(pid int, start uint64) bool
 	now   func() time.Duration
+
+	remoteKeys string
+	hostKeys   string
 
 	danger   *execrule.Rules
 	mu       sync.Mutex
@@ -76,6 +80,12 @@ func (g *Gate) init() error {
 	if g.now == nil {
 		g.now = grant.Now
 	}
+	if g.remoteKeys == "" {
+		g.remoteKeys = "/etc/frisket-sudo/remote-keys"
+	}
+	if g.hostKeys == "" {
+		g.hostKeys = "/etc/ssh/ssh_host_*_key.pub"
+	}
 	danger, err := sudo.Danger()
 	if err != nil {
 		return fmt.Errorf("danger.json: %w", err)
@@ -103,11 +113,13 @@ func (g *Gate) serve(c *net.UnixConn) {
 }
 
 type session struct {
-	g       *Gate
-	c       *net.UnixConn
-	peer    peer.Proc
-	asked   bool
-	pending *sudoReq
+	g         *Gate
+	c         *net.UnixConn
+	peer      peer.Proc
+	remote    bool
+	asked     bool
+	pending   *sudoReq
+	challenge *challenge
 }
 
 func (s *session) run() {
@@ -137,10 +149,11 @@ func (s *session) run() {
 		s.reply(replyNo, "")
 		return
 	}
+	s.remote = req.remote
 	me := proc{s.peer.Pid, s.peer.Start}
 	s.g.checkIn(me)
 	defer s.g.checkOut(me)
-	s.g.Log.Info("check-in", "pid", me.pid)
+	s.g.Log.Info("check-in", "pid", me.pid, "remote", s.remote)
 	if s.reply(replyYes, "") != nil {
 		return
 	}
@@ -152,9 +165,18 @@ func (s *session) run() {
 		switch {
 		case req.kind == kindApproval && !s.asked:
 			s.asked = true
-			s.approve(req)
+			switch {
+			case req.remote != s.remote:
+				s.reply(replyNo, "")
+			case s.remote:
+				s.approveRemote(req)
+			default:
+				s.approve(req)
+			}
 		case req.kind == kindVerify && s.pending != nil:
 			s.verify(req)
+		case req.kind == kindSign && s.challenge != nil:
+			s.sign(req)
 		default:
 			s.reply(replyNo, "")
 		}
@@ -189,6 +211,9 @@ func (g *Gate) checkedIn(p proc) bool {
 // once a dialog's password has gone out in 'W', that dialog's answer.
 type sudoReq struct {
 	r         *peer.Requester
+	user      string
+	runas     string
+	cwd       string
 	program   string
 	argv      []string
 	title     string
@@ -202,23 +227,20 @@ type sudoReq struct {
 }
 
 func (g *Gate) describe(req *request) (*sudoReq, error) {
-	info := map[string]string{}
-	for _, c := range req.command {
-		if k, v, ok := strings.Cut(c, "="); ok {
-			info[k] = v
-		}
-	}
-	settings := map[string]string{}
-	for _, c := range req.settings {
-		if k, v, ok := strings.Cut(c, "="); ok {
-			settings[k] = v
-		}
-	}
+	info := pairs(req.command)
+	settings := pairs(req.settings)
+	userInfo := pairs(req.user)
 	program := info["command"]
 	if program == "" {
 		return nil, errors.New("no command in command_info")
 	}
-	a := &sudoReq{r: peer.FromLinks(req.links), program: program, argv: req.argv, truncated: req.truncated}
+	a := &sudoReq{
+		r: peer.FromLinks(req.links), user: userInfo["user"], runas: info["runas_user"], cwd: info["cwd"],
+		program: program, argv: req.argv, truncated: req.truncated,
+	}
+	if a.cwd == "" {
+		a.cwd = userInfo["cwd"]
+	}
 	words := []string{filepath.Base(program)}
 	if len(req.argv) > 1 {
 		words = append(words, req.argv[1:]...)
@@ -256,14 +278,28 @@ func (a *sudoReq) grantable() bool {
 	return len(a.danger) == 0 && a.keyed()
 }
 
-func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
-	level := "normal"
+func pairs(entries []string) map[string]string {
+	m := map[string]string{}
+	for _, e := range entries {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
+}
+
+func (a *sudoReq) level() string {
 	switch {
 	case len(a.danger) > 0:
-		level = "danger"
+		return "danger"
 	case a.r.Cut || a.r.SessionRoot:
-		level = "warning"
+		return "warning"
 	}
+	return "normal"
+}
+
+func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
+	level := a.level()
 	var lines []string
 	if wrong && !inWindow {
 		lines = append(lines, "Wrong password, try again", "")

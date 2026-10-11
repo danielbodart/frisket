@@ -163,6 +163,8 @@ func TestTheQuestionsEncodeToTheGoldenBytes(t *testing.T) {
 			Text: "launched through systemd --user\nsystemd --user ← bash\n\n/run/current-system/sw/bin/systemctl restart foo"},
 		"sudo-dialog-danger.json": {Title: "sudo systemctl stop sshd.service", Level: "danger", Password: true,
 			Text: "touches a unit that guards this machine\n\nclaude (pid 5113) ← bash\n/run/current-system/sw/bin/systemctl stop sshd.service"},
+		"remote-sudo-question.json": {Title: "sudo on dan-desktop", Level: "danger", Allow: "Allow",
+			Text: "touches a unit that guards this machine\n\nclaude ← ssh -A dan-desktop sudo systemctl stop sshd.service\n/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey SHA256:… (dan@dan-blade)"},
 	} {
 		t.Run(file, func(t *testing.T) {
 			g := startGalley(t, golden(t, "answer-cancel.json"), true)

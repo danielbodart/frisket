@@ -24,6 +24,8 @@ type Question struct {
 	Title, Text, Level string
 	Grantable          bool
 	Password           bool
+	// Allow labels a question's Allow button, "Allow once" when empty.
+	Allow string
 }
 
 type Answer struct {
@@ -128,9 +130,13 @@ func checkPeer(c *net.UnixConn, uid int) (peer.Link, error) {
 }
 
 func item(name string, q Question) *wire.Item {
+	allow := q.Allow
+	if allow == "" {
+		allow = "Allow once"
+	}
 	it := &wire.Item{
 		Kind: wire.KindQuestion, Level: q.Level, Title: q.Title, Text: q.Text,
-		Buttons: []wire.Button{button(wire.AnswerCancel, "Refuse"), button(wire.AnswerExtra, "Allow once")},
+		Buttons: []wire.Button{button(wire.AnswerCancel, "Refuse"), button(wire.AnswerExtra, allow)},
 	}
 	units := wire.Field{Kind: wire.FieldCombo, Values: []string{"minutes", "hours"}}
 	switch {

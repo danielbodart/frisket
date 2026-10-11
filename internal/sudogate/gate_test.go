@@ -3,6 +3,9 @@ package sudogate
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/binary"
 	"io"
 	"log/slog"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/internal/peer"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 	"pgregory.net/rapid"
 )
@@ -46,6 +50,7 @@ type asked struct {
 
 type harness struct {
 	t         *testing.T
+	dir       string
 	g         *Gate
 	path      string
 	peers     chan peer.Proc
@@ -64,7 +69,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	h := &harness{
-		t: t, path: filepath.Join(dir, "gate.sock"),
+		t: t, dir: dir, path: filepath.Join(dir, "gate.sock"),
 		peers: make(chan peer.Proc), questions: make(chan *asked, 16),
 		log: &lockedBuffer{}, dead: map[proc]bool{},
 	}
@@ -78,7 +83,9 @@ func newHarness(t *testing.T) *harness {
 			defer h.mu.Unlock()
 			return !h.dead[proc{pid, start}]
 		},
-		now: func() time.Duration { return time.Duration(h.clock.Load()) },
+		now:        func() time.Duration { return time.Duration(h.clock.Load()) },
+		remoteKeys: filepath.Join(dir, "remote-keys"),
+		hostKeys:   filepath.Join(dir, "ssh_host_*_key.pub"),
 	}
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: h.path, Net: "unix"})
 	if err != nil {
@@ -230,6 +237,9 @@ type sudoCmd struct {
 	argv     []string
 	envp     []string
 	settings []string
+	info     []string
+	userInfo []string
+	remote   bool
 }
 
 func approval(s sudoCmd) []byte {
@@ -238,6 +248,15 @@ func approval(s sudoCmd) []byte {
 		recs = append(recs, linkRecord(l))
 	}
 	recs = append(recs, record('u', []byte("user=dan")), record('c', []byte("command="+s.program)))
+	for _, u := range s.userInfo {
+		recs = append(recs, record('u', []byte(u)))
+	}
+	for _, c := range s.info {
+		recs = append(recs, record('c', []byte(c)))
+	}
+	if s.remote {
+		recs = append(recs, record('m', nil))
+	}
 	for _, st := range s.settings {
 		recs = append(recs, record('s', []byte(st)))
 	}
@@ -799,7 +818,25 @@ func FuzzNoRequestCrashesTheGate(f *testing.F) {
 	f.Add(verified(true))
 	f.Add(append(frame(kindCheckIn), frame(kindApproval, record('k', []byte{1, 2, 3}), record('t', nil))...))
 	f.Add(append(frame(kindCheckIn), frame(kindApproval, record('c', []byte("command=x")), record('a', nil))...))
-	f.Add([]byte("FSUD\x01A\xff\xff\xff\xff"))
+	f.Add([]byte("FSUD\x02A\xff\xff\xff\xff"))
+	remote := remoteCmd("foo")
+	remoteCheckIn := frame(kindCheckIn, record('m', nil))
+	f.Add(append(remoteCheckIn, approval(remote)...))
+	f.Add(append(append(remoteCheckIn, approval(remote)...), frame(kindSign, record('f', []byte("refused")))...))
+	f.Add(append(append(remoteCheckIn, approval(remote)...), frame(kindSign, record('p', []byte("p")), record('g', []byte("g")))...))
+	f.Add(append(append(remoteCheckIn, approval(restart(links, "foo"))...), verified(true)...))
+	f.Add(append(frame(kindCheckIn), frame(kindSign, record('f', nil))...))
+	dir := f.TempDir()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		f.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(k.Public())
+	if err != nil {
+		f.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "remote-keys"), ssh.MarshalAuthorizedKey(pub), 0o644)
+	os.WriteFile(filepath.Join(dir, "ssh_host_ecdsa_key.pub"), ssh.MarshalAuthorizedKey(pub), 0o644)
 	f.Fuzz(func(t *testing.T, b []byte) {
 		fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 		if err != nil {
@@ -826,11 +863,18 @@ func FuzzNoRequestCrashesTheGate(f *testing.F) {
 					return
 				}
 				b = b[n:]
-				var h [3]byte
-				if _, err := io.ReadFull(cc, h[:]); err != nil {
+				var h [5]byte
+				if _, err := io.ReadFull(cc, h[:3]); err != nil {
 					return
 				}
-				if _, err := io.CopyN(io.Discard, cc, int64(binary.BigEndian.Uint16(h[1:]))); err != nil {
+				size := int64(binary.BigEndian.Uint16(h[1:3]))
+				if h[0] == replyMessage {
+					if _, err := io.ReadFull(cc, h[3:]); err != nil {
+						return
+					}
+					size = int64(binary.BigEndian.Uint32(h[1:]))
+				}
+				if _, err := io.CopyN(io.Discard, cc, size); err != nil {
 					return
 				}
 			}
@@ -842,8 +886,10 @@ func FuzzNoRequestCrashesTheGate(f *testing.F) {
 			ask: func(context.Context, string, galleyask.Question) (galleyask.Answer, error) {
 				return password("pw", time.Minute, 900).a, nil
 			},
-			alive: func(int, uint64) bool { return true },
-			now:   func() time.Duration { return time.Hour },
+			alive:      func(int, uint64) bool { return true },
+			now:        func() time.Duration { return time.Hour },
+			remoteKeys: filepath.Join(dir, "remote-keys"),
+			hostKeys:   filepath.Join(dir, "ssh_host_*_key.pub"),
 		}
 		if err := g.init(); err != nil {
 			t.Fatal(err)

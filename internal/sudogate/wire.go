@@ -8,11 +8,12 @@ import (
 	"strings"
 
 	"github.com/danielbodart/frisket/internal/peer"
+	"golang.org/x/crypto/ssh"
 )
 
 const (
 	magic       = "FSUD"
-	version     = 1
+	version     = 2
 	maxRequest  = 1 << 20
 	maxLinks    = 16
 	maxComm     = 64
@@ -26,12 +27,14 @@ const (
 	kindParent   = 'G'
 	kindApproval = 'A'
 	kindVerify   = 'V'
+	kindSign     = 'S'
 )
 
 const (
 	replyYes      = 'Y'
 	replyNo       = 'N'
 	replyPassword = 'W'
+	replyMessage  = 'M'
 )
 
 type request struct {
@@ -44,6 +47,11 @@ type request struct {
 	envp      []string
 	verified  []byte
 	truncated bool
+	remote    bool
+
+	pub    []byte
+	sig    []byte
+	failed *string
 }
 
 func readRequest(r io.Reader) (*request, error) {
@@ -67,12 +75,12 @@ func readRequest(r io.Reader) (*request, error) {
 		return nil, err
 	}
 	switch req.kind {
-	case kindCheckIn, kindParent:
+	case kindParent:
 		if n != 0 {
 			return nil, fmt.Errorf("%q with a body", req.kind)
 		}
 		return req, nil
-	case kindApproval, kindVerify:
+	case kindCheckIn, kindApproval, kindVerify, kindSign:
 	default:
 		return nil, fmt.Errorf("kind %q", req.kind)
 	}
@@ -94,11 +102,23 @@ func readRequest(r io.Reader) (*request, error) {
 	if req.kind == kindVerify && len(req.verified) != 1 {
 		return nil, errors.New("'V' without one result")
 	}
+	if req.kind == kindSign && (req.failed == nil) == (req.pub == nil || req.sig == nil) {
+		return nil, errors.New("'S' without either 'f' or both 'p' and 'g'")
+	}
 	return req, nil
 }
 
 func (req *request) add(tag byte, rec []byte) error {
-	if req.kind == kindVerify {
+	switch req.kind {
+	case kindCheckIn:
+		if tag != 'm' || len(rec) != 0 || req.remote {
+			return fmt.Errorf("record %q in 'C'", tag)
+		}
+		req.remote = true
+		return nil
+	case kindSign:
+		return req.addSign(tag, rec)
+	case kindVerify:
 		if tag != 'r' || len(rec) != 1 || rec[0] > 1 || req.verified != nil {
 			return fmt.Errorf("record %q in 'V'", tag)
 		}
@@ -127,10 +147,42 @@ func (req *request) add(tag byte, rec []byte) error {
 		req.envp = append(req.envp, string(rec))
 	case 't':
 		req.truncated = true
+	case 'm':
+		if len(rec) != 0 || req.remote {
+			return errors.New("'m' with a body or twice")
+		}
+		req.remote = true
 	default:
 		return fmt.Errorf("record %q in 'A'", tag)
 	}
 	return nil
+}
+
+func (req *request) addSign(tag byte, rec []byte) error {
+	switch {
+	case tag == 'p' && req.pub == nil && req.failed == nil:
+		req.pub = rec
+	case tag == 'g' && req.sig == nil && req.failed == nil:
+		req.sig = rec
+	case tag == 'f' && req.pub == nil && req.sig == nil && req.failed == nil && printable(rec):
+		f := string(rec)
+		req.failed = &f
+	default:
+		return fmt.Errorf("record %q in 'S'", tag)
+	}
+	return nil
+}
+
+func printable(b []byte) bool {
+	if len(b) > maxMessage {
+		return false
+	}
+	for _, c := range b {
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func readLink(b []byte) (peer.Link, error) {
@@ -179,5 +231,22 @@ func writeReply(w io.Writer, kind byte, msg []byte) error {
 	copy(b[3:], msg)
 	_, err := w.Write(b)
 	clear(b)
+	return err
+}
+
+// writeMessage is the 'M' reply: the message to sign and the listed keys.
+func writeMessage(w io.Writer, msg []byte, keys [][]byte) error {
+	body := ssh.Marshal(struct {
+		Msg []byte
+		N   uint32
+	}{msg, uint32(len(keys))})
+	for _, k := range keys {
+		body = append(body, ssh.Marshal(struct{ K []byte }{k})...)
+	}
+	if 5+len(body) > maxRequest {
+		return errors.New("the 'M' reply is over its limit")
+	}
+	b := binary.BigEndian.AppendUint32([]byte{replyMessage}, uint32(len(body)))
+	_, err := w.Write(append(b, body...))
 	return err
 }

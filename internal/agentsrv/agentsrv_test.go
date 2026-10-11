@@ -23,6 +23,7 @@ import (
 	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/internal/grant"
 	"github.com/danielbodart/frisket/internal/peer"
+	"github.com/danielbodart/frisket/internal/sudomsg"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/sys/unix"
@@ -782,6 +783,16 @@ func FuzzNoAgentMessageCrashesTheParser(f *testing.F) {
 	f.Add(frame(11, nil))
 	f.Add(append(bind, signMsg(key, userauthData([]byte("sid"), key, host.PublicKey()))...))
 	f.Add(signMsg(key, userauthData([]byte("sid"), key, nil)))
+	remote, err := (&sudomsg.Message{
+		Nonce: make([]byte, sudomsg.NonceSize), HostKeys: [][]byte{host.PublicKey().Marshal()},
+		User: "dan", RunAs: "root", Cwd: "/", Argv: []string{"/bin/id"}, Level: "danger", Reasons: []string{"why"},
+	}).Marshal()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(append(bind, signMsg(key, remote)...))
+	f.Add(signMsg(key, remote))
+	f.Add(append(bind, signMsg(key, make([]byte, 32))...))
 	for _, name := range []string{"sshsig-git.bin", "sshsig-file.bin"} {
 		b, err := os.ReadFile(filepath.Join("testdata", name))
 		if err != nil {

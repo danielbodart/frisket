@@ -1,7 +1,7 @@
 // Package agentsrv serves the SSH agent protocol: for frisket-signer, each
-// connection's session binds, the userauth and SSHSIG parsers, and the fixed
-// order in which a sign is made silently or asked; and for frisket, a policy's
-// git signing socket in front of the signer.
+// connection's session binds, the userauth, SSHSIG and remote sudo parsers,
+// and the fixed order in which a sign is made silently or asked; and for
+// frisket, a policy's git signing socket in front of the signer.
 package agentsrv
 
 import (
@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/internal/grant"
 	"github.com/danielbodart/frisket/internal/peer"
+	"github.com/danielbodart/frisket/internal/sudomsg"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -56,9 +58,11 @@ type Server struct {
 const maxBinds = 16
 
 const (
-	classBound   = "bound userauth"
-	classUnbound = "unbound userauth"
-	classSSHSIG  = "sshsig"
+	classBound      = "bound userauth"
+	classUnbound    = "unbound userauth"
+	classSSHSIG     = "sshsig"
+	classRemoteSudo = "remote sudo"
+	classForwarded  = "forwarded"
 )
 
 var errRefused = errors.New("refused")
@@ -114,6 +118,7 @@ type request struct {
 	host      ssh.PublicKey
 	claimed   []byte
 	fwd       bool
+	sudo      *sudomsg.Message
 
 	key       Key
 	keyFP     string
@@ -224,13 +229,20 @@ func (c *conn) classify(key ssh.PublicKey, data []byte) (*request, error) {
 	for _, b := range c.binds {
 		req.fwd = req.fwd || b.fwd
 	}
+	if sudomsg.HasMagic(data) {
+		return c.remoteSudo(req, data)
+	}
 	if s, err := parseSSHSIG(data); err == nil {
 		req.class, req.namespace = classSSHSIG, s.namespace
 		return req, nil
 	}
 	u, err := parseUserauth(data)
 	if err != nil {
-		return nil, errors.New("neither a userauth request nor SSHSIG")
+		if len(c.binds) == 0 || !req.fwd {
+			return nil, errors.New("neither a userauth request nor SSHSIG, and not a forwarded bound sign")
+		}
+		req.class, req.host = classForwarded, c.binds[len(c.binds)-1].hostKey
+		return req, nil
 	}
 	if !bytes.Equal(u.key, key.Marshal()) {
 		return nil, errors.New("the request names another key")
@@ -250,9 +262,37 @@ func (c *conn) classify(key ssh.PublicKey, data []byte) (*request, error) {
 	return req, nil
 }
 
+// remoteSudo classifies a sign over a remote sudo's message: parsed
+// strictly, on a connection whose last bind is forwarded and to one of the
+// message's host keys.
+func (c *conn) remoteSudo(req *request, data []byte) (*request, error) {
+	m, err := sudomsg.Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("remote sudo: %w", err)
+	}
+	if len(c.binds) == 0 {
+		return nil, errors.New("remote sudo on an unbound connection")
+	}
+	last := c.binds[len(c.binds)-1]
+	if !last.fwd {
+		return nil, errors.New("remote sudo on a connection that is not forwarded")
+	}
+	bound := last.hostKey.Marshal()
+	for _, k := range m.HostKeys {
+		if bytes.Equal(k, bound) {
+			req.class, req.host, req.sudo, req.fwd = classRemoteSudo, last.hostKey, m, true
+			return req, nil
+		}
+	}
+	return nil, fmt.Errorf("remote sudo bound to %s, not one of the message's host keys", ssh.FingerprintSHA256(last.hostKey))
+}
+
 func (c *conn) decide(req *request) verdict {
 	r := c.r
-	if req.class != classSSHSIG && c.s.frisket(r) {
+	if req.class == classRemoteSudo || req.class == classForwarded {
+		return c.ask(req)
+	}
+	if (req.class == classBound || req.class == classUnbound) && c.s.frisket(r) {
 		return verdict{sign: true, source: "frisket"}
 	}
 	if req.class == classBound && !req.fwd && r.Terminal && !r.Cut && req.known && c.s.Terminal == Allow {
@@ -333,6 +373,10 @@ func (c *conn) record(req *request, v verdict) {
 		"outcome", outcome, "source", v.source, "for", v.answer.For.String(),
 		"galley_pid", v.answer.Galley.Pid, "galley_cgroup", v.answer.Galley.Cgroup,
 	}
+	if m := req.sudo; m != nil {
+		attrs = append(attrs, "user", m.User, "runas", m.RunAs, "cwd", m.Cwd, "argv", m.Argv,
+			"level", m.Level, "reasons", m.Reasons, "nonce", hex.EncodeToString(m.Nonce))
+	}
 	if v.err != nil {
 		attrs = append(attrs, "err", v.err.Error())
 	}
@@ -345,25 +389,30 @@ func (c *conn) describe(req *request) {
 	r := c.r
 	pub, _ := ssh.NewPublicKey(req.key.Signer.Public())
 	req.keyFP = ssh.FingerprintSHA256(pub)
+	keyLine := fmt.Sprintf("key %s (%s)", req.keyFP, galleyask.Clean(req.key.Comment))
+	if req.class == classRemoteSudo {
+		c.describeRemoteSudo(req, keyLine)
+		return
+	}
 
 	var title string
 	lines := galleyask.Warnings(r)
-	lines = append(lines, galleyask.ChainText(r), fmt.Sprintf("key %s (%s)", req.keyFP, galleyask.Clean(req.key.Comment)))
+	lines = append(lines, galleyask.ChainText(r), keyLine)
 	if req.fwd {
 		lines = append(lines, "forwarded")
 	}
 	switch req.class {
+	case classForwarded:
+		req.dest = c.hostName(req.host)
+		title = "agent signature on " + req.dest
+		lines = append(lines, "bound to "+req.dest)
 	case classBound:
-		fp := ssh.FingerprintSHA256(req.host)
-		names := c.knownHosts()[fp]
+		names := c.hostNames(req.host)
 		req.known = len(names) > 0
 		if req.known {
-			for i, n := range names {
-				names[i] = galleyask.Clean(n)
-			}
 			req.dest = strings.Join(names, ", ")
 		} else {
-			req.dest = "unknown host " + fp
+			req.dest = "unknown host " + ssh.FingerprintSHA256(req.host)
 			lines = append(lines, "unknown host key")
 		}
 		title = "ssh to " + req.dest
@@ -396,6 +445,49 @@ func (c *conn) describe(req *request) {
 		level = "warning"
 	}
 	req.question = galleyask.Question{Title: title, Text: strings.Join(lines, "\n"), Level: level, Grantable: req.grantable}
+}
+
+func (c *conn) describeRemoteSudo(req *request, keyLine string) {
+	m := req.sudo
+	req.dest = c.hostName(req.host)
+	var lines []string
+	for _, r := range m.Reasons {
+		lines = append(lines, galleyask.Clean(r))
+	}
+	if len(lines) > 0 {
+		lines = append(lines, "")
+	}
+	argv := make([]string, len(m.Argv))
+	for i, a := range m.Argv {
+		argv[i] = galleyask.Clean(a)
+	}
+	lines = append(lines,
+		galleyask.ChainText(c.r),
+		strings.Join(argv, " "),
+		fmt.Sprintf("%s as %s in %s", galleyask.Clean(m.User), galleyask.Clean(m.RunAs), galleyask.Clean(m.Cwd)),
+		keyLine)
+	level := m.Level
+	if level == "" {
+		level = "normal"
+	}
+	req.question = galleyask.Question{Title: "sudo on " + req.dest, Text: strings.Join(lines, "\n"), Level: level, Allow: "Allow"}
+}
+
+// hostNames are key's names in the known hosts file.
+func (c *conn) hostNames(key ssh.PublicKey) []string {
+	names := c.knownHosts()[ssh.FingerprintSHA256(key)]
+	for i, n := range names {
+		names[i] = galleyask.Clean(n)
+	}
+	return names
+}
+
+// hostName is key's names, else its fingerprint.
+func (c *conn) hostName(key ssh.PublicKey) string {
+	if names := c.hostNames(key); len(names) > 0 {
+		return strings.Join(names, ", ")
+	}
+	return ssh.FingerprintSHA256(key)
 }
 
 func (c *conn) knownHosts() map[string][]string {
