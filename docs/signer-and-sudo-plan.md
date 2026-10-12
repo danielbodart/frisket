@@ -994,9 +994,11 @@ Done: nix-config has no `sshSigner.enable`, no home-manager ssh-tpm-agent and no
 
 ### M5: recovery
 
-- **TPM cleared, firmware update or new board**: `sudo systemctl start frisket-signer-keygen`, move the new key from `/var/lib/frisket-signer/new/` into place, commit the `.pub` and authorize it on GitHub, `server`, `mac` and the other host, using the other host's TPM key. If both hosts lost their keys, add the pubs at each remote's console. Re-enrol the Blade's disk unlock separately (`scripts/tpm-enroll.sh`).
+- **TPM cleared, firmware update or new board**: `sudo systemctl start frisket-signer-keygen`, move the new key from `/var/lib/frisket-signer/new/` into place, commit the `.pub` and authorize it on GitHub, `server`, `dan-mac` and the other host, using the other host's TPM key. If both hosts lost their keys, add the pubs at each remote's console. Re-enrol the Blade's disk unlock separately (nix-config's `hosts/dan-blade/tpm-enroll.sh`).
 - **DA lockout**: signing resumes when the counter decays (`LOCKOUT_INTERVAL` 7200 s). Lockout auth is set on both hosts, so `tpm2_dictionarylockout --clear-lockout` needs it.
-- `installer/install.sh`'s closing text: TPM keys need keygen after a reinstall.
+- nix-config's `platforms/nixos/installer/install.sh` restores the committed key into `/var/lib/frisket-signer/`, and its closing text, like `platforms/nixos/install.sh`'s dead-TPM error, says how a cleared TPM gets a new key.
+
+Done: the installer restores the key for the signer and says how to make a new one; the rest is how to recover, when it is needed.
 
 ### Rollback
 
