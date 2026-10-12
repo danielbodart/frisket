@@ -8,8 +8,9 @@
 // key, and needs none. Each command the client asks to run is decided by
 // the route's rules, admitted, asked about or refused; one admitted runs on
 // the machine over frisket's own login, with the user's key, to a host key
-// the route pins. Nothing else on the connection goes anywhere: no shell, no
-// pty, no forwarding, no agent.
+// the route pins. An interactive shell, and a terminal, only where the
+// machine's interactive answer admits one, relayed as it is; nothing else on
+// the connection goes anywhere: no subsystem, no forwarding, no agent.
 package sshroute
 
 import (

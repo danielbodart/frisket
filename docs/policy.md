@@ -275,7 +275,7 @@ where JSON's decoders would keep the last.
 ### Field scope
 
 A field only the host may set has `"x-scope": "host"` in the schema: the
-document's `name`, `record` and `ceiling`; a route's `host`, `upstream`,
+document's `name`, `record`, `interactive` and `ceiling`; a route's `host`, `upstream`,
 `upstreamCA`, `credentialFile`, `credentialJSON`, `header`, `basicUser`,
 `placeholder`, `refusal`, `sessionKey` and `docker`, which say where a request
 goes and what it carries, `always`, and its `paths`, `graphql`, `git`, `encodedSlashes`
@@ -283,7 +283,9 @@ and `ceiling`, which say what a request is and so which class answers it and
 which ceiling holds it -- a project that could reclassify a guarded operation
 could lift it past its ceiling; an SSH machine's `address`, `user`, `hostKeys`,
 `agent`, `keyFile`, `passwordFile`, `identity`, `shell`, `commands`,
-`always` and `ceiling`. A project answers: `allow`, `lan`, `operations`, `exec`, `env`,
+`always`, `interactive` -- whether an interactive shell, nothing typed into
+which is decided, may be opened on it ([ssh.md](ssh.md#interactive-shells))
+-- and `ceiling`. A project answers: `allow`, `lan`, `operations`, `exec`, `env`,
 `writes`, `guarded`, `unmatched`.
 
 ```

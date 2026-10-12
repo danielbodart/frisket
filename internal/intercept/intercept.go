@@ -152,7 +152,8 @@ type Question struct {
 	// Kind is what is asked about: empty for an HTTP request, as every
 	// question was before there was anything else, and "ssh" for a command
 	// on an SSH route -- whose Host is the route's name, with no Method or
-	// Path, and whose Body is the start of the command's stdin -- and
+	// Path, and whose Body is the start of the command's stdin --
+	// "interactive" for an interactive shell on one (KindInteractive), and
 	// "egress" for a recording session's connection to a name its policy
 	// does not allow, or to the local network: Host is the name, Address
 	// the ip:port dialled, and there is no Route, Method or Path.
@@ -166,6 +167,10 @@ type Question struct {
 	// Shell is a command on a Shell route: typed into the device's own CLI,
 	// whose grammar frisket does not know, rather than run as an exec.
 	Shell bool `json:"shell,omitempty"`
+	// PTY is an interactive shell's, Kind "interactive": whether the
+	// sandbox asked for a terminal for it, as ssh does on a terminal of
+	// its own, or `ssh -T` and a pipe do not.
+	PTY bool `json:"pty,omitempty"`
 	// Record is a question from a recording session, whose answer is what
 	// is recorded as well as what is done: allow, ask -- admitted now and
 	// recorded as one to ask about -- or refuse. An asker shows the third
@@ -190,6 +195,12 @@ type Question struct {
 
 // KindEgress is a Question's Kind for a recording session's connection.
 const KindEgress = "egress"
+
+// KindInteractive is a Question's Kind for an interactive shell on an SSH
+// route: Route and Host are the route's name, Address and User where it
+// logs in, PTY whether a terminal was asked for, and there is no Command
+// or Body -- nothing typed into the shell is seen or decided.
+const KindInteractive = "interactive"
 
 // Config is everything an Interceptor needs.
 type Config struct {

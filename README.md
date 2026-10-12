@@ -235,8 +235,9 @@ A route can do more than add a bearer token. Each is in
 - **Docker**: hold a sandbox to its own project's containers on your daemon. See
   [docs/docker.md](docs/docker.md).
 - **SSH**: run commands on your own machines with no key or password in the
-  sandbox, each admitted, asked about or refused by its words; no shell, pty
-  or forwarding for the sandbox, and a device whose CLI ignores an exec --
+  sandbox, each admitted, asked about or refused by its words; no
+  forwarding, and no shell or pty for the sandbox unless the host answers a
+  machine's `interactive` with ask or allow; a device whose CLI ignores an exec --
   a modem's -- has the command typed into its shell. See
   [docs/ssh.md](docs/ssh.md).
 

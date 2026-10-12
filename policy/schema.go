@@ -10,7 +10,7 @@ import (
 // answerFields are the string fields, and the maps whose values, are
 // answers: allow, ask or refuse.
 var answerFields = map[string]bool{
-	"Answers.Writes": true, "Answers.Guarded": true, "Answers.Unmatched": true,
+	"Answers.Writes": true, "Answers.Guarded": true, "Answers.Unmatched": true, "Answers.Interactive": true,
 	"RouteV2.Operations": true, "SSHRouteV2.Exec": true, "GraphQLV2.Unmatched": true,
 }
 
@@ -24,7 +24,8 @@ var descriptions = map[string]string{
 	"Answers.Writes":         "An operation of class write: allow, ask or refuse. Unset, the next layer out's; at the last, ask.",
 	"Answers.Guarded":        "An operation of class guarded. Unset, the next layer out's; at the last, refuse.",
 	"Answers.Unmatched":      "A request no operation describes, or one of no class. Unset, the next layer out's; at the last, refuse (an SSH route's ask).",
-	"DocumentV2.Ceiling":     "The most lenient answer any route may give each class, writes, guarded and unmatched: allow < ask < refuse, the stricter of an answer and its ceiling winning. Unset is no ceiling.",
+	"Answers.Interactive":    "An SSH machine's interactive shell, with or without a terminal, relayed as it is with nothing typed into it decided: allow, ask or refuse. The host's alone, and never a route's. Unset, the next layer out's; at the last, refuse.",
+	"DocumentV2.Ceiling":     "The most lenient answer any route may give each class, writes, guarded and unmatched, and any SSH machine its interactive shell: allow < ask < refuse, the stricter of an answer and its ceiling winning. Unset is no ceiling.",
 	"RouteV2.Ceiling":        "The most lenient answer this route may give each class, beside the document's.",
 	"RouteV2.Paths":          "What the route's requests are: \"METHOD[,METHOD] /path\" to the operation each is.",
 	"RouteV2.Operations":     "Answers by operation id, \"category:<name>\", or endpoint pattern \"METHOD[,METHOD] /path\" (* one segment, a last ** the rest): id, then category, then the most specific pattern, then the class's answer.",
@@ -44,6 +45,10 @@ func SchemaV2() []byte {
 	s["title"] = "frisket policy document, version 2"
 	props := s["properties"].(map[string]any)
 	props["version"] = map[string]any{"const": 2, "description": descriptions["DocumentV2.Version"]}
+	// interactive is an SSH machine's, and the document's for every one:
+	// a route has no shell, and Lower refuses it there, its ceiling's too.
+	route := props["routes"].(map[string]any)["additionalProperties"].(map[string]any)["properties"].(map[string]any)
+	delete(route["ceiling"].(map[string]any)["properties"].(map[string]any), "interactive")
 	s["required"] = []string{"version"}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -82,6 +87,9 @@ func schemaOf(t reflect.Type) map[string]any {
 			key := t.Name() + "." + f.Name
 			if f.owner != "" {
 				key = f.owner + "." + f.Name
+			}
+			if key == "Answers.Interactive" && t == reflect.TypeFor[RouteV2]() {
+				continue // an SSH machine's, and the document's for every one
 			}
 			switch {
 			case answerFields[key] && f.Type.Kind() == reflect.Map:

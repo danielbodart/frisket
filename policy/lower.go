@@ -57,6 +57,8 @@ const (
 	builtinUnmatched = "refuse"
 	// builtinSSHUnmatched is an SSH route's, as version 1's is.
 	builtinSSHUnmatched = "ask"
+	// builtinInteractive is an SSH machine's interactive shell: refused.
+	builtinInteractive = "refuse"
 )
 
 // ReceivePackID is git's push, as an operation.
@@ -122,6 +124,7 @@ func checkAnswers(what string, a *Answers) error {
 		checkAnswer(what+" writes", a.Writes),
 		checkAnswer(what+" guarded", a.Guarded),
 		checkAnswer(what+" unmatched", a.Unmatched),
+		checkAnswer(what+" interactive", a.Interactive),
 	)
 }
 
@@ -137,6 +140,8 @@ func (a *Answers) of(class string) string {
 		return a.Guarded
 	case "unmatched":
 		return a.Unmatched
+	case "interactive":
+		return a.Interactive
 	}
 	return ""
 }
@@ -168,6 +173,8 @@ func (c chain) answer(class string) string {
 		return builtinWrites
 	case "guarded":
 		return builtinGuarded
+	case "interactive":
+		return builtinInteractive
 	}
 	return c.unmatched
 }
@@ -335,6 +342,9 @@ func IsEndpoint(key string) bool {
 func lowerRoute(name string, r RouteV2, d DocumentV2) (Route, *ScopeV2, error) {
 	if err := errors.Join(checkAnswers("route", &r.Answers), checkAnswers("route ceiling", r.Ceiling)); err != nil {
 		return Route{}, nil, err
+	}
+	if r.Interactive != "" || r.Ceiling != nil && r.Ceiling.Interactive != "" {
+		return Route{}, nil, errors.New("interactive is an SSH machine's: a route has no shell")
 	}
 	host, err := lowerHost(r.Host)
 	if err != nil {
@@ -575,7 +585,7 @@ func lowerSSH(d DocumentV2) ([]SSHRoute, error) {
 			continue
 		}
 		if sshHostOnly(d.SSH[k]) || len(d.SSH[k].Commands) > 0 || d.SSH[k].Always {
-			return nil, fmt.Errorf("ssh %s: a pattern is no machine, and sets only env, exec, writes, guarded, unmatched and ceiling", k)
+			return nil, fmt.Errorf("ssh %s: a pattern is no machine, and sets only env, exec, writes, guarded, unmatched, interactive and ceiling", k)
 		}
 		patterns = append(patterns, pat{k, p})
 	}
@@ -619,6 +629,7 @@ func lowerSSH(d DocumentV2) ([]SSHRoute, error) {
 		r := SSHRoute{
 			Name: name, Address: own.Address, User: own.User, HostKeys: own.HostKeys, Agent: own.Agent,
 			KeyFile: own.KeyFile, PasswordFile: own.PasswordFile, Identity: own.Identity, Shell: own.Shell,
+			Interactive: c.clamp(c.answer("interactive"), "interactive"),
 		}
 		for _, e := range slices.Sorted(maps.Keys(eff.Env)) {
 			if eff.Env[e] {

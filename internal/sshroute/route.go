@@ -36,7 +36,11 @@ type Route struct {
 	// shell is whether commands are typed into the machine's shell, on a
 	// terminal, rather than sent as an exec it ignores.
 	shell bool
-	rules *execrule.Rules
+	// interactive is "allow", "ask" or "refuse": whether the sandbox may
+	// open an interactive shell on the machine, and take a terminal for one
+	// or for a command.
+	interactive string
+	rules       *execrule.Rules
 	// refusal is the password the machine last refused, on a route that
 	// logs in with one.
 	refusal refusal
@@ -166,6 +170,14 @@ func compile(pr policy.SSHRoute, reserved Reserved) (*Route, error) {
 		return nil, errors.New("no agent, keyFile or passwordFile: frisket has nothing to log in with")
 	}
 	r.shell = pr.Shell
+	switch pr.Interactive {
+	case "", "refuse":
+		r.interactive = "refuse"
+	case "ask", "allow":
+		r.interactive = pr.Interactive
+	default:
+		return nil, fmt.Errorf("interactive %q: allow, ask or refuse", pr.Interactive)
+	}
 	if pr.Identity != "" && !fingerprintRE.MatchString(pr.Identity) {
 		return nil, fmt.Errorf("identity %q: a key's fingerprint, SHA256: and 43 characters of base64, as ssh-keygen -l prints it", pr.Identity)
 	}

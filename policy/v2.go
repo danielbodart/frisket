@@ -59,10 +59,17 @@ type DocumentV2 struct {
 // "read" is allowed unless something names it. Each is "allow", "ask" or
 // "refuse"; empty is the next layer out's, and at the last the built-in:
 // writes ask, guarded refuse, unmatched refuse (an SSH route's ask).
+//
+// Interactive is an SSH machine's alone: whether the sandbox may open an
+// interactive shell on it, a login shell with or without a terminal, rather
+// than run a command frisket decides by its words. Nothing typed into such a
+// shell is decided, so it is the host's to answer, never a project's, and
+// at the last it is refused. A route's own, or its ceiling's, is refused.
 type Answers struct {
-	Writes    string `json:"writes,omitempty"`
-	Guarded   string `json:"guarded,omitempty"`
-	Unmatched string `json:"unmatched,omitempty"`
+	Writes      string `json:"writes,omitempty"`
+	Guarded     string `json:"guarded,omitempty"`
+	Unmatched   string `json:"unmatched,omitempty"`
+	Interactive string `json:"interactive,omitempty" scope:"host"`
 }
 
 // LANHostV2 is a lan name's ports: empty for every port.

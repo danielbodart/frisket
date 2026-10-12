@@ -61,10 +61,10 @@ func escaped(s string, limit int) string {
 	return b.String()
 }
 
-// log writes a command's one line.
-func (c *channel) log(l *execLine, start time.Time) {
+// head is the start of a command's or a shell's line: where it is, and
+// what it is.
+func (c *channel) head(l *execLine) []any {
 	s := c.s
-	s.lines.Add(1)
 	attrs := []any{
 		"session", s.c.Session,
 		"conn", s.c.ID,
@@ -73,8 +73,37 @@ func (c *channel) log(l *execLine, start time.Time) {
 		"route", s.route.Name,
 		"user", s.route.User,
 		"client_user", s.clientUser,
-		"command", loggedCommand(l.command),
-		"decision", l.decision,
+	}
+	if l.interactive {
+		attrs = append(attrs, "interactive", true)
+	} else {
+		attrs = append(attrs, "command", loggedCommand(l.command))
+	}
+	if l.pty {
+		attrs = append(attrs, "pty", true)
+	}
+	return append(attrs, "decision", l.decision)
+}
+
+// logStart writes an interactive shell's first line, once it is open: its
+// last is written by log when it ends. Nothing of what passes between is.
+func (c *channel) logStart(l *execLine) {
+	l.opened = true
+	c.s.lines.Add(1)
+	attrs := append(c.head(l), "rule", l.rule, "phase", "start")
+	if l.asked {
+		attrs = append(attrs, "asked", true)
+	}
+	c.s.h.log.Info("ssh", attrs...)
+}
+
+// log writes a command's one line, or the last of an interactive shell's.
+func (c *channel) log(l *execLine, start time.Time) {
+	s := c.s
+	s.lines.Add(1)
+	attrs := c.head(l)
+	if l.opened {
+		attrs = append(attrs, "phase", "end")
 	}
 	if l.rule != "" {
 		attrs = append(attrs, "rule", l.rule)

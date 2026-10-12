@@ -419,8 +419,16 @@ func TestAPtyAShellAndASubsystemAreRefusedAndTheCommandStillRuns(t *testing.T) {
 	if err := s.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err == nil {
 		t.Error("pty granted")
 	}
-	if err := s.Shell(); err == nil {
-		t.Error("shell granted")
+	// A shell is refused as a command is, said on its stderr: the
+	// machine's interactive answer is refuse unless the host says not.
+	var errb bytes.Buffer
+	s.Stderr = &errb
+	if err := s.Shell(); err != nil {
+		t.Fatal(err)
+	}
+	var ee *ssh.ExitError
+	if err := s.Wait(); !errors.As(err, &ee) || ee.ExitStatus() != exitRefused || !strings.Contains(errb.String(), ReasonInteractive) {
+		t.Errorf("shell: %v %q", err, errb.String())
 	}
 	s.Close()
 	s, err = c.NewSession()
@@ -456,7 +464,7 @@ func TestAConnectionThatRanNoCommandStillWritesALine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = s.Shell()
+	_ = s.RequestSubsystem("sftp")
 	_ = s.Close()
 	_ = c.Close()
 	waitFor(t, "the line", func() bool { return len(f.sshLines()) == 1 })

@@ -4,10 +4,12 @@ An SSH route lets a session run commands on one of your machines -- `ssh
 gateway systemctl status nginx` -- with no key in the sandbox. frisket
 terminates the sandbox's SSH itself, decides each command it asks to run,
 and runs the ones it admits over its own login to the machine, with your key
-or your password. No shell is ever opened for the sandbox: a route runs
-commands, one to a channel, and nothing else -- on a [shell
-route](#shell-routes), to a device whose CLI ignores a command sent as one,
-by typing each into a shell frisket opens itself.
+or your password. A route runs commands, one to a channel, and nothing
+else -- on a [shell route](#shell-routes), to a device whose CLI ignores a
+command sent as one, by typing each into a shell frisket opens itself --
+unless the host answers its [`interactive`](#interactive-shells) with ask or
+allow, when a person at a terminal in the session may log in to it as they
+would from their own.
 
 A route is reached at its own address, which no name resolves to: the
 session's ruleset steers exactly that address and port to frisket. In the
@@ -536,6 +538,59 @@ info --show` given back as the device printed it, less the echo and the
 }
 ```
 
+## Interactive shells
+
+A version 2 machine's **`interactive`** answers a bare `ssh server`: an
+interactive shell, the login shell the machine runs for the user, with a
+terminal or without one (`ssh -T`). Nothing typed into it is decided --
+frisket cannot read a session's keystrokes as commands -- so it is answered
+whole, once, when it is opened:
+
+- **`refuse`**, the built-in, and every machine's unless the host says
+  otherwise: the shell is refused as a command is, `frisket: <route>: an
+  interactive shell, which this machine's interactive answer refuses` on its
+  stderr and exit status 126, and a terminal asked for before it is refused
+  too.
+- **`ask`**: one question to the asker, `"kind": "interactive"`, for each
+  shell (see [Asking](#asking)). Never offered Always: the answer is the
+  host's to write, not a project file's.
+- **`allow`**: opened with no question.
+
+It is answered as `writes`, `guarded` and `unmatched` are: the machine's
+own, then an `ssh` pattern's that matches it, then the document's, then the
+built-in refuse; and then clamped to every `ceiling` that says, the
+machine's and the document's -- so a tier that must never open one, strict,
+sets `"ceiling": {"interactive": "refuse"}` and nothing under it lifts it. It
+is the host's alone (`x-scope` host): a project's layer may not set it, at
+any level, and `frisket check -layer project` refuses one that does. A
+route has no shell, and an `interactive` on one, or on its ceiling, does not
+load. Version 1 has no word for it, and refuses every shell.
+
+Admitted, frisket opens a session on its own login to the machine, asks
+there for the terminal the sandbox asked for -- its `TERM`, size and modes,
+at the size it is by the time it is opened -- and a shell, and relays the
+channel as it is: stdin, stdout and stderr, every resize, signals, EOF and
+close, and the machine's `exit-status` or `exit-signal`. A machine that
+refuses the terminal or the shell fails it, with exit status 255. It is a
+login like any other on the connection's one upstream, so a machine that
+goes silent ends it after frisket's keepalives as it ends a command.
+
+A **terminal for a command** -- `ssh -t server htop` -- is admitted on a
+machine whose `interactive` is ask or allow, and asked for upstream, with
+nobody asked about the terminal itself: the command is still decided by its
+words, as ever, and asked about or refused as its rules say, and a terminal
+runs nothing that was not decided. A machine that then refuses the terminal
+runs the command without one. Where `interactive` is refuse, a pty is
+refused as before -- a warning to ssh, which runs the command without one.
+On a [shell route](#shell-routes) a command's terminal is frisket's own,
+`dumb`, whatever was asked for; an interactive shell there is the device's
+CLI, relayed as on any machine.
+
+In a [recording session](record.md) a shell `interactive` refuses is written
+down as a refusal no grant changes (`source` `hard`), never put to the
+recording, since no project's file can answer it; one it asks about is put
+to a person as in any session, and recorded as nothing.
+
 ## What is refused
 
 Each command is decided before anything reaches the machine. One refused,
@@ -543,13 +598,15 @@ by a rule, by `unmatched`, or by a person, is answered as a command that ran
 and failed: `frisket: <route>: <reason>` on its stderr and exit status 126,
 so the agent sees why.
 
-Everything but a command is refused, on the connection, whatever the rules
-say:
+Everything but a command, and an [interactive shell](#interactive-shells)
+its machine's `interactive` admits, is refused, on the connection, whatever
+the rules say:
 
-- **pty, shell and subsystem** requests from the sandbox, sftp included,
-  on a shell route too. A pty refused is a
+- **subsystem** requests, sftp included, on every machine and a shell route
+  too; and a **shell** or a **pty** where the machine's `interactive` is
+  refuse, as it is unless the host says otherwise. A pty refused is a
   warning to ssh, which goes on to run the command; a bare `ssh gateway`
-  is refused its shell, and exits.
+  is refused its shell, with the reason on its stderr, and exits 126.
 - **Forwarding**: `-L`, `-R`, `-D`, `-W`, agent forwarding and X11, each
   refused where it is asked for, and logged.
 - **env** requests -- ssh's `SendEnv` and `SetEnv` -- and a second command
@@ -590,6 +647,21 @@ after it. A client that disconnects takes its question with it. As for a
 request, a session has one question at a time, and with no asker every
 command asked about is refused.
 
+An [interactive shell](#interactive-shells) a machine asks about is a
+question of its own kind, `"kind": "interactive"`, with no `command`,
+`body` or `operation` -- nothing typed into it will be seen -- and `pty`
+`true` where the sandbox asked for a terminal, as ssh on a terminal of its
+own does and `ssh -T` or a pipe does not:
+
+```json
+{"session": "...", "workspace": "/home/alice/Projects/server", "policy": "...",
+ "kind": "interactive", "route": "server", "host": "server",
+ "address": "10.0.0.4:22", "user": "core", "pty": true, "bodyMore": false}
+```
+
+It never carries `always` or `diff`. An asker that knows no such kind
+should refuse it.
+
 ## Logging
 
 One `ssh` line per command: `session`, `conn`, `channel`, `dst`, `route`,
@@ -598,7 +670,17 @@ escaped), `decision`, `rule` (the rule that decided: its pattern, an arg rule's 
 after it as `[arg .ssh]`, or `unmatched`), `operation` (its operation's id,
 or every part's, joined by commas, where there are several),
 `asked` when a person was, `reason`, `exit_status` or `exit_signal`, the
-bytes of stdin, stdout and stderr, `duration_ms` and `error`. A channel that
+bytes of stdin, stdout and stderr, `duration_ms` and `error`, and `pty`
+when a command ran on a terminal. A channel that
 is not a session gets a line of its own with its `channel_type`, and a
-connection that ran no command -- a handshake that failed, a shell refused,
-a client that only looked at the host key -- gets one with `channels`.
+connection that ran no command -- a handshake that failed, a subsystem
+refused, a client that only looked at the host key -- gets one with
+`channels`.
+
+An [interactive shell](#interactive-shells) gets two lines, with
+`interactive` `true` in place of `command`, `rule` `interactive`, `pty` when
+it has a terminal, and `asked` when a person was: one with `phase` `start`
+once it is open, and one with `phase` `end` when it ends, with its
+`exit_status` or `exit_signal`, the bytes each way and `duration_ms`. One
+refused or failed gets a single line, with its `reason`. Nothing that passes
+over it is logged: no keystroke, no output, no transcript.

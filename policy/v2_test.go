@@ -304,24 +304,24 @@ func TestTheSchemaMarksTheHostsFields(t *testing.T) {
 	walk(s, "")
 	slices.Sort(host)
 	want := []string{
-		"ceiling", "name", "record",
+		"ceiling", "ceiling.interactive", "interactive", "name", "record",
 		"routes.*.always", "routes.*.basicUser", "routes.*.ceiling", "routes.*.credentialFile", "routes.*.credentialJSON",
 		"routes.*.docker", "routes.*.encodedSlashes", "routes.*.git", "routes.*.graphql", "routes.*.header",
 		"routes.*.host", "routes.*.paths", "routes.*.placeholder", "routes.*.refusal", "routes.*.sessionKey",
 		"routes.*.upstream", "routes.*.upstreamCA",
-		"ssh.*.address", "ssh.*.agent", "ssh.*.always", "ssh.*.ceiling", "ssh.*.commands", "ssh.*.hostKeys", "ssh.*.identity",
+		"ssh.*.address", "ssh.*.agent", "ssh.*.always", "ssh.*.ceiling", "ssh.*.ceiling.interactive", "ssh.*.commands", "ssh.*.hostKeys", "ssh.*.identity", "ssh.*.interactive",
 		"ssh.*.keyFile", "ssh.*.passwordFile", "ssh.*.shell", "ssh.*.user",
 	}
 	if !slices.Equal(host, want) {
 		t.Errorf("host fields %v\nwant %v", host, want)
 	}
 	props := s["properties"].(map[string]any)
-	for _, k := range []string{"version", "name", "allow", "lan", "routes", "ssh", "record", "writes", "guarded", "unmatched", "ceiling"} {
+	for _, k := range []string{"version", "name", "allow", "lan", "routes", "ssh", "record", "writes", "guarded", "unmatched", "interactive", "ceiling"} {
 		if _, ok := props[k]; !ok {
 			t.Errorf("schema has no %s", k)
 		}
 	}
-	if len(props) != 11 {
+	if len(props) != 12 {
 		t.Errorf("schema has %d top-level keys", len(props))
 	}
 }
@@ -344,5 +344,63 @@ func TestAlwaysIsTheHostsMarkOfARouteOrMachine(t *testing.T) {
 	_, err := policy.Load([]byte(`{"version": 2, "name": "p", "ssh": {"*-ap": {"always": true}}}`))
 	if err == nil || !strings.Contains(err.Error(), "a pattern is no machine") {
 		t.Errorf("a pattern's always: %v", err)
+	}
+}
+
+// An SSH machine's interactive shell is answered as its other classes are
+// -- its own, a pattern's, the document's, then the built-in refuse -- and
+// clamped by every ceiling that says; a route has none, and a project's
+// layer may not say it.
+func TestInteractiveIsAMachinesAnswerTheHostsAlone(t *testing.T) {
+	key := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl ap"
+	machine := func(name, addr, extra string) string {
+		return `"` + name + `": {"address": "` + addr + `", "user": "root", "hostKeys": ["` + key + `"], "agent": "/run/a"` + extra + `}`
+	}
+	doc := func(top, ssh string) string {
+		return `{"version": 2, "name": "p"` + top + `, "ssh": {` + ssh + `}}`
+	}
+	answers := func(l *policy.Lowered) map[string]string {
+		out := map[string]string{}
+		for _, r := range l.Policy.SSH {
+			out[r.Name] = r.Interactive
+		}
+		return out
+	}
+	three := machine("gw", "192.168.1.1", `, "interactive": "allow"`) + ", " +
+		machine("nas-ap", "192.168.1.2", "") + ", " + machine("box", "192.168.1.3", "")
+	for _, c := range []struct {
+		name, doc string
+		want      map[string]string
+	}{
+		{"built-in", doc("", three), map[string]string{"gw": "allow", "nas-ap": "refuse", "box": "refuse"}},
+		{"document", doc(`, "interactive": "ask"`, three), map[string]string{"gw": "allow", "nas-ap": "ask", "box": "ask"}},
+		{"pattern", doc("", three+`, "*-ap": {"interactive": "ask"}`), map[string]string{"gw": "allow", "nas-ap": "ask", "box": "refuse"}},
+		{"document ceiling", doc(`, "interactive": "allow", "ceiling": {"interactive": "refuse"}`, three),
+			map[string]string{"gw": "refuse", "nas-ap": "refuse", "box": "refuse"}},
+		{"machine ceiling", doc("", machine("gw", "192.168.1.1", `, "interactive": "allow", "ceiling": {"interactive": "ask"}`)),
+			map[string]string{"gw": "ask"}},
+	} {
+		if got := answers(lowered(t, c.doc)); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	for _, c := range []struct{ doc, want string }{
+		{doc(`, "interactive": "maybe"`, ""), `interactive "maybe"`},
+		{`{"version": 2, "name": "p", "allow": {"a.test": true}, "routes": {"a": {"host": "a.test", "upstream": "https://a.test", "interactive": "allow"}}}`, "a route has no shell"},
+		{`{"version": 2, "name": "p", "allow": {"a.test": true}, "routes": {"a": {"host": "a.test", "upstream": "https://a.test", "ceiling": {"interactive": "refuse"}}}}`, "a route has no shell"},
+	} {
+		if _, err := policy.Load([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", c.doc, err, c.want)
+		}
+	}
+	base := []byte(doc("", three))
+	for _, layer := range []string{
+		`{"ssh": {"gw": {"interactive": "allow"}}}`,
+		`{"ssh": {"*-ap": {"interactive": "allow"}}}`,
+		`{"interactive": "allow"}`,
+	} {
+		if _, err := policy.CheckProjectLayer([]byte(layer), base); err == nil || !strings.Contains(err.Error(), "the host's alone") {
+			t.Errorf("%s: %v, want the host's alone", layer, err)
+		}
 	}
 }

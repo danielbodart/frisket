@@ -117,7 +117,8 @@ type LANHost struct {
 // SSHRoute is one machine a session may run commands on, by SSH, as User.
 // frisket terminates the sandbox's SSH, logs in to Address with the user's
 // own key or password, and decides each command the sandbox asks to run: no
-// credential ever enters the sandbox, and no shell is ever opened for it. The
+// credential ever enters the sandbox, and no shell is opened for it unless
+// Interactive admits one. The
 // machine's login shell must be of the POSIX family, fish or csh: a command
 // is decided by the words those shells read in it, and Windows' cmd.exe
 // reads others -- or the route is a Shell route, which reads far less.
@@ -169,6 +170,12 @@ type SSHRoute struct {
 	// for a simple command no rule matches, and every command a shell would
 	// read as anything but its words.
 	Unmatched string `json:"unmatched,omitempty"`
+	// Interactive is "allow", "ask" or "refuse", and "" is refuse: whether
+	// the sandbox may open an interactive shell on the machine, which
+	// frisket then relays as it is, deciding nothing typed into it. Only a
+	// version 2 document says it (Answers.Interactive), lowered with its
+	// ceilings applied; version 1 has no word for it.
+	Interactive string `json:"-"`
 }
 
 // ExecRule decides the simple commands Command matches: admitted, asked

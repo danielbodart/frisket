@@ -40,7 +40,15 @@ const (
 	// command an exec route's rules cannot read, which it refuses as the
 	// route's unmatched does, not as a recording would.
 	ReasonUnreadable = "not one line of plain words, which is all a shell route types"
+	// ReasonInteractive is an interactive shell on a machine whose
+	// interactive answer is refuse, as every machine's is unless the host
+	// says otherwise. No project's grant changes it.
+	ReasonInteractive = "an interactive shell, which this machine's interactive answer refuses"
 )
+
+// RuleInteractive is the rule of an interactive shell's line: the
+// machine's interactive answer, which decides it.
+const RuleInteractive = "interactive"
 
 // queue is a channel's requests, held for the one goroutine that answers
 // them in order. Unbounded, because what feeds it must never wait: x/crypto
@@ -109,6 +117,11 @@ type channel struct {
 	up ssh.Channel
 	// done is closed when the command has finished and its line is written.
 	done chan struct{}
+	// pty is the terminal the client asked for, taken on a machine whose
+	// interactive answer is not refuse, for the shell or command that
+	// follows. ptyUp is whether up has it.
+	pty   *ptyRequest
+	ptyUp bool
 }
 
 // session serves one session channel: its requests, answered in order by
@@ -123,9 +136,6 @@ func (s *conn) session(n uint64, nc ssh.NewChannel) {
 	q := newQueue()
 	go func() {
 		for r := range reqs {
-			if r.Type == "window-change" && !r.WantReply {
-				continue // no pty to resize, and nothing to answer
-			}
 			q.push(r)
 		}
 		q.close()
@@ -134,27 +144,55 @@ func (s *conn) session(n uint64, nc ssh.NewChannel) {
 		cancel()
 	}()
 	c := &channel{s: s, n: n, ch: ch, ctx: ctx}
-	exec := false
+	started := false
 	for r := q.next(); r != nil; r = q.next() {
 		switch r.Type {
-		case "exec":
-			if exec {
-				// One command to a channel, as sshd allows.
+		case "exec", "shell":
+			if started {
+				// One command or shell to a channel, as sshd allows.
 				_ = r.Reply(false, nil)
 				continue
 			}
-			exec = true
-			c.exec(r)
+			started = true
+			if r.Type == "exec" {
+				c.exec(r)
+			} else {
+				c.interactive(r)
+			}
+		case "pty-req":
+			// A terminal only where the machine's interactive answer is not
+			// refuse, and before what it is for. Refused, it is a warning to
+			// ssh, which goes on to the command.
+			var p ptyRequest
+			if started || c.pty != nil || c.s.route.interactive == "refuse" || ssh.Unmarshal(r.Payload, &p) != nil {
+				_ = r.Reply(false, nil)
+				continue
+			}
+			c.pty = &p
+			_ = r.Reply(true, nil)
+		case "window-change":
+			var p struct{ Columns, Rows, Width, Height uint32 }
+			switch {
+			case c.pty == nil || ssh.Unmarshal(r.Payload, &p) != nil:
+			case c.ptyUp:
+				_, _ = c.up.SendRequest("window-change", false, r.Payload)
+			case !started:
+				// Resized before the shell or command is asked for: the
+				// terminal asked for upstream is the size it is now. One
+				// resized while a person is asked waits in the queue, and
+				// is sent on once the shell is open.
+				c.pty.Columns, c.pty.Rows, c.pty.WidthPixels, c.pty.HeightPix = p.Columns, p.Rows, p.Width, p.Height
+			}
+			_ = r.Reply(false, nil)
 		case "signal":
 			if c.up != nil {
 				_, _ = c.up.SendRequest("signal", false, r.Payload)
 			}
 			_ = r.Reply(false, nil)
 		default:
-			// pty-req, env, shell, subsystem, x11-req,
-			// auth-agent-req@openssh.com and the rest: there is no shell,
-			// no terminal and nothing forwarded. A pty refused is a warning
-			// to ssh, which goes on to the command.
+			// env, subsystem, x11-req, auth-agent-req@openssh.com and the
+			// rest: no sftp, nothing forwarded, and no variable but what a
+			// command sets in its own words.
 			_ = r.Reply(false, nil)
 		}
 	}
@@ -178,6 +216,12 @@ type execLine struct {
 	stdout     atomic.Int64
 	stderr     atomic.Int64
 	err        error
+	// interactive is an interactive shell's line, which has no command;
+	// pty whether the shell or command has a terminal.
+	interactive bool
+	pty         bool
+	// opened is an interactive shell whose first line is written.
+	opened bool
 }
 
 // exec decides a command and runs it, refuses it, or fails it. It answers
@@ -279,6 +323,14 @@ func (c *channel) exec(r *ssh.Request) {
 		c.refuse(r, line, start, exitUpstream)
 		return
 	}
+	if c.pty != nil {
+		// The terminal the client was given, on a machine whose
+		// interactive answer admits one: what runs is still the command
+		// decided. A machine that refuses it runs the command without.
+		if ok, err := up.SendRequest("pty-req", true, ssh.Marshal(*c.pty)); err == nil && ok {
+			c.ptyUp, line.pty = true, true
+		}
+	}
 	// The exec as the client sent it, byte for byte: what was decided is
 	// exactly what runs.
 	ok, err := up.SendRequest("exec", true, r.Payload)
@@ -294,6 +346,111 @@ func (c *channel) exec(r *ssh.Request) {
 	c.up = up
 	c.done = make(chan struct{})
 	go c.proxy(client, up, upReqs, stdin, line, start)
+}
+
+// interactive decides an interactive shell by the machine's interactive
+// answer and, admitted, opens one upstream -- on the terminal the client
+// asked for, if it did -- and relays it as it is: what is typed into it is
+// neither decided nor kept. It answers the request before it returns.
+func (c *channel) interactive(r *ssh.Request) {
+	start := time.Now()
+	rt := c.s.route
+	line := &execLine{interactive: true, pty: c.pty != nil, rule: RuleInteractive}
+	switch rt.interactive {
+	case "allow":
+	case "ask":
+		line.asked = true
+		if reason := c.askInteractive(); reason != "" {
+			line.decision, line.reason = intercept.DecisionRefused, reason
+			c.refuse(r, line, start, exitRefused)
+			return
+		}
+	default:
+		if c.s.h.recorder != nil {
+			// The host's answer, which no grant changes: written down as
+			// that, never put to the recording.
+			c.s.h.recorder.Hard(record.Line{
+				Session: c.s.c.Session, Kind: record.KindSSH, Route: rt.Name, User: rt.User,
+				Address: rt.Address.String(), Rule: RuleInteractive,
+			}, c.interactiveKey(), ReasonInteractive)
+		}
+		line.decision, line.reason = intercept.DecisionRefused, ReasonInteractive
+		c.refuse(r, line, start, exitRefused)
+		return
+	}
+	client, err := c.s.client(c.ctx)
+	if err != nil {
+		line.decision, line.reason, line.err = intercept.DecisionFailed, ReasonUpstream, err
+		if hostKeyError(err) {
+			line.reason = ReasonHostKey
+		}
+		c.refuse(r, line, start, exitUpstream)
+		return
+	}
+	up, upReqs, err := client.OpenChannel("session", nil)
+	if err != nil {
+		line.decision, line.reason, line.err = intercept.DecisionFailed, ReasonUpstream, err
+		c.refuse(r, line, start, exitUpstream)
+		return
+	}
+	type request struct {
+		name    string
+		payload []byte
+	}
+	reqs := []request{{"shell", nil}}
+	if c.pty != nil {
+		reqs = []request{{"pty-req", ssh.Marshal(*c.pty)}, {"shell", nil}}
+	}
+	for _, q := range reqs {
+		ok, err := up.SendRequest(q.name, true, q.payload)
+		if err != nil || !ok {
+			_ = up.Close()
+			if err == nil {
+				err = fmt.Errorf("the machine refused a %s", q.name)
+			}
+			line.decision, line.reason, line.err = intercept.DecisionFailed, ReasonExecFailed, err
+			c.refuse(r, line, start, exitUpstream)
+			return
+		}
+	}
+	_ = r.Reply(true, nil)
+	line.decision = intercept.DecisionAllowed
+	c.up, c.ptyUp = up, c.pty != nil
+	c.logStart(line)
+	c.done = make(chan struct{})
+	go c.proxy(client, up, upReqs, c.ch, line, start)
+}
+
+// askInteractive puts an interactive shell to the asker: why it is refused,
+// or "". Never offered Always, and never a recording's question: the
+// answer is the host's to write, not a grant's.
+func (c *channel) askInteractive() string {
+	h, rt := c.s.h, c.s.route
+	q := intercept.Question{
+		Session:   c.s.c.Session,
+		Workspace: h.workspace,
+		Policy:    h.policy,
+		Route:     rt.Name,
+		Host:      rt.Name,
+		Kind:      intercept.KindInteractive,
+		Address:   rt.Address.String(),
+		User:      rt.User,
+		Shell:     rt.shell,
+		PTY:       c.pty != nil,
+		ID:        record.ID(c.s.c.Session, record.KindSSH, c.interactiveKey()),
+	}
+	_, reason, err := intercept.AskAbout(c.ctx, h.asker, q)
+	if err != nil {
+		h.log.Error("ask", "session", c.s.c.Session, "conn", c.s.c.ID, "channel", c.n, "route", rt.Name, "error", err.Error())
+	}
+	return reason
+}
+
+// interactiveKey names an interactive shell on the route within its
+// session: no command's key, since a command keyed is UTF-8, and \xff is
+// no UTF-8.
+func (c *channel) interactiveKey() string {
+	return c.s.route.Name + "\x00\xffinteractive"
 }
 
 // errNoExit is a command's channel upstream closed with no exit status, on
@@ -349,7 +506,9 @@ func (c *channel) proxy(client *login, up ssh.Channel, upReqs <-chan *ssh.Reques
 				if ssh.Unmarshal(r.Payload, &p) == nil {
 					signal = p.Signal
 				}
-			case "eow@openssh.com":
+			case "eow@openssh.com", "xon-xoff":
+				// xon-xoff: whether a terminal's client may take ^S and ^Q
+				// for itself, which the machine's terminal says.
 			default:
 				// A keepalive, or anything else the machine asks of its
 				// client, is frisket's to answer, and the sandbox's to

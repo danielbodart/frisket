@@ -451,6 +451,10 @@ pattern, `"*-ap"`, is no machine: its `exec`, `env` and answers apply to
 every machine whose name it matches, the machine's own winning and a
 narrower pattern's over a wider one's. `unmatched: "allow"` admits every
 readable command no rule matches and refuses what cannot be read.
+`interactive`, the host's alone, answers an interactive shell on the machine
+-- `ssh server` with no command -- as a class of its own, refused unless a
+layer says otherwise and clamped by `ceiling.interactive`; a route has none
+([docs/ssh.md](ssh.md#interactive-shells)).
 
 Hosts: `allow` and `lan` keys are names or host patterns, the signer's grammar
 (hostpattern): `*` one label, `*` within a label a run of it (`*-ap.lan`),
