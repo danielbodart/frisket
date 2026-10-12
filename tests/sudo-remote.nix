@@ -190,7 +190,7 @@ in
         assert q["title"] == "sudo on server" and q["level"] == "normal" and q["kind"] == "question", q
         assert [b["label"] for b in q["buttons"]] == ["Refuse", "Allow"], q
         lines = q["text"].split("\n")
-        assert any(l.startswith("claude") for l in lines), lines
+        assert q["table"]["rows"][0][1] == "claude", q
         assert "/run/current-system/sw/bin/id -u" in lines, lines
         assert "dan as root in /home/dan" in lines, lines
         assert events(server, "question") == []

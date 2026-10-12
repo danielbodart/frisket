@@ -217,7 +217,7 @@ type sudoReq struct {
 	program   string
 	argv      []string
 	title     string
-	command   string
+	command   []string
 	danger    []string
 	env       []string
 	truncated bool
@@ -250,7 +250,7 @@ func (g *Gate) describe(req *request) (*sudoReq, error) {
 		shown[i] = galleyask.Clean(w)
 	}
 	a.title = "sudo " + strings.Join(shown, " ")
-	a.command = strings.Join(append([]string{galleyask.Clean(program)}, shown[1:]...), " ")
+	a.command = galleyask.Command(append([]string{program}, words[1:]...), galleyask.Width)
 
 	if !rootOwned(program, g.User) {
 		a.danger = append(a.danger, outsideLine(program))
@@ -308,16 +308,15 @@ func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
 		lines = append(lines, a.danger...)
 		lines = append(lines, "")
 	}
-	lines = append(lines, galleyask.Warnings(a.r)...)
-	lines = append(lines, galleyask.ChainText(a.r))
-	if len(a.danger) == 0 {
+	if w := galleyask.Warnings(a.r); len(w) > 0 {
+		lines = append(lines, w...)
 		lines = append(lines, "")
 	}
-	lines = append(lines, a.command)
+	lines = append(lines, a.command...)
 	lines = append(lines, a.env...)
 	return galleyask.Question{
 		Title: a.title, Text: strings.Join(lines, "\n"), Level: level,
-		Password: !inWindow, Grantable: !inWindow && a.grantable(), Allow: "Allow",
+		Password: !inWindow, Grantable: !inWindow && a.grantable(), Allow: "Allow", Chain: galleyask.Chain(a.r),
 	}
 }
 

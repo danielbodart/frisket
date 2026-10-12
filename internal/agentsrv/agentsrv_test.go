@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -748,9 +749,13 @@ func TestTheQuestionNamesTheRequesterOnceAndLeavesOutTheShells(t *testing.T) {
 	}
 	done := c.signAsync(h.key(0), userauthData([]byte("sid"), h.key(0), nil))
 	a := h.next()
-	want := "claude ← git push ← ssh git@github.com\n"
-	if !strings.HasPrefix(a.q.Text, want) || !strings.HasSuffix(a.q.Text, "\nA grant covers github.com from claude (pid 100).") {
-		t.Errorf("asked %q", a.q.Text)
+	var procs []string
+	for _, r := range a.q.Chain.Rows {
+		procs = append(procs, r[1])
+	}
+	if !slices.Equal(procs, []string{"claude", "git push", "ssh git@github.com"}) || a.q.Chain.Summary != "claude ← ssh git@github.com" ||
+		!strings.HasPrefix(a.q.Text, "key ") || !strings.HasSuffix(a.q.Text, "\nA grant covers github.com from claude (pid 100).") {
+		t.Errorf("asked %q %+v", a.q.Text, a.q.Chain)
 	}
 	a.reply <- answered{}
 	wait(t, done)

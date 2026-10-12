@@ -171,11 +171,11 @@ func TestTheRemoteSudoQuestionNamesTheHostTheCommandAndTheLevel(t *testing.T) {
 		wantLvl string
 	}{
 		{h.github, "sudo on github.com", "", nil,
-			"claude ← git push ← ssh git@github.com\n/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey " + fp + " (dan@test)", "normal"},
+			"/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey " + fp + " (dan@test)", "normal"},
 		{h.server, "sudo on " + ssh.FingerprintSHA256(h.server.PublicKey()), "danger", []string{"touches a unit that guards this machine", "LD_PRELOAD=/tmp/\x1bx.so"},
-			"touches a unit that guards this machine\nLD_PRELOAD=/tmp/\\u001bx.so\n\nclaude ← git push ← ssh git@github.com\n/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey " + fp + " (dan@test)", "danger"},
+			"touches a unit that guards this machine\nLD_PRELOAD=/tmp/\\u001bx.so\n\n/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey " + fp + " (dan@test)", "danger"},
 		{h.github, "sudo on github.com", "warning", []string{"the process chain was cut short"},
-			"the process chain was cut short\n\nclaude ← git push ← ssh git@github.com\n/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey " + fp + " (dan@test)", "warning"},
+			"the process chain was cut short\n\n/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey " + fp + " (dan@test)", "warning"},
 	} {
 		done := h.forwarded(tc.host).signAsync(h.key(0), sudoMessage(t, tc.level, tc.reasons, tc.host.PublicKey()))
 		a := h.next()

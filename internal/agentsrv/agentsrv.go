@@ -397,7 +397,7 @@ func (c *conn) describe(req *request) {
 
 	var title string
 	lines := galleyask.Warnings(r)
-	lines = append(lines, galleyask.ChainText(r), keyLine)
+	lines = append(lines, keyLine)
 	if req.fwd {
 		lines = append(lines, "forwarded")
 	}
@@ -444,7 +444,7 @@ func (c *conn) describe(req *request) {
 	if r.Cut || r.SessionRoot {
 		level = "warning"
 	}
-	req.question = galleyask.Question{Title: title, Text: strings.Join(lines, "\n"), Level: level, Grantable: req.grantable}
+	req.question = galleyask.Question{Title: title, Text: strings.Join(lines, "\n"), Level: level, Grantable: req.grantable, Chain: galleyask.Chain(r)}
 }
 
 func (c *conn) describeRemoteSudo(req *request, keyLine string) {
@@ -457,14 +457,12 @@ func (c *conn) describeRemoteSudo(req *request, keyLine string) {
 	if len(lines) > 0 {
 		lines = append(lines, "")
 	}
-	argv := make([]string, len(m.Argv))
-	for i, a := range m.Argv {
-		argv[i] = galleyask.Clean(a)
+	if w := galleyask.Warnings(c.r); len(w) > 0 {
+		lines = append(lines, w...)
+		lines = append(lines, "")
 	}
-	lines = append(lines, galleyask.Warnings(c.r)...)
+	lines = append(lines, galleyask.Command(m.Argv, galleyask.Width)...)
 	lines = append(lines,
-		galleyask.ChainText(c.r),
-		strings.Join(argv, " "),
 		fmt.Sprintf("%s as %s in %s", galleyask.Clean(m.User), galleyask.Clean(m.RunAs), galleyask.Clean(m.Cwd)),
 		keyLine)
 	level := m.Level
@@ -474,7 +472,7 @@ func (c *conn) describeRemoteSudo(req *request, keyLine string) {
 			level = "warning"
 		}
 	}
-	req.question = galleyask.Question{Title: "sudo on " + req.dest, Text: strings.Join(lines, "\n"), Level: level, Allow: "Allow"}
+	req.question = galleyask.Question{Title: "sudo on " + req.dest, Text: strings.Join(lines, "\n"), Level: level, Allow: "Allow", Chain: galleyask.Chain(c.r)}
 }
 
 // hostNames are key's names in the known hosts file.

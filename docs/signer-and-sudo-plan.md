@@ -332,8 +332,11 @@ Names come from `/etc/ssh/ssh_known_hosts` (NixOS writes it unhashed). A host ke
 A grantable question is a form with the time control; an Allow-once question (§4.4) is a plain question, with the warning level for Cut and SessionRoot.
 
 ```json
-{"galley":3,"item":{"kind":"forms","level":"normal","title":"ssh to github.com",
-  "text":"claude (pid 5113) ← bash ← git push ← ssh\nkey SHA256:… (dan@dan-blade)\nA grant covers github.com from this claude.",
+{"galley":4,"item":{"kind":"forms","level":"normal","title":"ssh to github.com",
+  "text":"key SHA256:… (dan@dan-blade)\nA grant covers github.com from claude (pid 5113).",
+  "table":{"columns":["PID","Process"],"monospace":[1],
+           "rows":[["5113","claude"],["5120","git push origin trunk"],["5121","ssh git@github.com git-receive-pack 'danielbodart/galley.git'"]],
+           "summary":"claude ← ssh git@github.com git-receive-pack 'danielbodart/galley.git'"},
   "buttons":[{"answer":"cancel","label":"Refuse","underline":-1},
              {"answer":"extra","index":0,"label":"Allow once","underline":-1},
              {"answer":"ok","label":"Allow for","underline":-1}],
@@ -343,18 +346,20 @@ A grantable question is a form with the time control; an Allow-once question (§
 ```
 
 ```json
-{"galley":3,"item":{"kind":"question","level":"warning","title":"ssh to server",
-  "text":"launched through systemd --user\nsystemd --user ← ssh",
+{"galley":4,"item":{"kind":"question","level":"warning","title":"ssh to server",
+  "text":"launched through systemd --user\nkey SHA256:… (dan@dan-blade)",
+  "table":{"columns":["PID","Process"],"monospace":[1],"rows":[["2210","systemd"],["6001","ssh server"]],"summary":"systemd ← ssh server"},
   "buttons":[{"answer":"cancel","label":"Refuse","underline":-1},
              {"answer":"extra","index":0,"label":"Allow once","underline":-1}],
   "default":1}}
 ```
 
-Remote sudo, a plain question with the level from the message (danger draws galley's banner, as for a local sudo). The title names the host, resolved from the bound key through `/etc/ssh/ssh_known_hosts`, else `SHA256:…`. The text is the message's reasons, a blank line, the client's chain line, the command from the message's argv, the user, runas user and cwd, and the key:
+Remote sudo, a plain question with the level from the message (danger draws galley's banner, as for a local sudo). The title names the host, resolved from the bound key through `/etc/ssh/ssh_known_hosts`, else `SHA256:…`. The text is the message's reasons, a blank line, the command from the message's argv, the user, runas user and cwd, and the key; the client's chain is the table:
 
 ```json
-{"galley":3,"item":{"kind":"question","level":"danger","title":"sudo on dan-desktop",
-  "text":"touches a unit that guards this machine\n\nclaude ← ssh -A dan-desktop sudo systemctl stop sshd.service\n/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey SHA256:… (dan@dan-blade)",
+{"galley":4,"item":{"kind":"question","level":"danger","title":"sudo on dan-desktop",
+  "text":"touches a unit that guards this machine\n\n/run/current-system/sw/bin/systemctl stop sshd.service\ndan as root in /home/dan\nkey SHA256:… (dan@dan-blade)",
+  "table":{"columns":["PID","Process"],"monospace":[1],"rows":[["5113","claude"],["7002","ssh -A dan-desktop sudo systemctl stop sshd.service"]],"summary":"claude ← ssh -A dan-desktop sudo systemctl stop sshd.service"},
   "buttons":[{"answer":"cancel","label":"Refuse","underline":-1},
              {"answer":"extra","index":0,"label":"Allow","underline":-1}],
   "default":1}}
@@ -557,8 +562,9 @@ No galley item, no window: the question is asked on the client, every time.
 The dialog:
 
 ```json
-{"galley":3,"item":{"kind":"forms","level":"normal","title":"sudo systemctl restart foo",
-  "text":"claude ← bash -c sudo systemctl restart foo\n\n/run/current-system/sw/bin/systemctl restart foo",
+{"galley":4,"item":{"kind":"forms","level":"normal","title":"sudo systemctl restart foo",
+  "text":"/run/current-system/sw/bin/systemctl restart foo",
+  "table":{"columns":["PID","Process"],"monospace":[1],"rows":[["5113","claude"],["5130","bash -c sudo systemctl restart foo"]],"summary":"claude ← sudo systemctl restart foo"},
   "buttons":[{"answer":"cancel","label":"Cancel","underline":-1},
              {"answer":"ok","label":"Allow","underline":-1}],
   "default":1,
@@ -568,15 +574,16 @@ The dialog:
 ```
 
 - `default` is Allow, so Enter after the password allows with the prefilled time.
-- The chain line is the signer's (`galleyask.ChainText`): the requester by its argv0's name with no pid, the shells between it and the leaf left out, and the leaf, sudo's parent, by its argv.
+- The chain is the signer's (`galleyask.Chain`), a table of a process a row under the text (galley's protocol version 4): the requester by its argv0's name, the shells between it and the leaf left out, and each other process by its pid and argv. A command longer than 64 characters is laid out (`galleyask.Command`): a shell's `-c` script, through `timeout`, `nice`, `env`, `script -c` and the like, a segment a line at the `&&`, `||`, `|`, `;` and newlines no quote, `$( )`, `( )`, `{ }` or comment holds, Claude Code's `eval '…'` opened inside its quotes, and any line still too wide broken at spaces with a backslash. A row whose argv ends with the next row's argv shows only its own part (`timeout 1800`), and one that holds the next row's argv or script, argument for argument, shows `…` in its place (`script -qefc … /dev/null`), so the script appears once. The table's summary, the anchor and what the leaf runs on one line, is what the queue's row shows under the title. The sudo command in the text is laid out the same way.
 - A danger dialog has the danger level, its reason first in the text, and the password field only. A Cut or SessionRoot dialog has the warning level and the password field only.
 - The password is never logged; the journal records "<n> bytes".
 
 The question:
 
 ```json
-{"galley":3,"item":{"kind":"question","level":"danger","title":"sudo systemctl stop sshd.service",
-  "text":"touches a unit that guards this machine\n\nclaude ← bash -c sudo systemctl stop sshd.service\n/run/current-system/sw/bin/systemctl stop sshd.service",
+{"galley":4,"item":{"kind":"question","level":"danger","title":"sudo systemctl stop sshd.service",
+  "text":"touches a unit that guards this machine\n\n/run/current-system/sw/bin/systemctl stop sshd.service",
+  "table":{"columns":["PID","Process"],"monospace":[1],"rows":[["5113","claude"],["5140","bash -c sudo systemctl stop sshd.service"]],"summary":"claude ← sudo systemctl stop sshd.service"},
   "buttons":[{"answer":"cancel","label":"Refuse","underline":-1},
              {"answer":"extra","index":0,"label":"Allow","underline":-1}],
   "default":1}}
@@ -891,7 +898,7 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 
 - With a tty, the gate is never contacted and sudo prompts as stock; tty `sudo -n` says "a password is required".
 - **Latency**: 'C' from a cold gate five times, then 200 warm 'C' and 'G', each well inside 250 ms; the test prints them.
-- **One dialog**: `sudo systemctl restart foo` with fakegalley `ok <pw> 15 minutes`. It runs; fakegalley logged exactly one item, from the `sudo-gate` caller, showing the chain line `claude` and the resolved command; stderr says "password remembered … until"; the journal has no password.
+- **One dialog**: `sudo systemctl restart foo` with fakegalley `ok <pw> 15 minutes`. It runs; fakegalley logged exactly one item, from the `sudo-gate` caller, showing `claude` in the chain's table and the resolved command; stderr says "password remembered … until"; the journal has no password.
 - **`-n`**: `sudo -n id -u` with no tty gets the dialog and runs.
 - **Window**: the next sudo from a new `bash -c` under the same claude gets one question and no password; a different claude gets the dialog.
 - **Pin**: fakegalley restarted → the next sudo gets the dialog. A thief that joins `galley.service`'s cgroup and rebinds the socket inside a window → its Allow is a refusal, the journal names the pin, and the window is unchanged. A socat outside the cgroup → nobody to ask.
@@ -918,7 +925,7 @@ Whole-sentence test names, stdlib `testing` plus `rapid`. `mkFrisket` runs `go t
 
 `tests/sudo-remote.nix`, from the remote spikes' set-up: `client` runs the signer (swtpm key) with fakegalley; `server` runs `sudoGate` with `remoteKeys` = the client's key and fakegalley of its own; `second` is a plain sshd with another host key. dan on `client` runs `setsid -w ssh -A server sudo …` with no tty.
 
-- **Allow**: fakegalley `answer 0` → the command runs; the client's fakegalley logged one question titled "sudo on server", level normal, with the chain line, the command, user, runas and cwd; the server's fakegalley logged nothing; the server's journal has the message and the key.
+- **Allow**: fakegalley `answer 0` → the command runs; the client's fakegalley logged one question titled "sudo on server", level normal, with the chain's table, the command, user, runas and cwd; the server's fakegalley logged nothing; the server's journal has the message and the key.
 - **Refuse**: `cancel` → sudo refuses with the gate's message and runs nothing.
 - **Danger**: `sudo systemctl stop frisket.service` → a danger question with the reason first; Allow runs it.
 - **tty**: `ssh -tt server sudo id` asks the server's password, and the signer receives no forwarded sign; with `-n`, "a password is required".

@@ -143,7 +143,7 @@ func (g *galley) serve(c *net.UnixConn) {
 	g.mu.Unlock()
 
 	g.write(map[string]any{"event": "question", "title": it.Title, "text": it.Text, "kind": it.Kind,
-		"level": it.Level, "buttons": it.Buttons, "fields": fields, "uid": cred.Uid, "pid": cred.Pid})
+		"level": it.Level, "buttons": it.Buttons, "fields": fields, "table": it.Table, "uid": cred.Uid, "pid": cred.Pid})
 
 	if a.answer == "" {
 		io.Copy(io.Discard, c)

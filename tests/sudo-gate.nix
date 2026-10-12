@@ -242,8 +242,8 @@ in
         assert len(qs) == 1, qs
         q = qs[0]
         assert q["uid"] == 952 and is_dialog(q) and q["level"] == "normal" and q["title"] == "sudo systemctl restart foo", q
-        lines = q["text"].split("\n")
-        assert lines[0] == "claude" and "/run/current-system/sw/bin/systemctl restart foo" in lines, q
+        assert q["text"] == "/run/current-system/sw/bin/systemctl restart foo", q
+        assert q["table"]["rows"][0][1] == "claude" and q["table"]["summary"] == "claude", q
         err = machine.succeed("cat /run/claude-a/err")
         assert "frisket-sudo: password remembered for this claude until" in err, err
         machine.fail(f"journalctl -o cat | grep -F {pw}")
@@ -256,7 +256,7 @@ in
         qs = events("question")[asked:]
         assert len(qs) == 2 and is_question(qs[0]) and is_dialog(qs[1]), qs
         assert [b["label"] for b in qs[0]["buttons"]] == ["Refuse", "Allow"], qs[0]
-        assert qs[0]["text"].split("\n")[0] == "claude", qs[0]
+        assert qs[0]["table"]["rows"][0][1] == "claude", qs[0]
 
     with subtest("danger inside the window is a danger question with no password"):
         asked = len(events("question"))

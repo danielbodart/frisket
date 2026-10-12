@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -641,24 +642,27 @@ func TestTheWindowEndsWithItsGalleyProcessItsAnchorOrItsTime(t *testing.T) {
 	}
 }
 
-func TestTheDialogShowsTheChainAndTheResolvedCommand(t *testing.T) {
+func TestTheDialogShowsTheResolvedCommandAndTheChainInItsTable(t *testing.T) {
 	h := newHarness(t)
 	c := h.sudo(500)
 	c.send(approval(restart(claude(100), "foo")))
 	a := h.next()
-	want := "claude ← bash -c sudo x\n\n/run/current-system/sw/bin/systemctl restart foo"
-	if a.q.Title != "sudo systemctl restart foo" || a.q.Text != want {
-		t.Errorf("got %q\n%q", a.q.Title, a.q.Text)
+	rows := [][]string{{"100", "claude"}, {"101", "bash -c sudo x"}}
+	if a.q.Title != "sudo systemctl restart foo" || a.q.Text != "/run/current-system/sw/bin/systemctl restart foo" ||
+		!reflect.DeepEqual(a.q.Chain.Rows, rows) || a.q.Chain.Summary != "claude ← sudo x" {
+		t.Errorf("got %q %q %+v", a.q.Title, a.q.Text, a.q.Chain)
 	}
 	a.reply <- answered{}
 	c.read()
 	c = h.sudo(501)
 	c.send(approval(restart(claude(100), "sshd.service")))
 	a = h.next()
-	want = "touches a unit that guards this machine\n\nclaude ← bash -c sudo x\n/run/current-system/sw/bin/systemctl restart sshd.service"
+	want := "touches a unit that guards this machine\n\n/run/current-system/sw/bin/systemctl restart sshd.service"
 	if a.q.Text != want {
 		t.Errorf("got %q", a.q.Text)
 	}
+	a.reply <- answered{}
+	c.read()
 }
 
 func (h *harness) describe(cmd sudoCmd) *sudoReq {

@@ -40,7 +40,7 @@
         # and go-tpm with go-tpm-keyfiles for the signer's TPM keys.
         # vendorHash = null is a nice property
         # and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-Q5QxeMr9j0Pc3GdJSxp6l8DbYUHAv7w9UleRsU0C2bg=";
+        vendorHash = "sha256-bQ7Gykg9Igs9Y1aN1lewuDTaoJQxys5qOYDxyjTozmU=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has

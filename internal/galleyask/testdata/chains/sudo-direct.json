@@ -1,0 +1,85 @@
+[
+ {
+  "Pid": 3037277,
+  "PPid": 2953050,
+  "Sid": 3037277,
+  "TTY": 0,
+  "Start": 17187451,
+  "UID": 1000,
+  "Comm": "bash",
+  "Cmdline": [
+   "/run/current-system/sw/bin/bash",
+   "-c",
+   "source /home/dan/.claude/shell-snapshots/snapshot-bash-1791791682546-ubhwiz.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'git status --short >/dev/null && sudo nixos-rebuild switch --flake .#dan-desktop 2>&1 | tail -30' < /dev/null && pwd -P >| /tmp/claude-3402-cwd"
+  ]
+ },
+ {
+  "Pid": 2953050,
+  "PPid": 1777706,
+  "Sid": 1777706,
+  "TTY": 34818,
+  "Start": 16828245,
+  "UID": 1000,
+  "Comm": ".claude-unwrapp",
+  "Cmdline": [
+   "/nix/store/slw0881b3fw1bsyapahmaq2z5y5favjw-claude-code-2.1.291/bin/claude",
+   "--allow-dangerously-skip-permissions",
+   "--plugin-dir",
+   "/nix/store/l81n4d83haqzhspdxp3ni0ljns5r2cwr-claude-code-hm-plugin"
+  ]
+ },
+ {
+  "Pid": 1777706,
+  "PPid": 4386,
+  "Sid": 1777706,
+  "TTY": 34818,
+  "Start": 11158917,
+  "UID": 1000,
+  "Comm": "bash",
+  "Cmdline": [
+   "/run/current-system/sw/bin/bash"
+  ]
+ },
+ {
+  "Pid": 4386,
+  "PPid": 2861,
+  "Sid": 4386,
+  "TTY": 0,
+  "Start": 2995,
+  "UID": 1000,
+  "Comm": ".kgx-wrapped",
+  "Cmdline": [
+   "/nix/store/4vzf3ircwl51kzril8i4n14f9zavh3j4-gnome-console-50.0/bin/kgx",
+   "--gapplication-service"
+  ]
+ },
+ {
+  "Pid": 2861,
+  "PPid": 1,
+  "Sid": 2861,
+  "TTY": 0,
+  "Start": 2057,
+  "UID": 1000,
+  "Comm": "systemd",
+  "Cmdline": [
+   "/run/current-system/systemd/lib/systemd/systemd",
+   "--user",
+   "--deserialize=90"
+  ]
+ },
+ {
+  "Pid": 1,
+  "PPid": 0,
+  "Sid": 1,
+  "TTY": 0,
+  "Start": 13,
+  "UID": 0,
+  "Comm": "systemd",
+  "Cmdline": [
+   "/run/current-system/systemd/lib/systemd/systemd",
+   "--switched-root",
+   "--system",
+   "--deserialize=41"
+  ]
+ }
+]

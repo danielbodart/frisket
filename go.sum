@@ -1,5 +1,5 @@
-github.com/danielbodart/galley v0.24.15 h1:Yi+YxxkGdZkGNXWvMbTh5vP3AR/+toR6iF9rCMwnVhc=
-github.com/danielbodart/galley v0.24.15/go.mod h1:LG67o+3WXE7Kj9BQ0WclOtCq0Fbx46NP3pe6PqrLzs8=
+github.com/danielbodart/galley v0.25.17-0.20261012084211-4ffa70484562 h1:iPFlqnCLCn66iDbcJE34YBAJWk+2eec4S90bAUpEDGA=
+github.com/danielbodart/galley v0.25.17-0.20261012084211-4ffa70484562/go.mod h1:LG67o+3WXE7Kj9BQ0WclOtCq0Fbx46NP3pe6PqrLzs8=
 github.com/foxboron/go-tpm-keyfiles v0.0.0-20260427185012-515ba073c4c1 h1:/IDZxzpOhFdoDcVQT9Eaf2kY3grH5AUK+5MqoFq6Yng=
 github.com/foxboron/go-tpm-keyfiles v0.0.0-20260427185012-515ba073c4c1/go.mod h1:wxFx38LbEL4RF0JH6PR3lf7ZJ6ZO0yQWQstLCTQQNjA=
 github.com/go-jose/go-jose/v4 v4.1.5 h1:RjgjO2LOtWOJKUC5wpwY9LR3B3vwVAz6JS2YHfYU6eA=

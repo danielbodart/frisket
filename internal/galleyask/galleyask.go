@@ -26,6 +26,9 @@ type Question struct {
 	Password           bool
 	// Allow labels a question's Allow button, "Allow once" when empty.
 	Allow string
+	// Chain is the process chain's rows, ChainRows, shown as a table under
+	// the text; nil shows none.
+	Chain *ChainTable
 }
 
 type Answer struct {
@@ -137,6 +140,9 @@ func item(name string, q Question) *wire.Item {
 	it := &wire.Item{
 		Kind: wire.KindQuestion, Level: q.Level, Title: q.Title, Text: q.Text,
 		Buttons: []wire.Button{button(wire.AnswerCancel, "Refuse"), button(wire.AnswerExtra, allow)},
+	}
+	if q.Chain != nil {
+		it.Table = &wire.Table{Columns: []string{"PID", "Process"}, Rows: q.Chain.Rows, Monospace: []int{1}, Summary: q.Chain.Summary}
 	}
 	units := wire.Field{Kind: wire.FieldCombo, Values: []string{"minutes", "hours"}}
 	switch {
