@@ -5,6 +5,7 @@ self:
 
 let
   cfg = config.services.frisket.sudoGate;
+  policy = config.services.frisket.policy;
   inherit (lib) mkOption types;
   system = pkgs.stdenv.hostPlatform.system;
   plugin = (import ./sudo-zig.nix { inherit pkgs; sudo = config.security.sudo.package; }).package;
@@ -32,10 +33,19 @@ let
   configFile = pkgs.runCommand "frisket-sudo-config.json"
     {
       nativeBuildInputs = [ package ];
-      config = builtins.toJSON {
+      config = builtins.toJSON ({
         inherit (cfg) forUser remoteKeys;
         danger = lib.mapAttrs (_: d: lib.filterAttrs (_: v: v != null && v != { }) d) cfg.danger;
-      };
+        inherit (cfg) exec;
+      } // lib.optionalAttrs policy.courier.enable {
+        # The signed policy of the project a sudo is run in, read through
+        # the courier: its sudo.exec merged over exec.
+        policy = {
+          courier = "/run/frisket-policy/sock";
+          allowedSigners = "/etc/frisket/allowed_signers";
+          inherit (policy) fileName;
+        };
+      });
       passAsFile = [ "config" ];
     } ''
     cp "$configPath" "$out"
@@ -84,6 +94,40 @@ in
         here takes the catalogue's danger away.
       '';
     };
+    exec = mkOption {
+      type = types.attrsOf (types.submodule {
+        options = {
+          runAs = mkOption {
+            type = types.strMatching "[a-z_][a-z0-9_-]*";
+            default = "root";
+            description = "The user the command runs as: a sudo as anyone else is not this rule's.";
+          };
+          answer = mkOption {
+            type = types.enum [ "allow" "ask" "refuse" ];
+            description = "`allow` runs it with no question and no password, `ask` puts a plain Allow/Refuse question with no password, `refuse` refuses it.";
+          };
+        };
+      });
+      default = { };
+      example = {
+        "/run/current-system/sw/bin/journalctl **".answer = "allow";
+        "/run/current-system/sw/bin/journalctl ** [arg --vacuum*]".answer = "ask";
+        "/run/current-system/sw/bin/systemctl restart foo.service".answer = "ask";
+      };
+      description = ''
+        The host's exec rules, keyed by a pattern of the resolved command:
+        the program's absolute path, then words, `*` for one, `**` last for
+        any number, and optionally ` [arg GLOB]` after it, an arg rule,
+        which only asks or refuses. A literal pattern beats a pattern, a
+        narrower one a wider one. With services.frisket.policy.courier on,
+        the signed chase.json of the project a sudo is run in has its
+        `sudo.exec` merged over these, RFC 7396's way. No rule ever
+        decides a danger or a warning, a command the gate did not see
+        whole, one with a variable outside the allowlist, or a shell or
+        env: each is asked as it is with none. A sudo no rule matches is
+        the password dialog, or the window's question, as before.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -109,6 +153,10 @@ in
       {
         assertion = ptraceScope == null || lib.toInt (toString ptraceScope) >= 1;
         message = "the sudo window's galley pin needs ptrace_scope >= 1";
+      }
+      {
+        assertion = !policy.courier.enable || policy.courier.forUser == cfg.forUser;
+        message = "services.frisket.policy.courier.forUser (${policy.courier.forUser}) is not services.frisket.sudoGate.forUser (${cfg.forUser}): the gate reads the projects of the user it gates.";
       }
     ];
 
@@ -150,7 +198,8 @@ in
     systemd.services.frisket-sudo = {
       description = "frisket-sudo: sudo with no terminal, asked through galley";
       requires = [ "frisket-sudo.socket" ];
-      after = [ "frisket-sudo.socket" ];
+      wants = lib.optional policy.courier.enable "frisket-policy.socket";
+      after = [ "frisket-sudo.socket" ] ++ lib.optional policy.courier.enable "frisket-policy.socket";
       startLimitIntervalSec = 0;
       restartTriggers = [ configFile ];
       serviceConfig = {

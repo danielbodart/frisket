@@ -214,6 +214,22 @@ alone one label, `*` within a label any run of it, `**` as the first label
 one or more. See [signer.md](signer.md#what-is-asked) for the order and
 the precedence.
 
+## The sudo gate
+
+With the courier on, the module gives the gate a `policy` section too, and
+for a sudo an exec rule could decide (no danger, no warning) it reads the
+project of the user's process nearest sudo: the shell that ran it, or,
+past a `runuser` of root's, the nearest of the user's above.
+
+- The file applies when its `.sig` verifies as for the signer, and its
+  `sudo` section sets only `exec` (patterns to `{runAs, answer}` or
+  `null`). It is merged over the host's `exec` with `MergePatch`.
+- Anything else is ignored with one `project policy ignored` line per
+  file, and decided by the host's rules; so is a courier that is down.
+- No Always: a rule is written into the file and signed.
+
+See [sudo.md](sudo.md#rules).
+
 ## frisket: Always in a session
 
 A session's question about an HTTP request or an SSH command, on a version 2

@@ -15,7 +15,7 @@ Outside `strict`, this guards against an agent's *accidental* damage, not a dete
 - One project file, `chase.json`, one section per component. Signed with a standard sidecar `chase.json.sig` (SSHSIG). No invented lock format.
 - Signature covers exact bytes: any edit, comments included, needs re-signing. Fine, since JSON has no comments.
 - frisket does not hard-code `chase.json`: the courier's config says `fileName` (`services.frisket.policy.fileName`), which nix-config sets to `chase.json`.
-- Sudo keeps prompting for the password the first time, as today; no "Always" for sudo for now.
+- Sudo: exec rules, the host's (`services.frisket.sudoGate.exec`, the host tier's) and a signed project's `sudo.exec`, may allow with no password, ask with none, or refuse; whatever no rule matches still prompts for the password the first time, as before, and danger and warnings are never a rule's. No "Always" for sudo for now: a rule is written and signed.
 - Timed grants ("Allow for 15 min") stay keyed to the claude process; "Always" is the explicit project-scoped answer.
 - Always writes the specific rule asked about, but the file takes patterns: I, or an agent, widen a rule by editing it, and signing it again is the check. One general rule beats five hundred near-identical ones.
 - nix-config-in-an-ops-container is parked (direction of travel).
@@ -101,7 +101,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 |---|---|---|
 | host (signer, frisket `allow`/`ssh`) | `gateway` | `*-ap`, `*.bodar.com` |
 | HTTP operation | `pulls/create`, `POST /repos/o/r/dispatches` | `category:pulls`, `POST /repos/o/*/dispatches`, `GET /**` |
-| command (gateway ssh, later sudo) | `uci show wireless` | `uci show **`, `logread **` |
+| command (gateway ssh, sudo) | `uci show wireless` | `uci show **`, `logread **` |
 | SSHSIG namespace | `git` | `file` (no patterns: namespaces are few) |
 
 `check` reports a pattern that can never match, and `frisket policy propose` (from the logs) can suggest the pattern a set of exact rules share.
@@ -144,7 +144,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
   - signer: host plus key (forwarded needs its own answer);
   - gateway HTTP: the operation id, else `METHOD /exact/path`;
   - gateway ssh: the literal command.
-  - Sudo: none for now (decided).
+  - Sudo: none for now (decided); a sudo rule is written into `sudo.exec` by hand and signed.
 - **Widening is by editing, then signing.** Any rule may use the patterns in §1.6; the signing dialog's diff is where a widening is seen and approved.
 - **Inside containers:** the root is the session's workspace, from flong's `$workspace`.
   - frisket applies the rule to the live session at once; the file applies from the next launch.
@@ -155,7 +155,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 | Phase | What | Key files |
 |---|---|---|
 | **P0** | `-config`/`check`/`schema` for the sudo gate (signer done); fold `frisket serve` flags into `/etc/frisket/config.json`; galley config file; flong JSON declarations, drop `nix/to-zon.nix` | `cmd/frisket-sudo/main.go`, `nix/sudo-gate.nix`, `nix/module.nix:927-952`, flong `src/decl.zig`, `module.nix:960` |
-| **P1** | Nix-rendered host rules in the final shape: `signer.ssh` (done for github.com), `sudo.exec` | `internal/agentsrv/agentsrv.go`, `internal/sudogate/gate.go` |
+| **P1** (done) | Nix-rendered host rules in the final shape: `signer.ssh` (done for github.com), `sudo.exec` | `internal/agentsrv/agentsrv.go`, `internal/sudogate/gate.go` |
 | **P2** | Signing core: `projpolicy`, public for chase (SSHSIG verify, allowed_signers parser, namespace, canonical JSON, mergePatch), courier unit, signer `policy-sign@` + raw refusal, galley `sign` block/diff/receipt/`redeem`, `frisket policy sign\|verify` | frisket, galley `wire/wire.go`, `daemon/` |
 | **P3** | Always on the host: signer and gate read the project policy via the courier and offer Always | `agentsrv.go:409-445`, galleyask, `gate.go` |
 | **P4a** (done) | frisket policy v2 (operations, class answers, ceiling, maps, `x-scope`, `check --layer project`), evaluated by frisket at request time | `policy/`, `internal/intercept/scope_v2.go`, `hostpattern/` |
@@ -195,7 +195,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
   - `ssh.hosts` keys, host and project, take §1.6's patterns: `*` one label, `*` within a label a run of it (`*-ap`), `**` as the first label one or more.
   - Always is offered when the root is known: the courier's read now returns the nearest `.git` directory up to home as `root`, with no `digest`, when there is no file yet.
   - `frisket policy sign FILE`, over `policy-sign@frisket`: FILE must be canonical; the old bytes are `-old` or git's `HEAD`; Refuse and Allow once only. Refused to frisket's main process and to a peer whose `/proc/<pid>/uid_map` is not the host's (the signer cannot open another user's namespace).
-  - Sudo: no Always, and the gate does not read the project yet.
+  - Sudo: no Always; the gate reads the project since (below).
 
 - frisket P4a, the gateway's policy document version 2 ([routes.md](routes.md#version-2), [policy.md](policy.md#frisket-the-policy-document-version-2)):
   - `"version": 2` selects it; version 1, which chase still writes, is read beside it for one release.
@@ -217,7 +217,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
     - Only the cloudflare, gcloud, git, github and huggingface routes take a project's answers (chase's `answerable`); an answer for Claude Code's, Codex's or Docker's route, a route the tier lacks, or an anonymous one is said and left out.
     - Strict's ceiling (§1.4, §1.5) applies to unauthenticated apps only: a route with no credential gets a `ceiling` refusing `writes`, `guarded` and `unmatched`. An authenticated app in strict is held by its tier's answers, and strict takes no grant.
     - SSH catalogue ids and `category:` names stay as `chase.apps.ssh.hosts.<name>` sugar, turned into `exec` answers by frisket's rule names with the catalogue operation under `commands`; `frisket.ssh.<machine>.exec` answers a tier's own machines directly.
-    - The `sudo` section is shaped and checked (`exec` → `{runAs, answer}`) but not yet read by the gate.
+    - The `sudo` section is shaped and checked (`exec` → `{runAs, answer}`); the gate reads it since (below).
 
 - frisket P4b, Always on the gateway's questions in containers ([routes.md](routes.md#always), [policy.md](policy.md#frisket-always-in-a-session)), on galley `fb4307b` and `a79ebab` (`--diff-path`, `--diff-old`, `--diff-new`, or `--diff=FILE|-` with the question's `diff` as JSON, and `--always`, on a `--question`, answered `always`):
   - A question about an HTTP request, or an SSH command, on a version 2 route or machine marked `"always": true` offers Always: `always` and `diff`, the workspace's `chase.json` as it is and with the specific rule added -- the operation id, else `METHOD /exact/path`, under `frisket.routes.<route>.operations`; the SSH command's literal words under `frisket.ssh.<machine>.exec`, for one simple command of plain words. The workspace is flong's `$workspace`, which frisket holds for the session.
@@ -237,3 +237,10 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 Zig's own ZON parser was spiked as a C-ABI library called from Go through cgo. It works: static with `zig cc` against musl, about 215 KB larger. But every Go build here is `CGO_ENABLED=0` on purpose: static binaries with no glibc NSS (frisket, chase), and galley's client starting in 1–2 ms. cgo would also put an unsafe C boundary inside the gateway and the sudo gate, need zig as every Go build's C compiler, Mac included, and leave Nix, which has no ZON reader, and chase, which writes these files at runtime, needing their own. JSON is native to Nix (`builtins.toJSON`, keys sorted), to Go and to Zig's std.json.
 - chase P6 (`e99912e`; nix-config `1e94c53`): `chase.tiers.<t>` takes `frisket`, `flong`, `signer` and `sudo` sections in `chase.json`'s shape, merged by RFC 7396 over what the tier's other options generate; every tier's rendered frisket document and flong declaration came out unchanged. The `signer` and `sudo` sections are checked and installed at `/etc/chase/layers/<tier>.json` but read by nothing yet. nix-config's approver is gone, with no `chase.jsonc` left (data-lab and pokeranker migrated); `/etc/frisket/allowed_signers` and the courier came in with P3 (nix-config `3d0bc2f`).
 - Always made live (chase `d86f21d`; nix-config `212a0f5`): `chase.tiers.<t>.always`, by default a tier that takes grants and asks someone, so never strict, marks its answerable routes and SSH machines; nix-config's asker passes galley the diff and Always, and shows frisket's notices.
+- frisket sudo rules, P1's `sudo.exec` and the gate's part of P3 but Always ([sudo.md](sudo.md#rules)):
+  - `services.frisket.sudoGate.exec.<pattern> = { runAs ? "root"; answer = "allow"|"ask"|"refuse"; }`, written to `/etc/frisket-sudo/config.json`'s `exec`, checked by `frisket-sudo check`, in `schema`. The object only, no bare-string shorthand, since chase checks a project's `sudo.exec` as the object; a rule's keys are matched exactly, as encoding/json would not.
+  - Patterns are execrule's (§1.6) over the resolved command: the program's absolute path, then its arguments, `[arg GLOB]` arg rules that only ask or refuse; literal over pattern, narrower over wider. A first word that is not an absolute, clean path is refused, since it could never match. Compiled in the public `sudo` package (`CompileExec`), beside the danger catalogue.
+  - `allow` runs with no dialog and no password; `ask` is a plain Allow/Refuse question with no password, which opens no window; `refuse` is sudo's refusal line naming the rule. Unmatched is today's dialog or window, and an asking arg rule leaves an unmatched command unmatched: the password is stricter than a question. `runAs` other than the sudo's never matches.
+  - Fixed in code, the sudo ceiling of §1.5: no rule decides a danger or a warning, a truncated command, one with a variable outside the allowlist, or a shell, `sudo -s|-i` or `env`. Remote mode reads no rules.
+  - The project: with the courier on, the gate asks it about the user's process nearest sudo (the one that ran it, or past a root `runuser`), verifies `chase.json.sig` against `/etc/frisket/allowed_signers` with `projpolicy` as the signer does, and merges its `sudo` section (`exec` alone) over the host's with `MergePatch`. Unsigned, not verifying, or setting anything else: ignored, one `project policy ignored` line per file. The journal's `decision` says `host rule` or `project rule`, the pattern and the root.
+  - What differs from §1.5: the host sets no ceiling on a project's `sudo.exec`; a signed project may replace or delete (`null`) a host rule, and the fixed danger ceiling is the only one. The tier layers' `sudo` sections at `/etc/chase/layers/<tier>.json` are still read by nothing: the host tier's rules are the gate's own `exec`, since only the host tier sudos at all.

@@ -271,7 +271,13 @@
                     system.stateVersion = "26.05";
                     users.users.alice = { isNormalUser = true; group = "users"; home = "/home/alice"; };
                     services.frisket.signer = { enable = true; forUser = "alice"; };
-                    services.frisket.sudoGate = { enable = true; forUser = "alice"; };
+                    services.frisket.sudoGate = {
+                      enable = true;
+                      forUser = "alice";
+                      exec."/run/current-system/sw/bin/journalctl **".answer = "allow";
+                      exec."/run/current-system/sw/bin/lpq".runAs = "lp";
+                      exec."/run/current-system/sw/bin/lpq".answer = "refuse";
+                    };
                     services.frisket.policy = {
                       fileName = "chase.json";
                       allowedSigners = [{ principal = "alice"; inherit key; } "bob ${key} bob@example"];
@@ -284,6 +290,8 @@
               signers = etc."frisket/allowed_signers".source;
               settings = builtins.fromJSON etc."frisket-policy/config.json".source.config;
               unit = eval.config.systemd.services.frisket-policy.serviceConfig;
+              gate = builtins.fromJSON etc."frisket-sudo/config.json".source.config;
+              gateUnit = eval.config.systemd.services.frisket-sudo;
               wrong = builtins.filter (x: ! x.ok) [
                 { case = "allowed signers"; ok = signers.text == "alice namespaces=\"frisket-policy:*\" ${key}\nbob ${key} bob@example\n"; }
                 { case = "config"; ok = settings == { fileName = "chase.json"; allowedSigners = "/etc/frisket/allowed_signers"; peers = { "frisket-signer.service" = "ssh-signer"; "frisket-sudo.service" = "sudo-gate"; }; }; }
@@ -291,6 +299,9 @@
                 { case = "home"; ok = unit.ReadWritePaths == [ "/home/alice" ] && unit.ProtectHome == "read-only" && unit.ProtectSystem == "strict"; }
                 { case = "network"; ok = unit.PrivateNetwork && unit.RestrictAddressFamilies == [ "AF_UNIX" ]; }
                 { case = "socket"; ok = eval.config.systemd.sockets.frisket-policy.socketConfig.ListenStream == "/run/frisket-policy/sock"; }
+                { case = "gate policy"; ok = gate.policy == { courier = "/run/frisket-policy/sock"; allowedSigners = "/etc/frisket/allowed_signers"; fileName = "chase.json"; }; }
+                { case = "gate exec"; ok = gate.exec == { "/run/current-system/sw/bin/journalctl **" = { runAs = "root"; answer = "allow"; }; "/run/current-system/sw/bin/lpq" = { runAs = "lp"; answer = "refuse"; }; }; }
+                { case = "gate after the courier"; ok = builtins.elem "frisket-policy.socket" gateUnit.after && builtins.elem "frisket-policy.socket" gateUnit.wants; }
               ];
             in
             assert nixpkgs.lib.assertMsg (wrong == [ ]) "the policy module is wrong: ${builtins.toJSON (map (x: x.case) wrong)}";
@@ -538,6 +549,8 @@
                 { case = "INTERCEPT in extraRules"; extra = { security.sudo.extraRules = [{ users = [ "dan" ]; commands = [{ command = "ALL"; options = [ "INTERCEPT" ]; }]; }]; }; want = true; }
                 { case = "ptrace_scope 0"; extra = { boot.kernel.sysctl."kernel.yama.ptrace_scope" = 0; }; want = true; }
                 { case = "remote keys"; extra = remote; want = false; }
+                { case = "a courier for the gated user"; extra = { services.frisket.policy = { fileName = "chase.json"; courier.enable = true; }; }; want = false; }
+                { case = "a courier for another user"; extra = { services.frisket.policy = { fileName = "chase.json"; courier = { enable = true; forUser = "root"; }; }; }; want = true; }
                 { case = "remote keys and an extra auth rule"; extra = { imports = [ remote ]; security.pam.services.sudo.fprintAuth = true; }; want = true; }
               ];
             in

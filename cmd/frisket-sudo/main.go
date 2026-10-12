@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
+	"strconv"
 
 	"github.com/danielbodart/frisket/internal/sdnotify"
 	"github.com/danielbodart/frisket/internal/sudogate"
@@ -72,6 +74,18 @@ func runServe(argv []string) error {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	slog.SetDefault(log)
+	gate := &sudogate.Gate{User: cfg.ForUser, Log: log, RemoteKeys: cfg.keys, Danger: cfg.Danger, Exec: cfg.Exec}
+	if p := cfg.Policy; p != nil {
+		u, err := user.Lookup(cfg.ForUser)
+		if err != nil {
+			return err
+		}
+		uid, err := strconv.Atoi(u.Uid)
+		if err != nil {
+			return err
+		}
+		gate.Policy = &sudogate.Policy{Courier: p.Courier, AllowedSigners: p.AllowedSigners, FileName: p.FileName, Home: u.HomeDir, UID: uid}
+	}
 
 	ln, err := gateListener()
 	if err != nil {
@@ -82,8 +96,9 @@ func runServe(argv []string) error {
 			return err
 		}
 	}
-	log.Info("frisket-sudo serve", "config", *path, "user", cfg.ForUser, "remote_keys", len(cfg.keys), "danger", cfg.Danger)
-	return (&sudogate.Gate{User: cfg.ForUser, Log: log, RemoteKeys: cfg.keys, Danger: cfg.Danger}).Serve(ln)
+	log.Info("frisket-sudo serve", "config", *path, "user", cfg.ForUser, "remote_keys", len(cfg.keys), "danger", cfg.Danger,
+		"exec", cfg.Exec, "policy", cfg.Policy)
+	return gate.Serve(ln)
 }
 
 func runCheck(argv []string) error {

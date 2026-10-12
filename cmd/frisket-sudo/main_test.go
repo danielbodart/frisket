@@ -90,6 +90,28 @@ func TestAConfigReadsEverySetting(t *testing.T) {
 	}
 }
 
+func TestAConfigReadsExecRulesAndThePolicy(t *testing.T) {
+	path := writeConfig(t, `{
+		"forUser": "dan",
+		"exec": {"/run/current-system/sw/bin/journalctl **": {"runAs": "root", "answer": "allow"},
+		         "/run/current-system/sw/bin/journalctl ** [arg --vacuum*]": {"answer": "ask"},
+		         "/run/current-system/sw/bin/lpq": {"runAs": "lp", "answer": "refuse"}},
+		"policy": {"courier": "/run/frisket-policy/sock", "allowedSigners": "/etc/frisket/allowed_signers", "fileName": "chase.json"}
+	}`)
+	c, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]sudo.Rule{
+		"/run/current-system/sw/bin/journalctl **":                 {RunAs: "root", Answer: "allow"},
+		"/run/current-system/sw/bin/journalctl ** [arg --vacuum*]": {Answer: "ask"},
+		"/run/current-system/sw/bin/lpq":                           {RunAs: "lp", Answer: "refuse"},
+	}
+	if !reflect.DeepEqual(c.Exec, want) || c.Policy == nil || c.Policy.FileName != "chase.json" || c.Policy.Courier != "/run/frisket-policy/sock" {
+		t.Errorf("got %+v %+v", c.Exec, c.Policy)
+	}
+}
+
 func TestAConfigThatWouldSilentlyNotApplyIsRefused(t *testing.T) {
 	k := line(key(t))
 	for _, bad := range []string{
@@ -107,6 +129,14 @@ func TestAConfigThatWouldSilentlyNotApplyIsRefused(t *testing.T) {
 		`{"forUser": "dan", "danger": {"systemctl **": {"args": {"frisket*": "x"}}}}`,
 		`{"forUser": "dan", "danger": {"systemctl **": {"args": {"": "x"}}}}`,
 		`{"forUser": "dan"} {}`,
+		`{"forUser": "dan", "exec": {"journalctl **": {"answer": "allow"}}}`,
+		`{"forUser": "dan", "exec": {"/run/current-system/sw/bin/id": {"answer": "yes"}}}`,
+		`{"forUser": "dan", "exec": {"/run/current-system/sw/bin/id": {"answer": "allow", "runas": "root"}}}`,
+		`{"forUser": "dan", "exec": {"/run/current-system/sw/bin/id": "allow"}}`,
+		`{"forUser": "dan", "exec": {"/run/current-system/sw/bin/cat ** [arg shadow]": {"answer": "allow"}}}`,
+		`{"forUser": "dan", "policy": {"courier": "sock", "allowedSigners": "/etc/frisket/allowed_signers", "fileName": "chase.json"}}`,
+		`{"forUser": "dan", "policy": {"courier": "/run/frisket-policy/sock", "allowedSigners": "/etc/frisket/allowed_signers", "fileName": "chase.json.sig"}}`,
+		`{"forUser": "dan", "policy": {"courier": "/run/frisket-policy/sock", "allowedSigners": "/etc/frisket/allowed_signers"}}`,
 	} {
 		if err := runCheck([]string{writeConfig(t, bad)}); err == nil {
 			t.Errorf("%s was accepted", bad)
@@ -151,6 +181,19 @@ func TestTheSchemaMatchesTheConfig(t *testing.T) {
 	}
 	if got, want := props(s.Defs.Danger.Properties), keys(reflect.TypeFor[sudo.Extra]()); !slices.Equal(got, want) {
 		t.Errorf("schema's danger has %v, sudo.Extra has %v", got, want)
+	}
+	var rule struct {
+		Defs struct {
+			Rule struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+			} `json:"rule"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal([]byte(schema), &rule); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := props(rule.Defs.Rule.Properties), keys(reflect.TypeFor[sudo.Rule]()); !slices.Equal(got, want) {
+		t.Errorf("schema's rule has %v, sudo.Rule has %v", got, want)
 	}
 	if !slices.Equal(s.Required, []string{"forUser"}) {
 		t.Errorf("required %v", s.Required)

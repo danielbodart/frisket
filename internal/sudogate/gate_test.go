@@ -233,14 +233,15 @@ func claude(pid int) []peer.Link {
 var cut = []peer.Link{{Pid: 201, PPid: 200, Start: 300, UID: 1000, Comm: "bash", Cmdline: []string{"bash"}}}
 
 type sudoCmd struct {
-	links    []peer.Link
-	program  string
-	argv     []string
-	envp     []string
-	settings []string
-	info     []string
-	userInfo []string
-	remote   bool
+	links     []peer.Link
+	program   string
+	argv      []string
+	envp      []string
+	settings  []string
+	info      []string
+	userInfo  []string
+	remote    bool
+	truncated bool
 }
 
 func approval(s sudoCmd) []byte {
@@ -257,6 +258,9 @@ func approval(s sudoCmd) []byte {
 	}
 	if s.remote {
 		recs = append(recs, record('m', nil))
+	}
+	if s.truncated {
+		recs = append(recs, record('t', nil))
 	}
 	for _, st := range s.settings {
 		recs = append(recs, record('s', []byte(st)))

@@ -54,6 +54,12 @@ previous generation.
 | `forUser` | `"dan"` | The gated user, and whose galley is asked. |
 | `remoteKeys` | `[ ]` | SSH public key lines whose signature approves a remote sudo (below); empty is remote mode off. |
 | `danger.<pattern>` | `{ }` | Danger rules beside the built-in catalogue (below): `reason` for any command the pattern matches, `args.<glob>` for one with an argument the glob matches. |
+| `exec.<pattern>.answer` | | The host's exec rules ([Rules](#rules)): `allow`, `ask` or `refuse` for a resolved command the pattern matches. |
+| `exec.<pattern>.runAs` | `"root"` | The user the rule's commands run as; a sudo as anyone else is not the rule's. |
+
+With `services.frisket.policy.courier.enable`, the file also gets
+`policy`: the courier's socket, `/etc/frisket/allowed_signers` and the
+policy file's name, and the gate reads the project a sudo is run in.
 
 The options are written to `/etc/frisket-sudo/config.json`, which
 `frisket-sudo serve -config` reads, keys named as the options are:
@@ -61,11 +67,15 @@ The options are written to `/etc/frisket-sudo/config.json`, which
 ```json
 { "forUser": "alice", "remoteKeys": [ "ecdsa-sha2-nistp256 AAAA… alice@laptop" ],
   "danger": { "reboot **": { "reason": "reboots this machine" },
-              "systemctl **": { "args": { "postgresql*": "touches the database" } } } }
+              "systemctl **": { "args": { "postgresql*": "touches the database" } } },
+  "exec": { "/run/current-system/sw/bin/journalctl **": { "runAs": "root", "answer": "allow" } },
+  "policy": { "courier": "/run/frisket-policy/sock",
+              "allowedSigners": "/etc/frisket/allowed_signers", "fileName": "chase.json" } }
 ```
 
-A key it does not know, a remote key that does not parse or a danger rule
-that does not compile stops it starting; the build runs `frisket-sudo
+A key it does not know (a rule's spelt in another case included), a
+remote key that does not parse, or a danger or exec rule that does not
+compile stops it starting; the build runs `frisket-sudo
 check` on the file first, and a change restarts the gate. `frisket-sudo
 schema` prints its JSON Schema.
 
@@ -93,6 +103,9 @@ A gated sudo skips `pam_unix` and asks the gate. With no tty, `-S`, `-A`,
 a sudoers ticket and NOPASSWD are all ignored: the dialog's password is
 the one checked. `sudo -n` gets the dialog too.
 
+- **A rule matching** (the host's or the project's, [Rules](#rules)):
+  allowed with no password, asked with none, or refused, but never for
+  a danger or a warning.
 - **Outside a window**: the dialog. A wrong password brings it back. A
   verified one runs the command and, with a time above 0, opens a window.
 - **Inside a window**: a question, Allow or Refuse. The window is
@@ -124,6 +137,75 @@ holds SIGTERM, SIGINT, SIGHUP and SIGQUIT, so only SIGKILL does. Nothing
 that waits on you times out: a sudo waits until it is answered or killed.
 The check-in alone is bounded: a gate that does not answer it within
 250 ms is not running.
+
+## Rules
+
+Exec rules answer a sudo before any dialog: the host's, from
+`services.frisket.sudoGate.exec`, and the project's, from the `sudo`
+section of the signed `chase.json` the sudo is run in.
+
+```nix
+services.frisket.sudoGate.exec = {
+  "/run/current-system/sw/bin/journalctl **".answer = "allow";
+  "/run/current-system/sw/bin/journalctl ** [arg --vacuum*]".answer = "ask";
+  "/run/current-system/sw/bin/reboot **".answer = "refuse";
+};
+```
+
+```json
+{ "version": 2,
+  "sudo": { "exec": { "/run/current-system/sw/bin/systemctl restart foo.service": { "runAs": "root", "answer": "ask" },
+                      "/run/current-system/sw/bin/reboot **": null } } }
+```
+
+```
+claude> sudo journalctl -u foo      # runs: no dialog, no password
+claude> sudo systemctl restart foo  # galley: "asked, with no password, by the project rule …"  [Refuse] [Allow]
+claude> sudo shutdown now           # no rule: the password dialog, as ever
+claude> sudo systemctl stop sshd    # danger: the dialog, whatever a rule says
+```
+
+- **Patterns** are execrule's, over the resolved command: the program's
+  absolute path, as the dialog shows it, then its arguments. `*` is one
+  word, a last `**` any number; ` [arg GLOB]` after a pattern makes an
+  arg rule, which only asks or refuses, for a command with an argument
+  the glob matches (`*` any run of characters but `/`). A literal pattern
+  beats a pattern, a narrower one a wider one, and an arg rule only makes
+  the answer stricter. A pattern whose first word is not an absolute,
+  clean path could never match, and is refused.
+- **Answers**: `allow` runs the command with no question and no password;
+  `ask` is a plain Allow/Refuse question with no password, inside a
+  window or not, which opens no window; `refuse` is sudo's own refusal
+  line, naming the rule
+  (`unable to log accept event: refused by the host rule /run/current-system/sw/bin/reboot **`).
+  No rule matching is the dialog, or the window's question, as without
+  rules. An arg rule asking about a command no command rule matches
+  leaves it the dialog: the password is the stricter.
+- **runAs**: a rule is for the user it names, root by default; a
+  `sudo -u lp` is decided by `lp`'s rules alone.
+- **Never a rule's**, fixed in the gate whatever any rule says: a danger
+  (the catalogue, a `danger` rule, a program outside the root-owned
+  directories, an unreadable shell command), a warning (a chain cut short
+  or launched from `systemd --user`), a command the gate did not see
+  whole, one with a variable outside the allowlist, and a shell,
+  `sudo -s`, `sudo -i` or `env`, whose command is another's. Each is
+  asked as it is with no rules. Remote mode reads no rules.
+- **The project** is the one the courier finds above the working
+  directory of the process that ran sudo ([policy.md](policy.md)). Its
+  `sudo.exec` is merged over the host's with RFC 7396's merge patch: a
+  pattern the host has is replaced, `null` takes it away, a new one is
+  added. A project may set `exec` alone. The file counts only when
+  `chase.json.sig` verifies against `/etc/frisket/allowed_signers` in
+  the project's namespace; unsigned, not verifying, or with a `sudo`
+  section a project may not set, it is ignored with one
+  `project policy ignored` journal line, and the host's rules decide. No
+  project, or the courier down, is the host's rules.
+- The journal's `decision` has `source` `host rule` or `project rule`,
+  with `rule` (the pattern), `answer` and the project's `root`; an
+  answered `ask` has `source` `galley` and `rule_source`.
+
+There is no Always for sudo: a project's rule is written into
+`chase.json` by hand, or by an agent, and signed (`chase sign`).
 
 ## Remote mode
 
@@ -175,7 +257,7 @@ journalctl -u frisket-sudo -o cat | jq 'select(.msg == "decision")'
 One `decision` record per answer: the chain, the anchor, the program and
 argv, danger reasons, environment lines, the outcome, and its `source`
 (`galley`, `window`, `verified`, `wrong password`, `cancelled`, `nobody`,
-`not the pinned galley`, `hung up`). A password appears only as its length.
+`not the pinned galley`, `hung up`, `host rule`, `project rule`). A password appears only as its length.
 A remote sudo's records have `remote` set, the message's fields, the host
 key fingerprints, the nonce, and the key that signed.
 

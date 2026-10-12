@@ -85,6 +85,17 @@ in
     imports = [ self.nixosModules.sudoGate ];
     services.frisket.sudoGate.enable = true;
     services.frisket.sudoGate.danger."systemctl **".args."bar*" = "touches bar";
+    # The host's exec rules; the project's are in a signed chase.json the
+    # test writes, read through the courier.
+    services.frisket.sudoGate.exec = {
+      "/run/current-system/sw/bin/uname **".answer = "allow";
+      "/run/current-system/sw/bin/systemctl status **".answer = "allow";
+      "/run/current-system/sw/bin/hostname **".answer = "refuse";
+      "/run/current-system/sw/bin/whoami".answer = "ask";
+    };
+    services.frisket.policy = { fileName = "chase.json"; courier.enable = true; };
+    # The key is made when the test runs, so the allowed signers are too.
+    environment.etc."frisket/allowed_signers".source = lib.mkForce "/run/sudo-gate-test/allowed_signers";
 
     specialisation.nopasswd.configuration = nopasswd;
     specialisation.misread.configuration = {
@@ -116,6 +127,8 @@ in
       ExecStart = "${fakegalley} -socket /run/galley-ask/dan.sock -script /run/fakegalley/script -log /run/fakegalley/log";
       Slice = "app.slice";
     };
+    # Restarted for each new script, at times more than five in ten seconds.
+    systemd.user.services.galley.startLimitIntervalSec = 0;
 
     environment.systemPackages = [ pkgs.socat pkgs.gnutar pkgs.python3 ];
   };
@@ -380,6 +393,57 @@ in
         notty("sudo --preserve-env=FOO id -u", extra="FOO=bar")
         q = events("question")[asked]
         assert q["level"] == "normal" and any(l.startswith("FOO=") for l in q["text"].split("\n")), q
+
+    with subtest("exec rules: allow runs unasked, refuse refuses, ask asks with no password; danger is still asked"):
+        machine.succeed("${lib.getExe self.packages.${system}.frisket-sudo} check /etc/frisket-sudo/config.json")
+        galley("cancel")
+        asked = len(events("question"))
+        rc, out = notty("sudo uname -r")
+        assert rc == 0, out
+        rc, out = notty("sudo systemctl status foo.service")
+        assert rc == 0, out
+        assert len(events("question")) == asked, events("question")[asked:]
+        d = decisions()[-1]
+        assert d["outcome"] == "allow" and d["source"] == "host rule" and d["rule"] == "/run/current-system/sw/bin/systemctl status **", d
+        rc, out = notty("sudo hostname")
+        assert rc != 0 and "refused by the host rule /run/current-system/sw/bin/hostname **" in out, out
+        assert len(events("question")) == asked
+        rc, out = notty("sudo systemctl status frisket.service")
+        assert rc != 0, out
+        q = events("question")[asked]
+        assert q["level"] == "danger" and is_dialog(q, time=False), q
+        galley("answer 0")
+        rc, out = notty("sudo whoami")
+        assert rc == 0 and "root" in out, out
+        q = events("question")[-1]
+        assert is_question(q) and q["text"].startswith("asked, with no password, by the host rule /run/current-system/sw/bin/whoami\n"), q
+        d = decisions()[-1]
+        assert d["outcome"] == "allow" and d["source"] == "galley" and d["rule_source"] == "host rule", d
+
+    with subtest("a project's signed sudo.exec is merged over the host's; an unsigned one is ignored, in one line"):
+        galley("cancel")
+        machine.succeed("install -d -m 0755 /run/sudo-gate-test")
+        machine.succeed("ssh-keygen -q -t ed25519 -N ''' -C dan -f /run/sudo-gate-test/key && chown dan /run/sudo-gate-test/key")
+        machine.succeed("echo \"dan namespaces=\\\"frisket-policy:*\\\" $(cat /run/sudo-gate-test/key.pub)\" > /run/sudo-gate-test/allowed_signers")
+        doc = json.dumps({"version": 2, "sudo": {"exec": {"/run/current-system/sw/bin/hostname **": {"runAs": "root", "answer": "allow"}}}})
+        for d in ["signed", "unsigned"]:
+            machine.succeed(f"install -d -o dan -g users /home/dan/{d} /home/dan/{d}/sub && echo {shlex.quote(doc)} > /home/dan/{d}/chase.json && chown dan /home/dan/{d}/chase.json")
+        machine.succeed("runuser -u dan -- ssh-keygen -Y sign -f /run/sudo-gate-test/key -n 'frisket-policy:~/signed' /home/dan/signed/chase.json")
+        # From a claude, whose shell is the user's process nearest sudo: a
+        # notty sudo's is runuser, root's, with nothing of dan's above it.
+        asked = len(events("question"))
+        assert run("claude-b", "cd /home/dan/signed/sub && sudo hostname; r=$?; cd /; (exit $r)") == 0
+        d = decisions()[-1]
+        assert d["outcome"] == "allow" and d["source"] == "project rule" and d["root"] == "/home/dan/signed", d
+        for i in range(2):
+            assert run("claude-b", "cd /home/dan/unsigned && sudo hostname 2>/run/claude-b/err; r=$?; cd /; (exit $r)") != 0
+            out = machine.succeed("cat /run/claude-b/err")
+            assert "refused by the host rule /run/current-system/sw/bin/hostname **" in out, out
+        rc, out = notty("cd /home/dan/signed && sudo hostname")
+        assert rc != 0 and "refused by the host rule" in out, out
+        assert len(events("question")) == asked
+        ignored = [l for l in gate_log() if l.get("msg") == "project policy ignored"]
+        assert len(ignored) == 1 and ignored[0]["root"] == "/home/dan/unsigned" and ignored[0]["why"] == "no chase.json.sig", ignored
 
     galley("ok " + pw + " 0")
 

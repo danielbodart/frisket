@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/danielbodart/frisket/execrule"
+	"github.com/danielbodart/frisket/internal/courier"
 	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/internal/grant"
 	"github.com/danielbodart/frisket/internal/peer"
@@ -34,13 +35,26 @@ type Gate struct {
 	RemoteKeys []ssh.PublicKey
 	// Danger are the host's danger rules, beside the built-in catalogue.
 	Danger map[string]sudo.Extra
+	// Exec are the host's exec rules: a sudo one matches is allowed, asked
+	// with no password, or refused, unless it is a danger or a warning.
+	Exec map[string]sudo.Rule
+	// Policy, when set, reads the signed policy of the project a sudo is
+	// run in, whose sudo.exec is merged over Exec.
+	Policy *Policy
 
 	who   func(*net.UnixConn) (peer.Proc, error)
 	ask   func(context.Context, string, galleyask.Question) (galleyask.Answer, error)
 	alive func(pid int, start uint64) bool
 	now   func() time.Duration
 
+	read    func(ctx context.Context, pid int, start uint64) (*courier.Response, error)
+	signers func() ([]byte, error)
+	wall    func() time.Time
+
 	hostKeys string
+
+	exec     *sudo.ExecRules
+	projects projectCache
 
 	danger   *execrule.Rules
 	mu       sync.Mutex
@@ -93,6 +107,13 @@ func (g *Gate) init() error {
 		return err
 	}
 	g.danger = danger
+	if g.exec, err = sudo.CompileExec(g.Exec); err != nil {
+		return err
+	}
+	if g.wall == nil {
+		g.wall = time.Now
+	}
+	g.policyDefaults()
 	g.checkins = map[proc]int{}
 	g.windows = map[proc]window{}
 	g.changed = make(chan struct{})
@@ -223,6 +244,11 @@ type sudoReq struct {
 	danger    []string
 	env       []string
 	truncated bool
+	// shell is a command whose words are another command's: a shell,
+	// sudo -s or -i, or env.
+	shell bool
+	// rule is the exec rule that asks about it, if one does.
+	rule *ruled
 
 	answer     galleyask.Answer
 	answeredAt time.Duration
@@ -261,6 +287,7 @@ func (g *Gate) describe(req *request) (*sudoReq, error) {
 	if shell && len(words) >= 3 && words[1] == "-c" {
 		words[2] = unescape(words[2])
 	}
+	a.shell = shell || galleyask.Shell(words[0]) || words[0] == "env"
 	for _, d := range dangers(g.danger, words, shell) {
 		if !slices.Contains(a.danger, d) {
 			a.danger = append(a.danger, d)
@@ -303,6 +330,10 @@ func (a *sudoReq) level() string {
 func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
 	level := a.level()
 	var lines []string
+	if a.rule != nil {
+		inWindow = true
+		lines = append(lines, a.rule.line(), "")
+	}
 	if wrong && !inWindow {
 		lines = append(lines, "Wrong password, try again", "")
 	}
@@ -364,6 +395,19 @@ func (s *session) approve(req *request) {
 		s.reply(replyNo, "bad request")
 		return
 	}
+	if r, ok := s.g.rule(a); ok {
+		switch r.Answer {
+		case sudo.Allow:
+			s.record(a, "allow", r.source, r.attrs())
+			s.reply(replyYes, "")
+			return
+		case sudo.Refuse:
+			s.record(a, "refuse", r.source, r.attrs())
+			s.reply(replyNo, "refused by the "+r.source+" "+galleyask.Clean(r.Pattern))
+			return
+		}
+		a.rule = r
+	}
 	s.decide(a, false)
 }
 
@@ -400,6 +444,18 @@ func (s *session) decide(a *sudoReq, wrong bool) {
 		case err != nil:
 			s.record(a, "refuse", "nobody", []any{"err", err.Error()})
 			s.reply(replyNo, "no one to ask; use a terminal")
+		case a.rule != nil:
+			clear(got.Password)
+			got.Password = nil
+			a.answer = got
+			extra := append([]any{"rule_source", a.rule.source}, a.rule.attrs()...)
+			if got.Allowed {
+				s.record(a, "allow", "galley", extra)
+				s.reply(replyYes, "")
+			} else {
+				s.record(a, "refuse", "galley", extra)
+				s.reply(replyNo, "refused")
+			}
 		case pin != nil:
 			a.answer = got
 			if !got.Allowed {
@@ -442,7 +498,10 @@ type answered struct {
 func (s *session) post(a *sudoReq, wrong bool) (got galleyask.Answer, pin *proc, hungUp bool, err error) {
 	for {
 		changed := s.g.windowsChanged()
-		pin = s.g.window(a)
+		pin = nil
+		if a.rule == nil {
+			pin = s.g.window(a)
+		}
 		q := a.question(pin != nil, wrong)
 		ctx, cancel := context.WithCancel(context.Background())
 		stop, werr := galleyask.WatchHangUp(s.c, s.g.Log, cancel)
@@ -471,7 +530,7 @@ func (s *session) post(a *sudoReq, wrong bool) (got galleyask.Answer, pin *proc,
 				break wait
 			case <-changed:
 				changed = s.g.windowsChanged()
-				if pin == nil && len(a.danger) == 0 && s.g.window(a) != nil {
+				if pin == nil && a.rule == nil && len(a.danger) == 0 && s.g.window(a) != nil {
 					cancel()
 					r := <-answers
 					clear(r.a.Password)
