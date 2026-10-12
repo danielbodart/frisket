@@ -161,7 +161,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 | **P4a** (done) | frisket policy v2 (operations, class answers, ceiling, maps, `x-scope`, `check --layer project`), evaluated by frisket at request time | `policy/`, `internal/intercept/scope_v2.go`, `hostpattern/` |
 | **P4b** (done) | live always-overlay in containers, asker `always`; flong `seccomp.syscalls` map, `x-scope` | `internal/ask`, `internal/intercept`, `internal/always`, flong `decl-options.json` |
 | **P5** (done) | chase: `chase.json` v2 sections, mergePatch replaces policydoc, signature replaces the approver state, `chase check\|schema\|fmt\|sign\|migrate`, `chase record apply` writes then signs | `internal/grant/{file,approve,launch}.go`, `internal/policydoc/*`, `lib/operations.nix` |
-| **P6** | nix-config: tiers as layers, `/etc/frisket/allowed_signers`, courier on, asker/approver to the sign flow | `features/chase/{tiers,asker,approver}.nix` |
+| **P6** ✅ | nix-config: tiers as layers, `/etc/frisket/allowed_signers`, courier on, asker/approver to the sign flow | `features/chase/{tiers,asker,approver}.nix` |
 
 **Migration:**
 - One release reads both formats; a checkout with only `chase.jsonc` takes the legacy path and prints "run chase migrate".
@@ -233,3 +233,5 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 ## Appendix: why JSON, not ZON
 
 Zig's own ZON parser was spiked as a C-ABI library called from Go through cgo. It works: static with `zig cc` against musl, about 215 KB larger. But every Go build here is `CGO_ENABLED=0` on purpose: static binaries with no glibc NSS (frisket, chase), and galley's client starting in 1–2 ms. cgo would also put an unsafe C boundary inside the gateway and the sudo gate, need zig as every Go build's C compiler, Mac included, and leave Nix, which has no ZON reader, and chase, which writes these files at runtime, needing their own. JSON is native to Nix (`builtins.toJSON`, keys sorted), to Go and to Zig's std.json.
+- chase P6 (`e99912e`; nix-config `1e94c53`): `chase.tiers.<t>` takes `frisket`, `flong`, `signer` and `sudo` sections in `chase.json`'s shape, merged by RFC 7396 over what the tier's other options generate; every tier's rendered frisket document and flong declaration came out unchanged. The `signer` and `sudo` sections are checked and installed at `/etc/chase/layers/<tier>.json` but read by nothing yet. nix-config's approver is gone, with no `chase.jsonc` left (data-lab and pokeranker migrated); `/etc/frisket/allowed_signers` and the courier came in with P3 (nix-config `3d0bc2f`).
+- Always made live (chase `d86f21d`; nix-config `212a0f5`): `chase.tiers.<t>.always`, by default a tier that takes grants and asks someone, so never strict, marks its answerable routes and SSH machines; nix-config's asker passes galley the diff and Always, and shows frisket's notices.
