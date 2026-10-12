@@ -120,6 +120,21 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         passed to it; otherwise on -listen (default 127.0.0.153:53), UDP and
         TCP.
 
+  frisket policy verify [-allowed-signers FILE] [-home DIR] POLICY
+        Verify POLICY.sig over POLICY's exact bytes, in the namespace of
+        POLICY's directory, frisket-policy:~/rel under DIR (default $HOME)
+        and frisket-policy:/abs/path elsewhere, against the allowed signers
+        (default ` + defaultAllowedSigners + `). Exits 0 when it verifies,
+        else says why not.
+
+  frisket policy fmt [-check] POLICY
+        Rewrite POLICY in the canonical form a policy is signed in: keys
+        sorted, two-space indent, a newline at the end, integers only. With
+        -check, only say whether it already is.
+
+  frisket policy signers FILE
+        Read an allowed signers file as verify would, and list its lines.
+
   frisket sessions        What the daemon holds, one JSON object per line.
   frisket steering FILE   Check a steering file and print what it will do.
 
@@ -153,6 +168,8 @@ func main() {
 		err = runSchema(args)
 	case "dns":
 		err = runDNS(args)
+	case "policy":
+		err = runPolicy(args, os.Stdout)
 	case "helper":
 		err = nsnet.RunHelper(args, os.Stderr, steering.Serve)
 	case "version":
