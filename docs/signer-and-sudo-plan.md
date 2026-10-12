@@ -94,7 +94,7 @@ Measured on both hosts (dan-blade, dan-desktop) unless marked; a file source is 
 **What C cannot do:**
 
 - Open `/dev/tpmrm0`: only `ssh-signer` is in `tss` once the signer is enabled (assertion) [spike: identity-vm].
-- Move into `system.slice/frisket.service`: `cgroup.procs` is root 0644. UNTESTED from inside `user@1000.service`; the signer VM test tries it.
+- Move into `system.slice/frisket.service`: `cgroup.procs` is root 0644, and a write from inside `user@1000.service` is refused (the signer VM).
 - Be frisket's main process: that needs ppid 1 in frisket's cgroup. A process frisket starts could get there by double-forking (an accepted limit above).
 - Write `/run/frisket-signer`, `/run/frisket-sudo` or `/etc`.
 - Reach the dialog's password: it goes from galley to the gate and over a root-only socket into setuid sudo, which cannot be ptraced [spike: sudo-plugin]; galley cannot be ptraced at `ptrace_scope` 1 [spike: G-P1].
@@ -210,7 +210,7 @@ Stock sudoers stays the policy. frisket-sudo adds one audit plugin (`frisket_sud
 - **The password is never kept.** The gate zeroes its copy once it has sent it in 'W', and the plugin zeroes its copy after `pam_authenticate`. A window is a time and a galley pin, and holds no password.
 - **Only a verified dialog password opens a window.** A danger command never opens one, nor does a Cut or SessionRoot chain: their dialog has no time field.
 - **Rules the module sets**, from the one `enable` option: `Defaults noninteractive_auth`, so an agent's no-tty `sudo -n` reaches the dialog [spike: one-hop-sudo N1a]; `Defaults timestamp_type=tty`, with any other `timestamp_type` refused (`!tty_tickets`, which is `global`, included), since under `global` a no-tty skip leaves the next terminal sudo passwordless [spike: one-hop-sudo Q4f, T8b]; `rootpw`, `targetpw` and `runaspw` refused [spike: one-hop-sudo A7]; `intercept` and `log_subcmds` refused, as options or as the `INTERCEPT` and `LOG_SUBCMDS` command tags (case-sensitive, as sudoers is), since each intercepted subcommand calls `accept()` again (sudo `src/exec_intercept.c:508`) and nix-config sets neither; a build assertion that sudo's auth stack is exactly the helper, `pam_unix`, `pam_deny`, since under `noninteractive_auth` any other module would run on every terminal `sudo -n` [spike: one-hop-sudo noninteractive]; and one that the `frisket-sudo` PAM service's auth stack is exactly `pam_unix`, `pam_deny`, so only the password verifies a dialog, never fprintd or a U2F key.
-- **Accepted consequences**: with no tty, `-S` and any askpass are ignored, as the dialog's password is the one checked [spike: one-hop-sudo Q2d, Q2e, Q2g]; NOPASSWD commands still get the dialog [spike: one-hop-sudo T10]; a no-tty `sudo -v` or `-l` fails as stock (`-n`: "a password is required") [spike: one-hop-sudo N5], and one the policy allows with no password (`-l` with a NOPASSWD rule) runs as stock; a refusal adds sudo's line `sudo: frisket_audit: unable to log accept event: <reason>`; a terminal `sudo -n` without a ticket logs two extra `pam_unix` journal lines.
+- **Accepted consequences**: with no tty, `-S` and any askpass are ignored, as the dialog's password is the one checked [spike: one-hop-sudo Q2d, Q2e, Q2g]; NOPASSWD commands still get the dialog [spike: one-hop-sudo T10]; a no-tty `sudo -v` or `-l` fails as stock (`-n`: "a password is required") [spike: one-hop-sudo N5], and one the policy allows with no password (`-l` with a NOPASSWD rule) runs as stock; a refusal adds sudo's line `sudo: frisket_audit: unable to log accept event: <reason>`; a terminal `sudo -n` without a ticket logs two extra `pam_unix` journal lines and prints no lecture (the sudo VM).
 - **Who runs what**: the plugin and the PAM helper run as root inside sudo; the gate as `sudo-gate`.
 
 ### 4.6 Danger and warning
@@ -317,7 +317,7 @@ Request classes [spike: session-bind]:
 
 1. **Bound userauth**: `sid == binds[last].sid`; a hostbound request's embedded host key must equal `binds[last].hostkey`. Any `fwd=1` bind on the connection marks it forwarded.
 2. **Unbound userauth** (x/crypto, OpenSSH < 8.9): no verified destination; an embedded host key is shown as "claims SHA256:…".
-3. **SSHSIG**: magic, namespace and hash parsed; the namespace is shown. UNTESTED on real output: the unit test uses `ssh-keygen -Y sign` fixtures.
+3. **SSHSIG**: magic, namespace and hash parsed; the namespace is shown. Checked on real `ssh-keygen -Y sign` output: the unit test's fixtures and the signer VM.
 4. **Remote sudo**: data starting with the SSH string `frisket-sudo-v1` (bytes `00 00 00 0f` then the magic; no session id is 15 bytes), checked before the others. Parsed strictly as the message in §7: every field present, nonce exactly 32 bytes, at least one host key and each a parseable public key blob, level `""`, `warning` or `danger`, no trailing bytes; any failure is refused. Asked only when the connection's last bind has `is_forwarding=1` and its host key is byte-equal to one of the message's host keys; unbound, not forwarded or another host's key → refused, logged with the reason. Never silent: frisket's main process (step 3 is userauth only), `terminal`, `sshsig` and grants do not apply, and no answer makes a grant.
 5. **Other forwarded sign**: neither of the above (stock pam_rssh's 32 random bytes, for one), on a forwarded bound connection → asked, Allow once [spike: remote-sudo].
 
@@ -694,7 +694,7 @@ Load-bearing lines:
 | Socket | `/run/frisket-signer/agent`, `SocketUser = forUser`, `SocketMode = 0600`, `DirectoryMode = 0755`, fd name `agent` |
 | Service | `User = ssh-signer`, `SupplementaryGroups = tss`, `DevicePolicy = closed`, `DeviceAllow = /dev/tpmrm0 rw`, `StateDirectory = frisket-signer` mode 0700 |
 
-Hardening: `NoNewPrivileges`, `CapabilityBoundingSet = ""`, `ProtectSystem = "strict"`, `ProtectHome`, `PrivateTmp`, `ProtectControlGroups`, `RestrictAddressFamilies = [ "AF_UNIX" ]`, `SystemCallFilter = [ "@system-service" "~@privileged" ]`, `MemoryDenyWriteExecute`, `Restart = "always"`, `StartLimitIntervalSec = 0`. UNTESTED as a set with the real binary and TPM; the signer VM test runs this module.
+Hardening: `NoNewPrivileges`, `CapabilityBoundingSet = ""`, `ProtectSystem = "strict"`, `ProtectHome`, `PrivateTmp`, `ProtectControlGroups`, `RestrictAddressFamilies = [ "AF_UNIX" ]`, `SystemCallFilter = [ "@system-service" "~@privileged" ]`, `MemoryDenyWriteExecute`, `Restart = "always"`, `StartLimitIntervalSec = 0`. The signer VM test runs this module with the real binary and a software TPM.
 
 `frisket-signer-keygen` is a oneshot with the same `User`, `tss` and `DeviceAllow`, writing to `/var/lib/frisket-signer/new/`.
 
@@ -1052,26 +1052,10 @@ T3 and T4 run in parallel once T2 merges. Cross-repo contracts, frozen when thei
 
 UNTESTED, each with the test that settles it:
 
-- **Claude Code's Bash timeout kills the whole process tree**, so sudo and ssh hang up and their rows are withdrawn. A quick check before building: a Bash call running `sudo -n sleep 600` with a short timeout, then `pgrep sudo`. If sudo survives, a timed-out command keeps its row until answered. Note that until it execs the command, sudo catches SIGTERM, SIGINT, SIGHUP and SIGQUIT, so a timeout that sends SIGTERM leaves a waiting sudo and its row up; only SIGKILL withdraws it (the sudo VM: still waiting after SIGTERM).
-- **The plugin's one connection** lives from `open()` through PAM and pam_exec's fork to `accept()`, the gate sees its hang-up while `accept()` waits, and its close ends the check-in: the sudo VM (Hang-up, Ticket cases).
-- **Ungated sudo passes the audit-only veto**: S2 and S3 ran with the approval plugin, and the veto runs failed in PAM first, so no run shows an ungated no-tty sudo reaching `accept()` and passing (remote `printf pw | ssh host 'sudo -S id'`): the sudo VM's Remote case.
-- **The "gate not running" line printed from the audit `open()`** reaches stderr: the sudo VM.
-- **The sudo lecture** on a terminal `sudo -n` from a user never lectured [spike: one-hop-sudo noninteractive]: the sudo VM.
-- **The comm of frisket's main process** is `frisket`: record it in the signer VM stand-in.
-- **The tab shape on dan-blade** (H2 was recorded on dan-desktop): record one chain before M2 there.
-- **comm of `sshd-session`** links is `sshd-session` on OpenSSH 10.5 (only exe and cmdline were recorded): the sudo VM remote subtest.
-- **The cgroup move from `user@` into `frisket.service`** is refused: signer VM.
-- **SSHSIG parsing** on real `ssh-keygen -Y sign` output: unit test.
-- **The signer's hardening set as a whole**, with the real binary and the TPM: signer VM.
-- **Connecting to the signer socket from frisket.service's read-only mounts**: signer VM stand-in.
-- **galley `Field.text` and `--value`**: galley e2e.
-- **sudo's `parse_args` as a test oracle**: whether it builds alone from `sudo.src` for the mode-parse property: a first build in the `sudo/` tests.
-- **A Zig audit plugin loaded by sudo**: the exported `frisket_audit` passes the check-plugin and sudo's loader: the sudo VM.
-- **The environment sudo passes after `env_reset`**: record it once in the sudo VM and write it into `docs/sudo.md`.
-- **An RSA identity in remote mode**: flags 0 gives an `ssh-rsa` SHA-1 signature; whether the gate's `Verify` takes it: remote VM with an RSA file key. Our keys are P-256.
-- **ProxyJump and stacked binds** in remote mode: the signer's last bind is the far host: remote VM.
-- **The remote-mode plugin's drop under real sudo**: the spike used a C stand-in: the remote VM's Ids case.
-- **galley's peer check under the signer's and gate's hardening** (cgroup inode stat worked under the same flags for `frisket.service` [spike: identity-vm]): both VM tests.
+- **Claude Code's Bash timeout and a waiting sudo**: until it execs the command sudo holds SIGTERM, so a timeout that sends only SIGTERM leaves sudo and its row up until answered (the sudo VM: still waiting after SIGTERM); only SIGKILL withdraws it. On a host: a Bash call running `sudo -n sleep 600` with a short timeout, then `pgrep -x sudo`.
+- **The tab shape on dan-blade** (H2 was recorded on dan-desktop): a tab's `ssh` there decided with `source` `terminal` in `journalctl -u frisket-signer`.
+- **An RSA identity in remote mode**: the plugin signs with flags 0, which gives an `ssh-rsa` SHA-1 signature; whether the gate's `Verify` takes it: an RSA key in `internal/sudogate`'s `TestASignatureFromAListedKeyIsYes`, or an RSA file key in `tests/sudo-remote.nix`'s "Stock agent" case. Our keys are P-256.
+- **ProxyJump and stacked binds** in remote mode: the signer's last bind is the far host: an `ssh -A -J second server sudo id -u` case in `tests/sudo-remote.nix`.
 
 Try later, after reading the journal:
 
