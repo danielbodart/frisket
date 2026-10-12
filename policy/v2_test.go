@@ -176,7 +176,7 @@ func TestAProjectLayerSetsNothingOfTheHosts(t *testing.T) {
 		{`{"routes": {"api": {"operations": {"GET /a/../b": "allow"}}}}`, "a dot segment"},
 		{`{"routes": {"api": {"operations": {"POST /repos/*/*/pulls": "refuse"}}}}`, "pulls/create is answered by name"},
 		{`{"routes": {"api": {"operations": {"nosuch/op": "allow"}}}}`, "no such operation"},
-		{`{"allow": {"PyPI.org": true}}`, "a capital"},
+		{`{"allow": {"*-Ap.lan": true}}`, "a capital"},
 		{`{"ssh": {"*-ap": {"exec": {"ls": "allow"}}}}`, "matches no SSH route"},
 		{`{"version": 1}`, "version 1"},
 	} {

@@ -240,8 +240,12 @@ func namedAnswer(r RouteV2, op *Operation) bool {
 // neverAName is why a host key can match no name a session's DNS
 // considers, or "".
 func neverAName(k string) string {
-	if err := hostpattern.Check(k); err != nil {
+	p, err := hostpattern.Compile(k)
+	if err != nil {
 		return err.Error()
+	}
+	if _, below := p.Below(); p.Literal() || below {
+		return "" // a name, or every name below one: matched in any case
 	}
 	for _, l := range strings.Split(k, ".") {
 		if len(l) > 63 {
