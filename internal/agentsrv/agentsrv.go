@@ -45,6 +45,7 @@ type Server struct {
 	UID        int
 	Terminal   Rule
 	SSHSIG     map[string]Rule
+	Hosts      map[string]Rule
 	Keys       []Key
 	KnownHosts string
 	Grants     *grant.Grants
@@ -124,6 +125,7 @@ type request struct {
 	keyFP     string
 	dest      string
 	known     bool
+	names     []string
 	grantable bool
 	grant     grant.Key
 	question  galleyask.Question
@@ -298,6 +300,9 @@ func (c *conn) decide(req *request) verdict {
 	if req.class == classBound && !req.fwd && r.Terminal && !r.Cut && req.known && c.s.Terminal == Allow {
 		return verdict{sign: true, source: "terminal"}
 	}
+	if req.class == classBound && !req.fwd && !r.Cut && req.known && c.hostAllowed(req.names) {
+		return verdict{sign: true, source: "host"}
+	}
 	if req.class == classSSHSIG && !req.fwd && c.s.SSHSIG[req.namespace] == Allow {
 		return verdict{sign: true, source: "sshsig"}
 	}
@@ -407,10 +412,10 @@ func (c *conn) describe(req *request) {
 		title = "agent signature on " + req.dest
 		lines = append(lines, "bound to "+req.dest)
 	case classBound:
-		names := c.hostNames(req.host)
-		req.known = len(names) > 0
+		req.names = c.hostNames(req.host)
+		req.known = len(req.names) > 0
 		if req.known {
-			req.dest = strings.Join(names, ", ")
+			req.dest = strings.Join(req.names, ", ")
 		} else {
 			req.dest = "unknown host " + ssh.FingerprintSHA256(req.host)
 			lines = append(lines, "unknown host key")
@@ -473,6 +478,18 @@ func (c *conn) describeRemoteSudo(req *request, keyLine string) {
 		}
 	}
 	req.question = galleyask.Question{Title: "sudo on " + req.dest, Text: strings.Join(lines, "\n"), Level: level, Allow: "Allow", Chain: galleyask.Chain(c.r)}
+}
+
+// hostAllowed says whether a host rule allows one of the names the known
+// hosts file gives the bound key: matched exactly, so a name with another
+// key, a hashed entry or a pattern never matches.
+func (c *conn) hostAllowed(names []string) bool {
+	for _, n := range names {
+		if c.s.Hosts[n] == Allow {
+			return true
+		}
+	}
+	return false
 }
 
 // hostNames are key's names in the known hosts file.

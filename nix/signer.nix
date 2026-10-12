@@ -6,7 +6,8 @@ self:
 let
   cfg = config.services.frisket.signer;
   inherit (lib) mkOption types;
-  signer = lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.frisket-signer;
+  package = self.packages.${pkgs.stdenv.hostPlatform.system}.frisket-signer;
+  signer = lib.getExe package;
   rule = types.enum [ "allow" "ask" ];
 
   inTss = lib.filter
@@ -22,6 +23,20 @@ let
     DevicePolicy = "closed";
     DeviceAllow = [ "/dev/tpmrm0 rw" ];
   };
+
+  # Checked as serve will read it, when the system is built.
+  configFile = pkgs.runCommand "frisket-signer-config.json"
+    {
+      nativeBuildInputs = [ package ];
+      config = builtins.toJSON {
+        inherit (cfg) forUser terminal sshsig;
+        ssh = { inherit (cfg.ssh) hosts; };
+      };
+      passAsFile = [ "config" ];
+    } ''
+    cp "$configPath" "$out"
+    frisket-signer check "$out"
+  '';
 in
 {
   options.services.frisket.signer = {
@@ -41,6 +56,16 @@ in
       default = { git = "allow"; };
       description = "A direct SSHSIG sign in each namespace. An unlisted namespace is asked, Allow once.";
     };
+    ssh.hosts = mkOption {
+      type = types.attrsOf rule;
+      default = { };
+      example = { "github.com" = "allow"; };
+      description = ''
+        A bound, direct login from any of forUser's processes to a host key
+        listed under this name in /etc/ssh/ssh_known_hosts. A forwarded sign,
+        an unknown host key and a cut chain are asked whatever this says.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -57,6 +82,8 @@ in
       isSystemUser = true;
     };
     users.groups.ssh-signer.gid = 951;
+
+    environment.etc."frisket-signer/config.json".source = configFile;
 
     systemd.sockets.frisket-signer = {
       description = "frisket-signer agent socket";
@@ -75,9 +102,9 @@ in
       requires = [ "frisket-signer.socket" ];
       after = [ "frisket-signer.socket" ];
       startLimitIntervalSec = 0;
+      restartTriggers = [ configFile ];
       serviceConfig = tpm // {
-        ExecStart = utils.escapeSystemdExecArgs ([ signer "serve" "-user" cfg.forUser "-terminal" cfg.terminal ]
-          ++ lib.concatLists (lib.mapAttrsToList (ns: v: [ "-sshsig" "${ns}=${v}" ]) cfg.sshsig));
+        ExecStart = utils.escapeSystemdExecArgs [ signer "serve" "-config" "/etc/frisket-signer/config.json" ];
         Type = "notify";
         NotifyAccess = "main";
         Restart = "always";

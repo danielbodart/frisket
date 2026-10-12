@@ -186,12 +186,13 @@ Collected by `internal/peer` for the signer (from the socket) and for the gate (
    - Remote sudo (§6, class 4): forwarded, bound, and the bound host key among the message's host keys → ask, every time; otherwise refuse. No other step applies to it.
    - Neither userauth, SSHSIG nor remote sudo (class 5): forwarded and bound → ask, Allow once; otherwise refuse.
 3. frisket's main process, userauth → sign.
-4. Terminal chain, bound userauth, not forwarded, host key in `/etc/ssh/ssh_known_hosts` → `terminal`: `allow` signs, `ask` goes to step 6.
-5. SSHSIG, not forwarded, namespace listed in `sshsig` → its value: `allow` signs, `ask` goes to step 6.
-6. Userauth only: a live grant for `(anchor, host key, key, forwarded)`, chain not Cut or SessionRoot → sign.
-7. Otherwise ask.
+4. Terminal chain, bound userauth, not forwarded, host key in `/etc/ssh/ssh_known_hosts` → `terminal`: `allow` signs, `ask` goes to step 7.
+5. Any chain not Cut, bound userauth, not forwarded, host key listed in `/etc/ssh/ssh_known_hosts` under a name whose `ssh.hosts` rule is `allow` → sign. The name is matched exactly; a hashed or pattern entry never matches.
+6. SSHSIG, not forwarded, namespace listed in `sshsig` → its value: `allow` signs, `ask` goes to step 7.
+7. Userauth only: a live grant for `(anchor, host key, key, forwarded)`, chain not Cut or SessionRoot → sign.
+8. Otherwise ask.
 
-- **Forwarded** signs are never silent at steps 4 and 5. A grant made from a forwarded question has `Fwd` set and covers only forwarded signs; a direct grant never covers one. The hop host is not part of the key.
+- **Forwarded** signs are never silent at steps 4, 5 and 6. A grant made from a forwarded question has `Fwd` set and covers only forwarded signs; a direct grant never covers one. The hop host is not part of the key.
 - **Allow once only**: unbound userauth, SSHSIG (an unlisted namespace, or one set to `ask`), Cut and SessionRoot.
 - Forwarded, unknown host key, unbound and SSHSIG are text lines in the question.
 
@@ -229,7 +230,7 @@ The gate classifies every command it is sent. A danger command gets the danger l
 - **No-tty sudo fails closed** when the gate cannot be reached: the plugin prints "frisket-sudo: gate not running (systemctl status frisket-sudo.socket); sudo in a terminal is not gated", the helper finds no check-in, and `pam_unix` fails with no terminal [spike: one-hop-sudo Q5f, N3c]. A no-tty, local `forUser` sudo with no check-in is refused at `accept()`, whether `open()` gated it or a wrong mode parse left it ungated, so a same-parent sudoers ticket cannot carry it past PAM (decided, not measured; the sudo VM's Ticket case). Terminal sudo and remote sudo outside remote mode never reach the gate, and a remote-mode sudo whose check-in fails is stock, so this cannot lock anyone out. "Gate off" is `sudoGate.enable = false`, which leaves the plugin line out of `sudo.conf`.
 - **The one timeout**: the plugin's 'C' and the helper's 'G' each end within 250 ms from connect to reply, and a miss is a failure as above. No person is waited on there, and failing makes no check-in, so pam_unix runs. A stuck or crash-looping gate thus fails a gated sudo in about half a second (both bounds; the sudo VM measured 512 ms) rather than leaving it waiting, and remote sudo outside remote mode, `-v` and `-l` never connect. Measured in the sudo VM, 'C' from a cold gate (started by socket activation) five times, then 200 warm 'C' and 'G': run alone, cold 14-20 ms, warm 'C' median 0.66 ms, max 1.4 ms, 'G' median 0.9 ms, max 1.6 ms; under `nix flake check` beside the other VM tests, cold 24-68 ms, warm 'C' max 4.2 ms, 'G' max 10.8 ms. 'A', 'V' and every wait on a person stay unbounded: the caller owns that timer.
 - `open()` returns 1 on every path, its allocation and socket errors included: 0 would make sudo unlink the plugin, so nothing vetoes, and -1 is `sudo_fatalx` on every sudo, terminal sudo included (sudo `src/sudo.c:1658-1670`).
-- **Nobody to ask** (galley not running, wrong galley peer): the signer signs at steps 3-6 as usual and refuses at step 7; the gate refuses with "no one to ask; use a terminal".
+- **Nobody to ask** (galley not running, wrong galley peer): the signer signs at steps 3-7 as usual and refuses at step 8; the gate refuses with "no one to ask; use a terminal".
 - A panic in one request refuses that request and never exits the process.
 
 ## 5. Architecture
@@ -270,7 +271,7 @@ ssh ──connect──▶ /run/frisket-signer/agent
 ssh ──session-bind@openssh.com(hostkey, sid, sig, fwd)──▶ verify sig over sid; push bind
 ssh ──REQUEST_IDENTITIES──▶ loaded keys
 ssh ──SIGN_REQUEST──▶ parse: userauth? sid == last bind? embedded hostkey == bound key? (else refuse)
-   decide (§4.4): frisket? terminal? sshsig? grant? → sign | ask
+   decide (§4.4): frisket? terminal? host? sshsig? grant? → sign | ask
    ask: galley question; poll ssh's connection for POLLRDHUP; hang-up withdraws the row
    sign: cached parent + key on the long-lived fd → TPM2_Sign → reply
    journal: one record per decision
@@ -295,7 +296,8 @@ exit:      connection closes → check-in gone, any row withdrawn
 
 `cmd/frisket-signer` follows `cmd/frisket/main.go`: a FlagSet per subcommand, `frisket-signer <sub>: <err>` and exit 1, slog JSON.
 
-- `serve`: takes its listener from `internal/sdnotify.Listen()` (fd named `agent`) and exits non-zero without it. Loads the keys, then `READY=1`.
+- `serve [-config FILE]`: reads its settings from FILE (default `/etc/frisket-signer/config.json`), strictly: an unknown key, a second value or a rule other than `allow` or `ask` is an error. Takes its listener from `internal/sdnotify.Listen()` (fd named `agent`) and exits non-zero without it. Loads the keys, then `READY=1`.
+- `check FILE`: reads FILE as `serve` would. `schema`: prints the file's JSON Schema.
 - `keygen -out DIR [-comment C] [--no-da]`: writes `id_ecdsa.tpm` and `id_ecdsa.pub` in stock's format. Runs as `ssh-signer` through the `frisket-signer-keygen` oneshot, because `tss` comes only from the unit.
 
 Packages:
@@ -388,7 +390,7 @@ The signature is the credential, so there is no password field and no time contr
 
 ### Journal
 
-One structured record per decision: requester chain, anchor, destination, key, class, forwarded, for remote sudo the message's host, user, runas user, cwd, argv, level and nonce, text lines, outcome, its source (frisket, terminal, sshsig, grant, galley answer, nobody), the chosen time, and the galley peer's pid and cgroup.
+One structured record per decision: requester chain, anchor, destination, key, class, forwarded, for remote sudo the message's host, user, runas user, cwd, argv, level and nonce, text lines, outcome, its source (frisket, terminal, host, sshsig, grant, galley answer, nobody), the chosen time, and the galley peer's pid and cgroup.
 
 ## 7. frisket-sudo
 
@@ -688,6 +690,9 @@ frisket owns `nixosModules.signer` and `nixosModules.sudoGate`, each added to fr
 | `forUser` | str | `"dan"` | The only peer uid served; galley user |
 | `terminal` | `allow` \| `ask` | `allow` | A real tab's bound, direct sign to a host in `ssh_known_hosts` |
 | `sshsig.<namespace>` | `allow` \| `ask` | `{ git = "allow"; }` | A direct SSHSIG sign in that namespace; an unlisted namespace is asked, Allow once |
+| `ssh.hosts.<name>` | `allow` \| `ask` | `{ }` | A bound, direct login from any chain not Cut to a host key listed under that name in `ssh_known_hosts`; never a forwarded sign |
+
+The options are written to `/etc/frisket-signer/config.json` (strict JSON, keys as the options are named), checked by `frisket-signer check` when the system is built, and read by `serve -config`; a change restarts the signer.
 
 Not options: frisket's main process is always trusted, a forwarded sign is never silent, and there is no refuse value.
 

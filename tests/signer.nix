@@ -48,6 +48,7 @@ in
     virtualisation.tpm.enable = true;
     services.frisket.signer.enable = true;
     specialisation.ask.configuration.services.frisket.signer.terminal = lib.mkForce "ask";
+    specialisation.hosts.configuration.services.frisket.signer.ssh.hosts.alpha = "allow";
 
     users.users.dan = { isNormalUser = true; uid = 1000; group = "users"; linger = true; };
 
@@ -322,6 +323,21 @@ in
         assert run("tab", "ssh -n alpha true") == 0
         q = events("question")[-1]
         assert len(events("question")) == asked + 1 and q["title"] == "ssh to alpha" and q["kind"] == "forms", q
+
+    with subtest("ssh.hosts.alpha = allow: a claude's login to alpha is silent, beta and a forwarded sign to alpha are asked"):
+        machine.succeed("/run/booted-system/specialisation/hosts/bin/switch-to-configuration test")
+        machine.succeed("${lib.getExe self.packages.${system}.frisket-signer} check /etc/frisket-signer/config.json")
+        asked = len(events("question"))
+        assert run("claude", "ssh -n alpha true") == 0
+        assert len(events("question")) == asked
+        source_is("host")
+        assert run("claude", "ssh -n beta true") == 0
+        assert len(events("question")) == asked + 1 and events("question")[-1]["title"] == "ssh to beta"
+        source_is("galley")
+        asked = len(events("question"))
+        assert run("claude", "ssh -n -A beta '/run/current-system/sw/bin/ssh -n alpha true'") == 0
+        qs = [q for q in events("question")[asked:] if q["title"] == "ssh to alpha"]
+        assert len(qs) == 1 and "forwarded" in qs[0]["text"].split("\n"), qs
 
     with subtest("a cleared TPM: the key is listed, a sign fails as cleared, serve stays up"):
         pid = machine.succeed("systemctl show -P MainPID frisket-signer.service").strip()

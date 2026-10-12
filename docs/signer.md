@@ -2,7 +2,8 @@
 
 An SSH agent whose keys live in the TPM. It signs without asking for
 frisket's main process, for a terminal tab ssh-ing to a host in
-`/etc/ssh/ssh_known_hosts`, and for git's commit signatures. Everything
+`/etc/ssh/ssh_known_hosts`, for any program's login to a host you allow by
+name, and for git's commit signatures. Everything
 else is asked in galley: Allow once, Allow for a time you pick, or Refuse.
 
 ```
@@ -11,6 +12,9 @@ $ git push                          # typed in a tab, github.com in ssh_known_ho
 
 claude> git push                    # galley: "ssh to github.com"
                                     #   [Refuse] [Allow once] [Allow for 15 minutes ▾]
+
+claude> git push                    # with ssh.hosts."github.com" = "allow"
+                                    # signed, nothing asked
 ```
 
 ## Setup
@@ -56,6 +60,19 @@ in `tss`. Log out and in after leaving it.
 | `forUser` | `"dan"` | The only user served, and whose galley is asked. |
 | `terminal` | `"allow"` | A tab's direct sign to a host in `ssh_known_hosts`: `allow` or `ask`. |
 | `sshsig.<namespace>` | `{ git = "allow"; }` | A direct SSHSIG sign in that namespace: `allow` or `ask`. Any other namespace is asked, Allow once. |
+| `ssh.hosts.<name>` | `{ }` | A direct login from any program to the host key listed under `name` in `ssh_known_hosts`: `allow` or `ask`. |
+
+The options are written to `/etc/frisket-signer/config.json`, which
+`frisket-signer serve -config` reads, keys named as the options are:
+
+```json
+{ "forUser": "alice", "terminal": "allow", "sshsig": { "git": "allow" },
+  "ssh": { "hosts": { "github.com": "allow" } } }
+```
+
+A key it does not know, or a value other than `allow` or `ask`, stops it
+starting; the build runs `frisket-signer check` on the file first.
+`frisket-signer schema` prints its JSON Schema.
 
 frisket's main process is always trusted, a forwarded sign (`ssh -A`) is
 always asked, and nothing is refused unasked.
@@ -69,9 +86,13 @@ In order, the first that applies:
 3. frisket's main process: signed.
 4. A tab's shell running ssh, git, scp, sftp or rsync, to a known host,
    not forwarded: `terminal`.
-5. An SSHSIG, not forwarded: its namespace's value.
-6. A live grant for this process, host key, key and forwarding: signed.
-7. Otherwise: asked. With no galley to ask, refused.
+5. Any program's login, not forwarded and its process chain not cut
+   short, to a host key `ssh_known_hosts` lists under a name set to
+   `allow` in `ssh.hosts`: signed. The name is matched exactly, so a
+   hashed entry, a pattern, or the same name with another key never is.
+6. An SSHSIG, not forwarded: its namespace's value.
+7. A live grant for this process, host key, key and forwarding: signed.
+8. Otherwise: asked. With no galley to ask, refused.
 
 A grant covers the asking program (a claude, a tab's shell) until the time
 you picked; a forwarded question's grant covers forwarded signs only.
@@ -88,8 +109,8 @@ journalctl -u frisket-signer -o cat | jq 'select(.msg == "decision")'
 ```
 
 One `decision` record per sign: the chain, the anchor, the destination, the
-key, the outcome, and its `source` (`frisket`, `terminal`, `sshsig`,
-`grant`, `galley`, `nobody`, `hung up`). A failed sign is one `sign failed`
+key, the outcome, and its `source` (`frisket`, `terminal`, `host`,
+`sshsig`, `grant`, `galley`, `nobody`, `hung up`). A failed sign is one `sign failed`
 line with the TPM's cause; ssh itself only says `agent refused operation`.
 
 ## Commit signing from a sandbox

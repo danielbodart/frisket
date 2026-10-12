@@ -1,6 +1,7 @@
 // Command frisket-signer holds the SSH keys that live in the TPM, signs
-// silently for frisket, for a terminal tab ssh-ing to a known host and for
-// listed SSHSIG namespaces, and asks through galley for everything else.
+// silently for frisket, for a terminal tab ssh-ing to a known host, for any
+// process's direct login to a host allowed by name and for listed SSHSIG
+// namespaces, and asks through galley for everything else.
 package main
 
 import (
@@ -14,7 +15,6 @@ import (
 	"os"
 	"os/user"
 	"strconv"
-	"strings"
 
 	"github.com/danielbodart/frisket/internal/agentsrv"
 	"github.com/danielbodart/frisket/internal/grant"
@@ -30,9 +30,16 @@ const (
 
 const usage = `frisket-signer -- SSH keys in the TPM, asked for through galley
 
-  frisket-signer serve -user NAME -terminal allow|ask [-sshsig NAMESPACE=allow|ask]...
+  frisket-signer serve [-config FILE]
         Serve the agent socket systemd passes as the fd named agent, to
-        NAME's uid only, with the keys in ` + keyDir + `.
+        forUser's uid only, with the keys in ` + keyDir + `, under the
+        settings in FILE (default ` + defaultConfig + `).
+
+  frisket-signer check FILE
+        Read FILE as serve would, and say what is wrong with it.
+
+  frisket-signer schema
+        Print the config file's JSON Schema.
 
   frisket-signer keygen -out DIR [-comment C] [--no-da]
         Make a key in the TPM and write DIR/id_ecdsa.tpm and DIR/id_ecdsa.pub
@@ -51,6 +58,10 @@ func main() {
 		err = runServe(args)
 	case "keygen":
 		err = runKeygen(args)
+	case "check":
+		err = runCheck(args)
+	case "schema":
+		fmt.Fprint(os.Stdout, schema)
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 	default:
@@ -66,47 +77,20 @@ func main() {
 	}
 }
 
-type rules map[string]agentsrv.Rule
-
-func (r rules) String() string { return fmt.Sprint(map[string]agentsrv.Rule(r)) }
-func (r rules) Set(s string) error {
-	ns, v, ok := strings.Cut(s, "=")
-	if !ok || ns == "" {
-		return fmt.Errorf("%q: want namespace=allow|ask", s)
-	}
-	rule, err := parseRule(v)
-	if err != nil {
-		return err
-	}
-	r[ns] = rule
-	return nil
-}
-
-func parseRule(s string) (agentsrv.Rule, error) {
-	switch r := agentsrv.Rule(s); r {
-	case agentsrv.Allow, agentsrv.Ask:
-		return r, nil
-	}
-	return "", fmt.Errorf("%q is not allow or ask", s)
-}
-
 func runServe(argv []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	name := fs.String("user", "", "the only user served, and the galley user asked")
-	terminal := fs.String("terminal", "", "a real tab's bound, direct sign to a host in "+knownHosts+": allow or ask")
-	sshsig := rules{}
-	fs.Var(sshsig, "sshsig", "a direct SSHSIG sign in a namespace: namespace=allow|ask; repeatable")
+	path := fs.String("config", defaultConfig, "the settings file")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if *name == "" {
-		return errors.New("-user is required")
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected arguments %q", fs.Args())
 	}
-	term, err := parseRule(*terminal)
+	cfg, err := loadConfig(*path)
 	if err != nil {
-		return fmt.Errorf("-terminal: %w", err)
+		return err
 	}
-	u, err := user.Lookup(*name)
+	u, err := user.Lookup(cfg.ForUser)
 	if err != nil {
 		return err
 	}
@@ -128,7 +112,7 @@ func runServe(argv []string) error {
 	}
 	tpm := tpmkey.Device(tpmDevice)
 	s := &agentsrv.Server{
-		User: *name, UID: uid, Terminal: term, SSHSIG: sshsig,
+		User: cfg.ForUser, UID: uid, Terminal: cfg.Terminal, SSHSIG: cfg.SSHSIG, Hosts: cfg.SSH.Hosts,
 		KnownHosts: knownHosts, Grants: grant.New(), Log: log,
 	}
 	for _, k := range loaded {
@@ -139,7 +123,8 @@ func runServe(argv []string) error {
 			return err
 		}
 	}
-	log.Info("frisket-signer serve", "user", *name, "keys", len(s.Keys), "terminal", term, "sshsig", sshsig)
+	log.Info("frisket-signer serve", "config", *path, "user", cfg.ForUser, "keys", len(s.Keys),
+		"terminal", cfg.Terminal, "sshsig", cfg.SSHSIG, "hosts", cfg.SSH.Hosts)
 	return s.Serve(ln)
 }
 
@@ -164,6 +149,14 @@ func agentListener() (*net.UnixListener, error) {
 		return ul, nil
 	}
 	return nil, errors.New("systemd passed no socket named agent")
+}
+
+func runCheck(argv []string) error {
+	if len(argv) != 1 {
+		return errors.New("name one config file")
+	}
+	_, err := loadConfig(argv[0])
+	return err
 }
 
 func runKeygen(argv []string) error {
