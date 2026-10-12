@@ -75,7 +75,8 @@ starting; the build runs `frisket-signer check` on the file first.
 `frisket-signer schema` prints its JSON Schema.
 
 frisket's main process is always trusted, a forwarded sign (`ssh -A`) is
-always asked, and nothing is refused unasked.
+always asked, and nothing is refused unasked but an SSHSIG in a
+`frisket-policy` namespace, which `check` also refuses as an `sshsig` key.
 
 ## What is asked
 
@@ -83,6 +84,10 @@ In order, the first that applies:
 
 1. A peer other than `forUser`: refused.
 2. A login whose session or host key is not the one ssh bound: refused.
+   So is an SSHSIG in any namespace starting `frisket-policy`, from
+   anyone, frisket included, with the journal reason "a frisket-policy
+   namespace is never signed raw": a project's policy is signed only where
+   the signer sees its bytes (see [policy.md](policy.md)).
 3. frisket's main process: signed.
 4. A tab's shell running ssh, git, scp, sftp or rsync, to a known host,
    not forwarded: `terminal`.

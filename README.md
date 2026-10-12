@@ -273,7 +273,9 @@ Each policy is written to `/etc/frisket/policies/<name>.json` and checked with
 options are, checked with `frisket check -config` when the system builds and
 read strictly by `frisket serve -config`, default that path: a key it does not
 know stops it starting, and a change restarts it. `frisket schema -config`
-prints the file's JSON Schema. Not using flong? See
+prints the file's JSON Schema. A project's own signed policy file, its
+allowed signers and the courier that carries it from your home are in
+[docs/policy.md](docs/policy.md). Not using flong? See
 [docs/launchers.md](docs/launchers.md). The design, and what was measured and
 rejected, is in [PLAN.md](PLAN.md).
 

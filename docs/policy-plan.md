@@ -14,7 +14,7 @@ Outside `strict`, this guards against an agent's *accidental* damage, not a dete
 - Every binary: `-config FILE` (default `/etc/<binary>/config.json`; galley `$XDG_CONFIG_HOME/galley/config.json`), `check FILE`, `schema`. Nix runs `check` at build time. JSON keys = Nix option names (camelCase).
 - One project file, `chase.json`, one section per component. Signed with a standard sidecar `chase.json.sig` (SSHSIG). No invented lock format.
 - Signature covers exact bytes: any edit, comments included, needs re-signing. Fine, since JSON has no comments.
-- frisket does not hard-code `chase.json`: its config says `projectPolicy.file`, which nix-config sets to `chase.json`.
+- frisket does not hard-code `chase.json`: the courier's config says `fileName` (`services.frisket.policy.fileName`), which nix-config sets to `chase.json`.
 - Sudo keeps prompting for the password the first time, as today; no "Always" for sudo for now.
 - Timed grants ("Allow for 15 min") stay keyed to the claude process; "Always" is the explicit project-scoped answer.
 - Always writes the specific rule asked about, but the file takes patterns: I, or an agent, widen a rule by editing it, and signing it again is the check. One general rule beats five hundred near-identical ones.
@@ -156,7 +156,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 |---|---|---|
 | **P0** | `-config`/`check`/`schema` for the sudo gate (signer done); fold `frisket serve` flags into `/etc/frisket/config.json`; galley config file; flong JSON declarations, drop `nix/to-zon.nix` | `cmd/frisket-sudo/main.go`, `nix/sudo-gate.nix`, `nix/module.nix:927-952`, flong `src/decl.zig`, `module.nix:960` |
 | **P1** | Nix-rendered host rules in the final shape: `signer.ssh` (done for github.com), `sudo.exec` | `internal/agentsrv/agentsrv.go`, `internal/sudogate/gate.go` |
-| **P2** | Signing core: `internal/projpolicy` (SSHSIG verify, allowed_signers parser, namespace, canonical JSON, mergePatch), courier unit, signer `policy-sign@` + raw refusal, galley `sign` block/diff/receipt/`redeem`, `frisket policy sign\|verify` | frisket, galley `wire/wire.go`, `daemon/` |
+| **P2** | Signing core: `projpolicy`, public for chase (SSHSIG verify, allowed_signers parser, namespace, canonical JSON, mergePatch), courier unit, signer `policy-sign@` + raw refusal, galley `sign` block/diff/receipt/`redeem`, `frisket policy sign\|verify` | frisket, galley `wire/wire.go`, `daemon/` |
 | **P3** | Always on the host: signer and gate read the project policy via the courier and offer Always | `agentsrv.go:409-445`, galleyask, `gate.go` |
 | **P4** | frisket policy v2 (operations, class answers, ceiling, maps, `x-scope`, `check --layer project`), live always-overlay, asker `always`; flong `seccomp.syscalls` map, `x-scope` | `policy/policy.go`, `internal/ask`, `internal/intercept`, flong `decl-options.json` |
 | **P5** | chase: `chase.json` v2 sections, mergePatch replaces policydoc, signature replaces the approver state, `chase check\|schema\|fmt\|sign\|migrate`, `chase record apply` writes then signs | `internal/grant/{file,approve,launch}.go`, `internal/policydoc/*`, `lib/operations.nix` |
@@ -180,6 +180,13 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 - frisket: sudo gate `-config /etc/frisket-sudo/config.json`, `check`, `schema`; `remoteKeys` in the file, `danger.<pattern>` adds rules beside the built-in catalogue.
 - frisket: `serve -config /etc/frisket/config.json` holds the settings the module passed as flags; `check -config`, `schema -config` (frisket's bare `check` is the policy document's). Policies stay documents in `/etc/frisket/policies`.
 - nix-config: `work` tier (Triptease, push asks); trusted and ops push unasked; forks by owner alone; `github.com` signs unasked from the host.
+- frisket P2, its part ([policy.md](policy.md)):
+  - `projpolicy`, public rather than internal so chase imports it: SSHSIG parse, verify and sign; allowed_signers with OpenSSH's meaning (a bad or `cert-authority` line refuses the file); `Namespace`, `Find`, `Load` (which takes `home` too, to name the namespace); canonical JSON and `MergePatch`. Tests held to stock `ssh-keygen -Y sign`/`-Y verify`.
+  - `frisket policy verify|fmt|signers`.
+  - The signer refuses raw SSHSIG in any `frisket-policy*` namespace, and `check` refuses such an `sshsig` key.
+  - The courier, `frisket-policy` (`internal/courier`, `cmd/frisket-policy`, `nixosModules.policy`): `read {pid, start}` and `write {root, oldDigest, bytes, sig}`; peers by uid and unit cgroup from its config, which the signer and gate modules fill in. It also refuses an anchor with another root (a sandbox), and a write whose bytes are not canonical or whose signature does not already verify.
+  - `services.frisket.policy.allowedSigners` → root's `/etc/frisket/allowed_signers`.
+  - Still to come in P2: `policy-sign@frisket` in the signer, galley's `sign` block, diff, receipt and `redeem`, `frisket policy sign`.
 
 ## Appendix: why JSON, not ZON
 
