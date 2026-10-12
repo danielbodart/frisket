@@ -67,6 +67,8 @@ func TestAConfigThatWouldSilentlyNotApplyIsRefused(t *testing.T) {
 		`{"forUser": "dan", "terminal": "refuse"}`,
 		`{"forUser": "dan", "terminal": "allow", "sshsig": {"git": "yes"}}`,
 		`{"forUser": "dan", "terminal": "allow", "sshsig": {"": "allow"}}`,
+		`{"forUser": "dan", "terminal": "allow", "sshsig": {"frisket-policy:~/x": "allow"}}`,
+		`{"forUser": "dan", "terminal": "allow", "sshsig": {"frisket-policy": "ask"}}`,
 		`{"forUser": "dan", "terminal": "allow", "ssh": {"hosts": {"github.com": "refuse"}}}`,
 		`{"forUser": "dan", "terminal": "allow", "ssh": {"hosts": {"github.com,evil": "allow"}}}`,
 		`{"forUser": "dan", "terminal": "allow", "ssh": {"hosts": {"": "allow"}}}`,

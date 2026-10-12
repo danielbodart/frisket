@@ -24,6 +24,7 @@ import (
 	"github.com/danielbodart/frisket/internal/grant"
 	"github.com/danielbodart/frisket/internal/peer"
 	"github.com/danielbodart/frisket/internal/sudomsg"
+	"github.com/danielbodart/frisket/projpolicy"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -67,6 +68,11 @@ const (
 )
 
 var errRefused = errors.New("refused")
+
+// reasonPolicyNamespace refuses a raw SSHSIG in a project policy's namespace,
+// whatever SSHSIG says and unasked: a policy is signed only where the signer
+// sees the bytes it signs, never as a blob whose message is a hash.
+const reasonPolicyNamespace = "a frisket-policy namespace is never signed raw"
 
 func (s *Server) Serve(ln *net.UnixListener) error {
 	if s.who == nil {
@@ -161,6 +167,11 @@ func (c *conn) SignWithFlags(key ssh.PublicKey, data []byte, _ agent.SignatureFl
 	if err != nil {
 		c.s.Log.Warn("refused", "reason", err.Error(), "chain", c.r.Chain, "anchor", c.r.Anchor)
 		return nil, err
+	}
+	if req.class == classSSHSIG && strings.HasPrefix(req.namespace, projpolicy.NamespacePrefix) {
+		c.s.Log.Warn("refused", "reason", reasonPolicyNamespace, "namespace", galleyask.Clean(req.namespace),
+			"chain", c.r.Chain, "anchor", c.r.Anchor)
+		return nil, errRefused
 	}
 	var ok bool
 	if req.key, ok = c.find(key); !ok {

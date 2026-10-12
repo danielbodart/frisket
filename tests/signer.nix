@@ -257,6 +257,14 @@ in
         d = decisions()[-1]
         assert d["namespace"] == "file" and d["anchor"]["Comm"] == "ssh-keygen", d
 
+    with subtest("a raw ssh-keygen -Y sign in a frisket-policy namespace is refused unasked"):
+        machine.succeed("rm -f /run/claude/msg.sig")
+        asked = len(events("question"))
+        assert run("claude", "ssh-keygen -Y sign -f /run/claude/key.pub -n 'frisket-policy:~/Projects/foo' /run/claude/msg") != 0
+        assert len(events("question")) == asked
+        journal_has("a frisket-policy namespace is never signed raw")
+        machine.succeed("test ! -e /run/claude/msg.sig")
+
     with subtest("ssh -A: the far-side sign is asked as forwarded, from a claude and from a tab"):
         for where in ("claude", "tab"):
             asked = len(events("question"))

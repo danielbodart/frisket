@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/danielbodart/frisket/internal/agentsrv"
+	"github.com/danielbodart/frisket/projpolicy"
 )
 
 const defaultConfig = "/etc/frisket-signer/config.json"
@@ -61,6 +62,9 @@ func (c *config) validate() error {
 		if ns == "" {
 			return errors.New("sshsig: an empty namespace")
 		}
+		if strings.HasPrefix(ns, projpolicy.NamespacePrefix) {
+			return fmt.Errorf("sshsig.%s: a %s namespace is never signed raw, whatever this says", ns, projpolicy.NamespacePrefix)
+		}
 		if err := checkRule(r); err != nil {
 			return fmt.Errorf("sshsig.%s: %w", ns, err)
 		}
@@ -102,9 +106,9 @@ const schema = `{
       "$ref": "#/$defs/rule"
     },
     "sshsig": {
-      "description": "A direct SSHSIG sign in each namespace. An unlisted namespace is asked, Allow once.",
+      "description": "A direct SSHSIG sign in each namespace. An unlisted namespace is asked, Allow once. A frisket-policy namespace is refused whatever this says.",
       "type": "object",
-      "propertyNames": { "minLength": 1 },
+      "propertyNames": { "minLength": 1, "not": { "pattern": "^frisket-policy" } },
       "additionalProperties": { "$ref": "#/$defs/rule" }
     },
     "ssh": {
