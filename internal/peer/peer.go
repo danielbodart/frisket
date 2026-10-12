@@ -4,6 +4,7 @@
 package peer
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -432,6 +433,34 @@ func Check(c *net.UnixConn, uid int, userns Userns) error {
 	}
 	if ns != userns {
 		return fmt.Errorf("pid %d is in another user namespace and may not use this socket", cred.Pid)
+	}
+	return nil
+}
+
+// InOwnUserns refuses a peer whose user namespace maps uids otherwise than
+// this process's does, read from /proc/<pid>/uid_map, which, unlike the
+// namespace itself, a process of another user may read. A sandbox's
+// namespace maps a few uids, the host's every one; a namespace mapping
+// every uid as the host does takes root to make, and is not told apart.
+func InOwnUserns(c *net.UnixConn) error {
+	cred, pidfd, err := credentials(c)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(pidfd)
+	theirs, err := os.ReadFile(fmt.Sprintf("/proc/%d/uid_map", cred.Pid))
+	if err != nil {
+		return fmt.Errorf("pid %d's uid map: %w", cred.Pid, err)
+	}
+	if _, err := pidfdInfo(pidfd); err != nil {
+		return err
+	}
+	ours, err := os.ReadFile("/proc/self/uid_map")
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(theirs, ours) {
+		return fmt.Errorf("pid %d is in another user namespace and may not use this", cred.Pid)
 	}
 	return nil
 }

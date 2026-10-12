@@ -174,6 +174,34 @@ func TestReadIsThePolicyAboveTheAnchorsWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestReadWithNoFileIsTheRepositoryTheAnchorIsIn(t *testing.T) {
+	h := newHarness(t)
+	repo := h.mkdir("Projects/baz")
+	h.mkdir("Projects/baz/.git")
+	pid, start := sleeper(t, h.mkdir("Projects/baz/src"))
+	got, err := Read(context.Background(), h.signer951().socket, pid, start)
+	if err != nil || got.Root != repo || got.Namespace != "frisket-policy:~/Projects/baz" || got.Digest != "" || got.Bytes != nil {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+
+	// A worktree's .git is a file.
+	wt := h.mkdir("Projects/wt")
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pid, start = sleeper(t, wt)
+	if got, err := Read(context.Background(), h.signer951().socket, pid, start); err != nil || got.Root != wt {
+		t.Fatalf("worktree: %+v, %v", got, err)
+	}
+
+	// A policy file above the repository is the project's, not the repository.
+	h.put(h.mkdir("Projects"), body, true)
+	pid, start = sleeper(t, repo)
+	if got, err := Read(context.Background(), h.signer951().socket, pid, start); err != nil || got.Root != filepath.Dir(repo) || got.Digest == "" {
+		t.Fatalf("file above: %+v, %v", got, err)
+	}
+}
+
 func TestReadRefusesAReusedPidAndAProcessOutsideHome(t *testing.T) {
 	h := newHarness(t)
 	root := h.mkdir("Projects/foo")

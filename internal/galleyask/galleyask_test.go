@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielbodart/galley/wire"
 	"golang.org/x/sys/unix"
 )
 
@@ -307,5 +308,80 @@ func TestThePasswordIsNeverLogged(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "time not understood") || strings.Contains(log.String(), "hunter2") {
 		t.Errorf("logged:\n%s", log.String())
+	}
+}
+
+// startGalleys answers one connection per reply, in order, and reports
+// each item's line.
+func startGalleys(t *testing.T, replies ...string) (string, chan []byte) {
+	t.Helper()
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := shortDir(t)
+	oldDir, oldCgroup := socketDir, galleyCgroup
+	t.Cleanup(func() { socketDir, galleyCgroup = oldDir, oldCgroup })
+	socketDir = dir
+	own := ownCgroup(t)
+	galleyCgroup = func(int) (uint64, error) { return own, nil }
+	l, err := net.Listen("unix", filepath.Join(dir, me.Username+".sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	items := make(chan []byte, len(replies))
+	go func() {
+		for _, reply := range replies {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			line, err := bufio.NewReader(c).ReadBytes('\n')
+			if err == nil {
+				items <- line
+				c.Write([]byte(reply + "\n"))
+			}
+			c.Close()
+		}
+	}()
+	return me.Username, items
+}
+
+var alwaysQuestion = Question{Title: "ssh to github.com", Level: "normal", Grantable: true, Always: true,
+	Text:       "key SHA256:… (dan@dan-blade)",
+	AlwaysText: "Always allows github.com from ~/Projects/foo, signed into its chase.json.",
+	Diff:       &wire.Diff{Path: "~/Projects/foo/chase.json", Old: "", New: "{\n  \"version\": 2\n}\n"}}
+
+func TestAlwaysIsPutWithItsDiffAndAnsweredAlways(t *testing.T) {
+	name, items := startGalleys(t, `{"answer":"always"}`)
+	a, err := Ask(context.Background(), name, alwaysQuestion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Allowed || !a.Always || a.For != 0 {
+		t.Errorf("got %+v", a)
+	}
+	if got, want := string(<-items), golden(t, "signer-always.json")+"\n"; got != want {
+		t.Errorf("sent\n%s\nwant\n%s", got, want)
+	}
+
+	// always is no answer to a question that did not offer it.
+	name, _ = startGalleys(t, `{"answer":"always"}`)
+	if a, err := Ask(context.Background(), name, Question{Grantable: true}); err != nil || a.Allowed {
+		t.Errorf("unoffered: %+v, %v", a, err)
+	}
+}
+
+func TestAGalleyOlderThanAlwaysIsAskedWithoutIt(t *testing.T) {
+	name, items := startGalleys(t, `{"error":"protocol version 5 is not one from 1 to 4"}`, `{"answer":"extra"}`)
+	a, err := Ask(context.Background(), name, alwaysQuestion)
+	if err != nil || !a.Allowed || a.Always {
+		t.Fatalf("got %+v, %v", a, err)
+	}
+	<-items
+	if again := string(<-items); strings.Contains(again, `"always"`) || strings.Contains(again, `"diff"`) ||
+		strings.Contains(again, "Always allows") || !strings.HasPrefix(again, `{"galley":3,`) {
+		t.Errorf("put again as %s", again)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/danielbodart/frisket/internal/agentsrv"
@@ -21,10 +22,21 @@ type config struct {
 	Terminal agentsrv.Rule            `json:"terminal"`
 	SSHSIG   map[string]agentsrv.Rule `json:"sshsig"`
 	SSH      sshConfig                `json:"ssh"`
+	// Policy, when set, reads the asking process's project policy through
+	// the courier, offers Always, and serves policy-sign.
+	Policy *policyConfig `json:"policy"`
+}
+
+type policyConfig struct {
+	Courier        string `json:"courier"`
+	AllowedSigners string `json:"allowedSigners"`
+	FileName       string `json:"fileName"`
 }
 
 type sshConfig struct {
-	// Hosts is keyed by a host's name as the known hosts file lists it.
+	// Hosts is keyed by a host's name as the known hosts file lists it, or
+	// a pattern of names: * alone a label, * within one any run of it, **
+	// as the first label one or more.
 	Hosts map[string]agentsrv.Rule `json:"hosts"`
 }
 
@@ -70,11 +82,24 @@ func (c *config) validate() error {
 		}
 	}
 	for name, r := range c.SSH.Hosts {
-		if name == "" || strings.ContainsAny(name, ", \t\r\n") {
-			return fmt.Errorf("ssh.hosts: %q is not a name the known hosts file could list", name)
+		if err := agentsrv.CheckHostRule(name); err != nil {
+			return fmt.Errorf("ssh.hosts: %w", err)
 		}
 		if err := checkRule(r); err != nil {
 			return fmt.Errorf("ssh.hosts.%s: %w", name, err)
+		}
+	}
+	if p := c.Policy; p != nil {
+		for k, path := range map[string]string{"courier": p.Courier, "allowedSigners": p.AllowedSigners} {
+			if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+				return fmt.Errorf("policy.%s: %q is not absolute and clean", k, path)
+			}
+		}
+		switch f := p.FileName; {
+		case f == "" || f == "." || f == ".." || strings.ContainsAny(f, "/\x00"):
+			return fmt.Errorf("policy.fileName: %q is not a file name", f)
+		case strings.HasSuffix(f, projpolicy.SigSuffix):
+			return fmt.Errorf("policy.fileName: %q ends in %s, which names its signature", f, projpolicy.SigSuffix)
 		}
 	}
 	return nil
@@ -116,11 +141,22 @@ const schema = `{
       "additionalProperties": false,
       "properties": {
         "hosts": {
-          "description": "A bound, direct userauth from any process to a host key listed under this name in /etc/ssh/ssh_known_hosts. Never a forwarded sign.",
+          "description": "A bound, direct userauth from any process to a host key listed under this name in /etc/ssh/ssh_known_hosts, or under a name this pattern matches: * alone is one label, * within a label any run of it, ** as the first label one or more. A literal beats a pattern and a narrower pattern a wider one. Never a forwarded sign.",
           "type": "object",
-          "propertyNames": { "pattern": "^[^,\\s]+$" },
+          "propertyNames": { "pattern": "^[^.,\\s?!|][^,\\s?!]*$" },
           "additionalProperties": { "$ref": "#/$defs/rule" }
         }
+      }
+    },
+    "policy": {
+      "description": "A project's signed policy: read through the courier for the process that asks, Always offered, and policy-sign served.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["courier", "allowedSigners", "fileName"],
+      "properties": {
+        "courier": { "description": "The courier's socket.", "type": "string", "pattern": "^/" },
+        "allowedSigners": { "description": "The allowed signers a policy must verify against.", "type": "string", "pattern": "^/" },
+        "fileName": { "description": "A project's policy file's name.", "type": "string", "minLength": 1, "not": { "pattern": "(/|\\.sig$)" } }
       }
     }
   },

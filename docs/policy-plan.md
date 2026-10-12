@@ -186,7 +186,15 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
   - The signer refuses raw SSHSIG in any `frisket-policy*` namespace, and `check` refuses such an `sshsig` key.
   - The courier, `frisket-policy` (`internal/courier`, `cmd/frisket-policy`, `nixosModules.policy`): `read {pid, start}` and `write {root, oldDigest, bytes, sig}`; peers by uid and unit cgroup from its config, which the signer and gate modules fill in. It also refuses an anchor with another root (a sandbox), and a write whose bytes are not canonical or whose signature does not already verify.
   - `services.frisket.policy.allowedSigners` → root's `/etc/frisket/allowed_signers`.
-  - Still to come in P2: `policy-sign@frisket` in the signer, galley's `sign` block, diff, receipt and `redeem`, `frisket policy sign`.
+  - The rest of P2, `policy-sign@frisket`, galley's diff and `frisket policy sign`, came with P3 below; galley's receipt and `redeem` were dropped.
+- galley `e62b65f` (wire v5): `Item.Diff{path, old, new}`, rendered by galley as a unified diff, and `Item.Always`, galley's own button, answered `{"answer": "always"}`.
+- frisket P3, the signer's part ([signer.md](signer.md#what-is-asked), [policy.md](policy.md#the-signer)), with what differs from §2–§4:
+  - No receipt or `redeem`: the signer posts its own question with the diff and Always, and on "always" signs the file itself (`projpolicy.Sign`, in `frisket-policy:<root>`), has the courier write it with the old digest, and signs the login. A failed write still signs once, with an `always` `not saved` journal line and a galley notification.
+  - The signer reads the anchor's project through the courier for a direct, bound login or SSHSIG from a chain not cut short; a verified file's `signer` section (only `ssh.hosts` and `sshsig`) is merged over the host's with `MergePatch`, decided as source `project`. Unsigned, invalid, or setting a host-only key: ignored, one journal line per file. Courier down: as before.
+  - `ssh.hosts` keys, host and project, take §1.6's patterns: `*` one label, `*` within a label a run of it (`*-ap`), `**` as the first label one or more.
+  - Always is offered when the root is known: the courier's read now returns the nearest `.git` directory up to home as `root`, with no `digest`, when there is no file yet.
+  - `frisket policy sign FILE`, over `policy-sign@frisket`: FILE must be canonical; the old bytes are `-old` or git's `HEAD`; Refuse and Allow once only. Refused to frisket's main process and to a peer whose `/proc/<pid>/uid_map` is not the host's (the signer cannot open another user's namespace).
+  - Sudo: no Always, and the gate does not read the project yet.
 
 ## Appendix: why JSON, not ZON
 

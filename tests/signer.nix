@@ -50,10 +50,18 @@ in
     specialisation.ask.configuration.services.frisket.signer.terminal = lib.mkForce "ask";
     specialisation.hosts.configuration.services.frisket.signer.ssh.hosts.alpha = "allow";
 
+    # A project's signed policy, through the courier. The key is made in the
+    # TPM as the test runs, so the allowed signers are written then.
+    services.frisket.policy = {
+      fileName = "chase.json";
+      courier.enable = true;
+    };
+    environment.etc."frisket/allowed_signers".source = lib.mkForce "/run/allowed_signers";
+
     users.users.dan = { isNormalUser = true; uid = 1000; group = "users"; linger = true; };
 
     networking.hosts."127.0.0.1" = [ "alpha" ];
-    networking.hosts."127.0.0.2" = [ "beta" ];
+    networking.hosts."127.0.0.2" = [ "beta" "beta.example" ];
     services.openssh = {
       enable = true;
       listenAddresses = [{ addr = "127.0.0.1"; port = 22; }];
@@ -115,7 +123,7 @@ in
       };
     };
 
-    environment.systemPackages = [ pkgs.ssh-tpm-agent pkgs.tpm2-tools pkgs.socat pkgs.bubblewrap agenttamper ];
+    environment.systemPackages = [ pkgs.ssh-tpm-agent pkgs.tpm2-tools pkgs.socat pkgs.bubblewrap pkgs.git agenttamper ];
   };
 
   testScript = ''
@@ -351,6 +359,86 @@ in
         assert run("claude", "ssh -n -A beta '/run/current-system/sw/bin/ssh -n alpha true'") == 0
         qs = [q for q in events("question")[asked:] if q["title"] == "ssh to alpha"]
         assert len(qs) == 1 and "forwarded" in qs[0]["text"].split("\n"), qs
+
+    frisket = "${lib.getExe self.packages.${system}.frisket}"
+    foo = "/home/dan/Projects/foo"
+    verify = (f"ssh-keygen -Y verify -f /etc/frisket/allowed_signers -I dan -n 'frisket-policy:~/Projects/foo' "
+              f"-s {foo}/chase.json.sig < {foo}/chase.json")
+
+    def as_dan_in_foo(cmd):
+        machine.succeed(f"cd {foo} && runuser -u dan -- {cmd}")
+
+    with subtest("a claude in a repository is offered Always, which signs the rule into its chase.json"):
+        key = " ".join(machine.succeed("cat /root/id_ecdsa.pub").split()[:2])
+        machine.succeed(f"echo 'dan namespaces=\"frisket-policy:*\" {key}' > /run/allowed_signers")
+        machine.succeed(f"{frisket} policy signers /etc/frisket/allowed_signers")
+        machine.succeed(f"install -d -o dan -g users /home/dan/Projects {foo}")
+        as_dan_in_foo("git init -q")
+        assert run("claude", f"cd {foo}") == 0
+        galley("always")
+        asked = len(events("question"))
+        assert run("claude", "ssh -n beta true") == 0
+        assert len(events("question")) == asked + 1
+        q = events("question")[-1]
+        assert q["always"] and q["kind"] == "forms" and q["title"] == "ssh to beta", q
+        assert q["diff"]["path"] == "~/Projects/foo/chase.json" and q["diff"]["old"] == "", q
+        assert '"beta": "allow"' in q["diff"]["new"], q
+        assert "Always allows beta from ~/Projects/foo, signed into its chase.json." in q["text"].split("\n"), q
+        source_is("always")
+        assert machine.succeed(f"cat {foo}/chase.json") == q["diff"]["new"]
+        assert machine.succeed(f"stat -c %U {foo}/chase.json {foo}/chase.json.sig").split() == ["dan", "dan"]
+        machine.succeed(verify)
+        machine.succeed(f"runuser -u dan -- {frisket} policy verify {foo}/chase.json")
+        journal_has('"msg":"always"')
+
+    with subtest("the signed rule then signs the claude's login to beta unasked, as project"):
+        asked = len(events("question"))
+        assert run("claude", "ssh -n beta true") == 0
+        assert len(events("question")) == asked
+        source_is("project")
+        d = decisions()[-1]
+        assert d["project"] == foo and d["project_applies"], d
+
+    widened = "\n".join(['{', '  "signer": {', '    "ssh": {', '      "hosts": {',
+                          '        "*.example": "allow"', '      }', '    }', '  },', '  "version": 2', '}', ""])
+
+    with subtest("chase.json edited by hand and not signed again is ignored, and Always not offered"):
+        as_dan_in_foo("git add chase.json chase.json.sig")
+        as_dan_in_foo("git -c user.name=dan -c user.email=dan@machine commit -q -m always")
+        machine.succeed("cp ${hostKeys}/known_hosts /run/known_hosts && echo \"beta.example $(cut -d' ' -f1,2 ${hostKeys}/beta.pub)\" >> /run/known_hosts")
+        machine.succeed("rm /etc/ssh/ssh_known_hosts && cp /run/known_hosts /etc/ssh/ssh_known_hosts")
+        machine.succeed(f"printf '%s' {shlex.quote(widened)} | runuser -u dan -- tee {foo}/chase.json >/dev/null")
+        machine.fail(verify)
+        galley("answer 0")
+        asked = len(events("question"))
+        assert run("claude", "ssh -n beta.example true") == 0
+        assert len(events("question")) == asked + 1
+        q = events("question")[-1]
+        assert not q["always"] and q["diff"] is None, q
+        source_is("galley")
+        journal_has('"msg":"project policy ignored"')
+
+    with subtest("frisket policy sign shows the widening against the signed file and signs it"):
+        asked = len(events("question"))
+        assert run("tab", f"cd {foo} && {frisket} policy sign chase.json") == 0
+        q = events("question")[-1]
+        assert len(events("question")) == asked + 1 and q["title"] == "sign ~/Projects/foo/chase.json", q
+        assert not q["always"] and [b["label"] for b in q["buttons"]] == ["Refuse", "Allow once"], q
+        assert '"beta": "allow"' in q["diff"]["old"] and q["diff"]["new"] == widened, q
+        d = decisions()[-1]
+        assert d["class"] == "policy sign" and d["outcome"] == "sign", d
+        machine.succeed(verify)
+        asked = len(events("question"))
+        assert run("claude", "ssh -n beta.example true") == 0
+        assert len(events("question")) == asked
+        source_is("project")
+
+    with subtest("policy-sign from another user namespace, as a sandbox's would be, is refused unasked"):
+        asked = len(events("question"))
+        out = machine.fail(as_dan(f"bwrap --unshare-user --dev-bind / / -- {frisket} policy sign {foo}/chase.json 2>&1"))
+        assert "another user namespace" in out, out
+        assert len(events("question")) == asked
+        journal_has("policy-sign: pid")
 
     with subtest("a cleared TPM: the key is listed, a sign fails as cleared, serve stays up"):
         pid = machine.succeed("systemctl show -P MainPID frisket-signer.service").strip()

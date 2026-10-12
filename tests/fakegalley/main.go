@@ -5,7 +5,9 @@
 //
 // Script actions, one per question, the last line repeating: `ok <field>…`
 // answers the fields in order, `cancel`, `answer N` presses extra button N,
-// and `never` leaves the question up until its client hangs up.
+// `always` presses galley's own Always button, and `never` leaves the
+// question up until its client hangs up. A notification is logged and
+// queued, and takes no action.
 package main
 
 import (
@@ -99,6 +101,8 @@ func readScript(path string) ([]action, error) {
 		switch {
 		case words[0] == "ok":
 			script = append(script, action{answer: wire.AnswerOK, fields: words[1:]})
+		case words[0] == "always" && len(words) == 1:
+			script = append(script, action{answer: wire.AnswerAlways})
 		case words[0] == "cancel" && len(words) == 1:
 			script = append(script, action{answer: wire.AnswerCancel})
 		case words[0] == "never" && len(words) == 1:
@@ -132,6 +136,12 @@ func (g *galley) serve(c *net.UnixConn) {
 		return
 	}
 	it := hello.Item
+	if it.Kind == wire.KindNotification {
+		g.write(map[string]any{"event": "notification", "text": it.Text, "uid": cred.Uid, "pid": cred.Pid})
+		line, _ := json.Marshal(wire.Answer{Queued: true})
+		c.Write(append(line, '\n'))
+		return
+	}
 	var fields []wire.Field
 	if it.Forms != nil {
 		fields = it.Forms.Fields
@@ -143,7 +153,8 @@ func (g *galley) serve(c *net.UnixConn) {
 	g.mu.Unlock()
 
 	g.write(map[string]any{"event": "question", "title": it.Title, "text": it.Text, "kind": it.Kind,
-		"level": it.Level, "buttons": it.Buttons, "fields": fields, "table": it.Table, "uid": cred.Uid, "pid": cred.Pid})
+		"level": it.Level, "buttons": it.Buttons, "fields": fields, "table": it.Table, "diff": it.Diff, "always": it.Always,
+		"uid": cred.Uid, "pid": cred.Pid})
 
 	if a.answer == "" {
 		io.Copy(io.Discard, c)

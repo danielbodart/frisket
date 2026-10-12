@@ -57,7 +57,8 @@ type Request struct {
 }
 
 // Response answers a Request. Error is set alone when it failed. A read
-// that found no policy file is a Response with no Root.
+// that found no policy file has no Digest, and a Root only when the anchor
+// is in a git repository under the home: where the file would be.
 type Response struct {
 	Error     string `json:"error,omitempty"`
 	Root      string `json:"root,omitempty"`
@@ -240,7 +241,16 @@ func (s *Server) read(req Request) (Response, error) {
 	}
 	root, err := projpolicy.Find(cwd, s.Home, s.Name)
 	if errors.Is(err, projpolicy.ErrNotFound) {
-		return Response{}, nil
+		// No file yet: the project is the repository the anchor is in, if
+		// it is in one, where a first rule would be written.
+		if root = gitRoot(cwd, s.Home); root == "" {
+			return Response{}, nil
+		}
+		ns, err := projpolicy.Namespace(root, s.Home)
+		if err != nil {
+			return Response{}, err
+		}
+		return Response{Root: root, Namespace: ns}, nil
 	}
 	if err != nil {
 		return Response{}, err
@@ -259,6 +269,23 @@ func (s *Server) read(req Request) (Response, error) {
 		return Response{}, err
 	}
 	return Response{Root: root, Namespace: ns, Bytes: b, Sig: sig, Digest: projpolicy.Digest(b)}, nil
+}
+
+// gitRoot is the nearest directory from dir up to home, both included,
+// holding .git (a repository's directory, or a worktree's file), or "".
+func gitRoot(dir, home string) string {
+	dir, home = filepath.Clean(dir), filepath.Clean(home)
+	if dir != home && !strings.HasPrefix(dir, strings.TrimSuffix(home, "/")+"/") {
+		return ""
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		if st, err := os.Lstat(filepath.Join(d, ".git")); err == nil && (st.IsDir() || st.Mode().IsRegular()) {
+			return d
+		}
+		if d == home || d == "/" {
+			return ""
+		}
+	}
 }
 
 // sameRoot refuses a process whose root is not this one's: a sandbox's

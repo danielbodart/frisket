@@ -115,6 +115,9 @@ func runServe(argv []string) error {
 		User: cfg.ForUser, UID: uid, Terminal: cfg.Terminal, SSHSIG: cfg.SSHSIG, Hosts: cfg.SSH.Hosts,
 		KnownHosts: knownHosts, Grants: grant.New(), Log: log,
 	}
+	if p := cfg.Policy; p != nil {
+		s.Policy = &agentsrv.Policy{Courier: p.Courier, AllowedSigners: p.AllowedSigners, FileName: p.FileName, Home: u.HomeDir}
+	}
 	for _, k := range loaded {
 		s.Keys = append(s.Keys, agentsrv.Key{Signer: k.Signer(tpm), Comment: k.Comment})
 	}
@@ -124,7 +127,7 @@ func runServe(argv []string) error {
 		}
 	}
 	log.Info("frisket-signer serve", "config", *path, "user", cfg.ForUser, "keys", len(s.Keys),
-		"terminal", cfg.Terminal, "sshsig", cfg.SSHSIG, "hosts", cfg.SSH.Hosts)
+		"terminal", cfg.Terminal, "sshsig", cfg.SSHSIG, "hosts", cfg.SSH.Hosts, "policy", cfg.Policy)
 	return s.Serve(ln)
 }
 

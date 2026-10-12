@@ -19,7 +19,9 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"time"
 
+	"github.com/danielbodart/frisket/internal/courier"
 	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/internal/grant"
 	"github.com/danielbodart/frisket/internal/peer"
@@ -51,10 +53,19 @@ type Server struct {
 	KnownHosts string
 	Grants     *grant.Grants
 	Log        *slog.Logger
+	// Policy, when set, reads the project policy of the process that asks
+	// and offers Always; nil reads none.
+	Policy *Policy
 
 	who     func(*net.UnixConn) (*peer.Requester, error)
 	frisket func(*peer.Requester) bool
 	ask     func(context.Context, string, galleyask.Question) (galleyask.Answer, error)
+	read    func(ctx context.Context, pid int, start uint64) (*courier.Response, error)
+	write   func(ctx context.Context, root, oldDigest string, b, sig []byte) error
+	notify  func(ctx context.Context, user, text string) error
+	inHost  func(*net.UnixConn) error
+	now     func() time.Time
+	layers  *layerCache
 }
 
 const maxBinds = 16
@@ -84,6 +95,10 @@ func (s *Server) Serve(ln *net.UnixListener) error {
 	if s.ask == nil {
 		s.ask = galleyask.Ask
 	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	s.policyDefaults()
 	for {
 		c, err := ln.AcceptUnix()
 		if err != nil {
@@ -135,6 +150,10 @@ type request struct {
 	grantable bool
 	grant     grant.Key
 	question  galleyask.Question
+
+	proj     *layer
+	projRead bool
+	always   *always
 }
 
 type verdict struct {
@@ -197,6 +216,9 @@ func (c *conn) SignWithFlags(key ssh.PublicKey, data []byte, _ agent.SignatureFl
 
 func (c *conn) Extension(typ string, contents []byte) (_ []byte, err error) {
 	defer c.refusePanic(&err)
+	if typ == PolicySignExtension {
+		return c.policySign(contents), nil
+	}
 	if typ != "session-bind@openssh.com" {
 		return nil, agent.ErrExtensionUnsupported
 	}
@@ -311,16 +333,36 @@ func (c *conn) decide(req *request) verdict {
 	if req.class == classBound && !req.fwd && r.Terminal && !r.Cut && req.known && c.s.Terminal == Allow {
 		return verdict{sign: true, source: "terminal"}
 	}
-	if req.class == classBound && !req.fwd && !r.Cut && req.known && c.hostAllowed(req.names) {
-		return verdict{sign: true, source: "host"}
+	if req.class == classBound && !req.fwd && !r.Cut && req.known {
+		hosts, _ := c.s.rules(c.project(req))
+		if k := hostsAllow(hosts, req.names); k != "" {
+			return verdict{sign: true, source: c.origin(req.proj, k, func(l *layer) map[string]bool { return l.hosts })}
+		}
 	}
-	if req.class == classSSHSIG && !req.fwd && c.s.SSHSIG[req.namespace] == Allow {
-		return verdict{sign: true, source: "sshsig"}
+	if req.class == classSSHSIG && !req.fwd {
+		_, sshsig := c.s.rules(c.project(req))
+		if sshsig[req.namespace] == Allow {
+			src := c.origin(req.proj, req.namespace, func(l *layer) map[string]bool { return l.sshsig })
+			if src == "host" {
+				src = "sshsig"
+			}
+			return verdict{sign: true, source: src}
+		}
 	}
 	if req.grantable && c.s.Grants.Use(req.grant) {
 		return verdict{sign: true, source: "grant"}
 	}
+	c.offerAlways(req)
 	return c.ask(req)
+}
+
+// origin is "project" when the project's own section set the rule key
+// decided by, else "host".
+func (c *conn) origin(l *layer, key string, set func(*layer) map[string]bool) string {
+	if l != nil && l.apply && set(l)[key] {
+		return "project"
+	}
+	return "host"
 }
 
 type answered struct {
@@ -364,6 +406,10 @@ func (c *conn) ask(req *request) verdict {
 				return verdict{source: "galley", answer: got.a}
 			}
 			c.keep(req, got)
+			if got.a.Always && req.always != nil {
+				c.saveAlways(req)
+				return verdict{sign: true, source: "always", answer: got.a}
+			}
 			return verdict{sign: true, source: "galley", answer: got.a}
 		case <-changed:
 		}
@@ -388,6 +434,9 @@ func (c *conn) record(req *request, v verdict) {
 		"forwarded", req.fwd, "lines", strings.Split(req.question.Text, "\n"),
 		"outcome", outcome, "source", v.source, "for", v.answer.For.String(),
 		"galley_pid", v.answer.Galley.Pid, "galley_cgroup", v.answer.Galley.Cgroup,
+	}
+	if l := req.proj; l != nil {
+		attrs = append(attrs, "project", l.root, "project_digest", l.digest, "project_applies", l.apply)
 	}
 	if m := req.sudo; m != nil {
 		attrs = append(attrs, "user", m.User, "runas", m.RunAs, "cwd", m.Cwd, "argv", m.Argv,
@@ -489,18 +538,6 @@ func (c *conn) describeRemoteSudo(req *request, keyLine string) {
 		}
 	}
 	req.question = galleyask.Question{Title: "sudo on " + req.dest, Text: strings.Join(lines, "\n"), Level: level, Allow: "Allow", Chain: galleyask.Chain(c.r)}
-}
-
-// hostAllowed says whether a host rule allows one of the names the known
-// hosts file gives the bound key: matched exactly, so a name with another
-// key, a hashed entry or a pattern never matches.
-func (c *conn) hostAllowed(names []string) bool {
-	for _, n := range names {
-		if c.s.Hosts[n] == Allow {
-			return true
-		}
-	}
-	return false
 }
 
 // hostNames are key's names in the known hosts file.

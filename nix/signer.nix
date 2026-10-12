@@ -5,6 +5,7 @@ self:
 
 let
   cfg = config.services.frisket.signer;
+  policy = config.services.frisket.policy;
   inherit (lib) mkOption types;
   package = self.packages.${pkgs.stdenv.hostPlatform.system}.frisket-signer;
   signer = lib.getExe package;
@@ -28,10 +29,19 @@ let
   configFile = pkgs.runCommand "frisket-signer-config.json"
     {
       nativeBuildInputs = [ package ];
-      config = builtins.toJSON {
+      config = builtins.toJSON ({
         inherit (cfg) forUser terminal sshsig;
         ssh = { inherit (cfg.ssh) hosts; };
-      };
+      } // lib.optionalAttrs policy.courier.enable {
+        # A project's signed policy, read through the courier for the
+        # process that asks: its signer section over these settings, Always
+        # offered, and policy-sign served.
+        policy = {
+          courier = "/run/frisket-policy/sock";
+          allowedSigners = "/etc/frisket/allowed_signers";
+          inherit (policy) fileName;
+        };
+      });
       passAsFile = [ "config" ];
     } ''
     cp "$configPath" "$out"
@@ -64,8 +74,13 @@ in
       example = { "github.com" = "allow"; };
       description = ''
         A bound, direct login from any of forUser's processes to a host key
-        listed under this name in /etc/ssh/ssh_known_hosts. A forwarded sign,
-        an unknown host key and a cut chain are asked whatever this says.
+        listed under this name in /etc/ssh/ssh_known_hosts, or a name this
+        pattern matches: `*` alone is one label, `*` within a label any run
+        of it (`*-ap`), and `**` as the first label one or more
+        (`**.bodar.com`). A literal beats a pattern and a narrower pattern a
+        wider one. A forwarded sign, an unknown host key and a cut chain are
+        asked whatever this says. With services.frisket.policy.courier on, a
+        project's signed policy file merges its signer.ssh.hosts over these.
       '';
     };
   };
@@ -76,7 +91,11 @@ in
     assertions = [{
       assertion = inTss == [ ];
       message = "a login user in tss could sign with any key blob: ${toString inTss}";
-    }];
+    }
+      {
+        assertion = !policy.courier.enable || policy.courier.forUser == cfg.forUser;
+        message = "services.frisket.policy.courier.forUser (${policy.courier.forUser}) is not services.frisket.signer.forUser (${cfg.forUser}): the signer reads the projects of the user it serves.";
+      }];
 
     security.tpm2.enable = true;
 
@@ -104,7 +123,8 @@ in
     systemd.services.frisket-signer = {
       description = "frisket-signer: SSH keys in the TPM, asked for through galley";
       requires = [ "frisket-signer.socket" ];
-      after = [ "frisket-signer.socket" ];
+      wants = lib.optional policy.courier.enable "frisket-policy.socket";
+      after = [ "frisket-signer.socket" ] ++ lib.optional policy.courier.enable "frisket-policy.socket";
       startLimitIntervalSec = 0;
       restartTriggers = [ configFile ];
       serviceConfig = tpm // {

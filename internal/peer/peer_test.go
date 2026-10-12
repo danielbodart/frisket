@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -341,4 +343,39 @@ func repeat(b []string, n int) [][]string {
 		out[i] = b
 	}
 	return out
+}
+
+func TestAPeerInOurUsernsIsInItAndOneInAnotherIsNot(t *testing.T) {
+	c, cmd := accept(t, "stay")
+	err := InOwnUserns(c)
+	c.Close()
+	_ = cmd.Wait()
+	if err != nil {
+		t.Errorf("a peer in our namespace: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "s")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	cmd = exec.Command(os.Args[0], roleClient, path, "stay")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:  syscall.CLONE_NEWUSER,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}},
+	}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("no unprivileged user namespaces here: %v", err)
+	}
+	c, err = ln.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = InOwnUserns(c)
+	c.Close()
+	_ = cmd.Wait()
+	if err == nil || !strings.Contains(err.Error(), "another user namespace") {
+		t.Errorf("a peer in a namespace of its own: %v", err)
+	}
 }

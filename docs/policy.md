@@ -37,11 +37,21 @@ ssh-keygen -Y verify -f /etc/frisket/allowed_signers -I dan \
 another project's namespace, a changed byte, a key no line allows. `-home`
 and `-allowed-signers` stand in for `$HOME` and `/etc/frisket/allowed_signers`.
 
-The signer never signs in these namespaces itself: a raw SSHSIG in any
-namespace starting `frisket-policy` is refused unasked (see
-[signer.md](signer.md#what-is-asked)). Signing through the signer, where it
-sees the bytes and galley shows the diff, is still to come; until then a
-policy is signed with a key of your own, `ssh-keygen -Y sign -n …`.
+A raw SSHSIG in any namespace starting `frisket-policy` is refused unasked
+by the signer (see [signer.md](signer.md#what-is-asked)). It signs a policy
+only where it sees the bytes and galley shows the diff: Always on an ssh
+question, and `frisket policy sign`:
+
+```
+frisket policy sign [-agent SOCKET] [-old FILE] ~/Projects/foo/chase.json
+```
+
+FILE must be canonical already (run `frisket policy fmt` and read what it
+changed). The signer shows the change against the bytes the old `.sig`
+verifies over, `-old FILE` or else git's `HEAD` of FILE, or against nothing
+when there is no old signature or it does not verify over them, saying
+which; Allow once writes `FILE.sig`. A key of your own still works too,
+`ssh-keygen -Y sign -n …`, if the allowed signers name it.
 
 ## The canonical form
 
@@ -119,8 +129,11 @@ read.
 `/proc/<pid>/stat`). It refuses a pid that is no longer that process, is
 not `forUser`'s, or has another root than the host's (a sandbox, whose
 working directory names something else here), then finds the policy file
-from its working directory. No file up to the home is `{}`, no error. `sig`
-is absent when there is no signature beside the file.
+from its working directory. `sig` is absent when there is no signature beside the
+file. No file up to the home has no `digest` and no `bytes`: its `root` and
+`namespace` are the nearest directory up to the home holding `.git` (a
+repository, or a worktree's file), where a first rule would be written, and
+with none it is `{}`, no error.
 
 ```
 {"op":"write","root":"/home/dan/Projects/foo","oldDigest":"sha256:…","bytes":"…","sig":"…"}
@@ -176,6 +189,29 @@ journalctl -u frisket-policy -o cat | jq 'select(.msg == "read" or .msg == "writ
 A `read` or `write` line per request with the peer's unit and pid, the
 anchor or root, the digests and the `outcome` (`ok`, `written`, `refuse`
 with `err`); a `refused` line per peer turned away, with the reason.
+
+## The signer
+
+With the courier on, the module gives the signer a `policy` section
+(`courier`, `allowedSigners`, `fileName`), and for a direct, bound login or
+SSHSIG from a chain not cut short it reads the asking program's project:
+
+- The file applies when its `.sig` verifies, in the namespace the signer
+  names from the root itself, against the allowed signers, and its `signer`
+  section sets only `ssh.hosts` and `sshsig` (`allow`, `ask` or `null`).
+  It is merged over the host's settings with `MergePatch`.
+- Anything else is ignored with one `project policy ignored` line per file
+  (by root, digest, signature and signers), and decided as if there were
+  no file; so is a courier that is down or absent.
+- Always, on an ssh question, signs `signer.ssh.hosts."<name>": "allow"`
+  into the file and has the courier write it with the digest it read. A
+  write that fails (the file changed meanwhile) still signs the login once,
+  logs `always` `not saved`, and leaves a notification in galley.
+
+`ssh.hosts` keys, the host's and a project's alike, may be patterns: `*`
+alone one label, `*` within a label any run of it, `**` as the first label
+one or more. See [signer.md](signer.md#what-is-asked) for the order and
+the precedence.
 
 ## For chase: package projpolicy
 

@@ -135,6 +135,14 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
   frisket policy signers FILE
         Read an allowed signers file as verify would, and list its lines.
 
+  frisket policy sign [-agent SOCKET] [-old FILE] POLICY
+        Have the signer sign POLICY, already canonical, in its directory's
+        namespace: galley shows the change and asks, and on Allow POLICY.sig
+        is written. The change is shown against the bytes POLICY.sig was
+        made over, -old FILE or else git's HEAD of POLICY, when the signature
+        verifies over them; otherwise against nothing. -agent defaults to
+        $SSH_AUTH_SOCK.
+
   frisket sessions        What the daemon holds, one JSON object per line.
   frisket steering FILE   Check a steering file and print what it will do.
 

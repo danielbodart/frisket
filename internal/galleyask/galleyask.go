@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/danielbodart/frisket/internal/peer"
@@ -29,11 +30,21 @@ type Question struct {
 	// Chain is the process chain's rows, ChainRows, shown as a table under
 	// the text; nil shows none.
 	Chain *ChainTable
+	// Diff is a file's change, which galley shows as a unified diff it
+	// works out itself; nil shows none.
+	Diff *wire.Diff
+	// Always adds galley's own Always button, answered Answer.Always, and
+	// AlwaysText, what it does, as the text's last line.
+	Always     bool
+	AlwaysText string
 }
 
 type Answer struct {
 	Allowed bool
 	For     time.Duration // 0 is once
+	// Always is galley's Always button: Allowed, and once, as far as a
+	// grant goes; what it means beyond that is the asker's.
+	Always bool
 	// Password is the dialog's only; the caller zeroes it.
 	Password []byte
 	Galley   struct {
@@ -60,7 +71,25 @@ var (
 	}
 )
 
+// Ask puts q to name's galley. A galley older than the diff and Always
+// (protocol version 5) refuses the item; it is put again without them, so
+// the question is still asked, only with no Always to answer.
 func Ask(ctx context.Context, name string, q Question) (Answer, error) {
+	a, err := ask(ctx, name, q)
+	if errors.Is(err, errOldGalley) && (q.Diff != nil || q.Always) {
+		q.Diff, q.Always = nil, false
+		a, err = ask(ctx, name, q)
+	}
+	if errors.Is(err, errOldGalley) {
+		err = fmt.Errorf("%w: %v", ErrNobody, err)
+	}
+	return a, err
+}
+
+// errOldGalley is galley refusing an item's protocol version.
+var errOldGalley = errors.New("galley does not speak this protocol version")
+
+func ask(ctx context.Context, name string, q Question) (Answer, error) {
 	u, err := user.Lookup(name)
 	if err != nil {
 		return Answer{}, err
@@ -104,10 +133,50 @@ func Ask(ctx context.Context, name string, q Question) (Answer, error) {
 	if err != nil {
 		return Answer{}, fmt.Errorf("%w: %v", ErrNobody, err)
 	}
+	if w.Error != "" && strings.Contains(w.Error, "protocol version") {
+		return Answer{}, fmt.Errorf("%w: galley says %q", errOldGalley, w.Error)
+	}
 	if w.Error != "" {
 		return Answer{}, fmt.Errorf("%w: galley says %q", ErrNobody, w.Error)
 	}
 	return answer(q, w, a), nil
+}
+
+// Notify leaves a notification in name's galley, there until it is
+// dismissed, and returns once galley has queued it.
+func Notify(ctx context.Context, name, text string) error {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return err
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return err
+	}
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "unix", filepath.Join(socketDir, name+".sock"))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrNobody, err)
+	}
+	conn := c.(*net.UnixConn)
+	defer conn.Close()
+	defer context.AfterFunc(ctx, func() { conn.Close() })()
+	if _, err := checkPeer(conn, uid); err != nil {
+		return fmt.Errorf("%w: %v", ErrNobody, err)
+	}
+	it := &wire.Item{Kind: wire.KindNotification, Text: text, Note: &wire.Note{}}
+	line, err := json.Marshal(wire.Hello{Galley: wire.Needs(it), Item: it})
+	if err != nil {
+		return err
+	}
+	var w wire.Answer
+	if _, err = conn.Write(append(line, '\n')); err == nil {
+		err = json.NewDecoder(bufio.NewReader(conn)).Decode(&w)
+	}
+	if err == nil && w.Error != "" {
+		err = fmt.Errorf("galley says %q", w.Error)
+	}
+	return err
 }
 
 func checkPeer(c *net.UnixConn, uid int) (peer.Link, error) {
@@ -141,6 +210,10 @@ func item(name string, q Question) *wire.Item {
 		Kind: wire.KindQuestion, Level: q.Level, Title: q.Title, Text: q.Text,
 		Buttons: []wire.Button{button(wire.AnswerCancel, "Refuse"), button(wire.AnswerExtra, allow)},
 	}
+	it.Diff, it.Always = q.Diff, q.Always
+	if q.Always && q.AlwaysText != "" {
+		it.Text += "\n" + q.AlwaysText
+	}
 	if q.Chain != nil {
 		it.Table = &wire.Table{Columns: []string{"PID", "Process"}, Rows: q.Chain.Rows, Monospace: []int{1}, Summary: q.Chain.Summary}
 	}
@@ -169,6 +242,8 @@ func button(answer, label string) wire.Button {
 
 func answer(q Question, w wire.Answer, a Answer) Answer {
 	switch {
+	case w.Answer == wire.AnswerAlways && q.Always && !q.Password:
+		a.Allowed, a.Always = true, true
 	case w.Answer == wire.AnswerExtra && w.Index == 0 && !q.Password:
 		a.Allowed = true
 	case w.Answer == wire.AnswerOK && (q.Password || q.Grantable):
