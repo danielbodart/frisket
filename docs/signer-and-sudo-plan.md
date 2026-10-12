@@ -990,6 +990,8 @@ Done: both hosts list dan's login keys (both TPM keys) as remote keys, with `For
 
 After M2 has settled on both hosts, delete the M0.5 branch from nix-config. The key files in `~/.ssh` stay; they are useless to dan outside `tss`.
 
+Done: nix-config has no `sshSigner.enable`, no home-manager ssh-tpm-agent and no `tss` for dan; both hosts' systems were unchanged by it.
+
 ### M5: recovery
 
 - **TPM cleared, firmware update or new board**: `sudo systemctl start frisket-signer-keygen`, move the new key from `/var/lib/frisket-signer/new/` into place, commit the `.pub` and authorize it on GitHub, `server`, `mac` and the other host, using the other host's TPM key. If both hosts lost their keys, add the pubs at each remote's console. Re-enrol the Blade's disk unlock separately (`scripts/tpm-enroll.sh`).
