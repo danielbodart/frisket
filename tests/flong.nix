@@ -909,6 +909,17 @@ in
           assert machine.succeed("ls -A /var/lib/frisket").split() == ["records"]
           assert machine.succeed("ls -A /var/lib/frisket/records") == ""
 
+      with subtest("its settings are /etc/frisket/config.json, checked as serve reads it"):
+          exec_start = machine.succeed("systemctl show -P ExecStart frisket.service")
+          assert "serve -config /etc/frisket/config.json ;" in exec_start and "-asker" not in exec_start, exec_start
+          machine.succeed("${frisket} check -config /etc/frisket/config.json")
+          settings = json.loads(machine.succeed("cat /etc/frisket/config.json"))
+          assert settings["asker"].startswith("/nix/store/") and settings["recordDir"] == "/var/lib/frisket/records", settings
+          assert settings["policyRoots"][0] == "/etc/frisket/policies", settings
+          assert settings["gitSigning"] == {"agent": "${agentSocket}", "policies": ["trusted"]}, settings
+          [started] = lines_of("frisket serve")[-1:]
+          assert started["config"] == "/etc/frisket/config.json", started
+
       with subtest("a session is steered, and every connection logged once with where it was going"):
           out = machine.succeed(as_user("${strict} 'curl -sS -m 5 -4 http://allowed.test/; curl -sS -m 5 -6 http://allowed.test/'"))
           assert out.count("upstream-body") == 2, out

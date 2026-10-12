@@ -29,7 +29,7 @@ var sinkName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
 // checked; whether the file can be opened is OpenSink's.
 func CheckSinkPath(path, dir string) error {
 	if dir == "" {
-		return errors.New("record sink: this daemon keeps no records (no -record-dir)")
+		return errors.New("record sink: this daemon keeps no records (no recordDir)")
 	}
 	return checkShape(path, dir)
 }

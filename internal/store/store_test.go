@@ -339,14 +339,7 @@ func TestAWildcardRouteWithASessionKeyBuilds(t *testing.T) {
 }
 
 // A misspelt key is a rule that silently does not apply, so it is refused.
-func TestLoadRefusesUnknownFields(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"dns":[],"policies":{}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "policies") {
-		t.Errorf("Load = %v, want the unknown field named", err)
-	}
+func TestCheckRefusesUnknownFields(t *testing.T) {
 	doc := filepath.Join(t.TempDir(), "p.json")
 	if err := os.WriteFile(doc, []byte(`{"name":"p","allow":["a.test"],"intercepts":["a.test"]}`), 0o600); err != nil {
 		t.Fatal(err)

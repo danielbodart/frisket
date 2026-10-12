@@ -1256,7 +1256,7 @@ shaped so is below.
   -- is put to the person every time; a changed answer is written again. No learned rule outlives the
   session: Nix and the grant stay the only source of truth.
 - **A sink beside the journal.** The journal rate-limits, so each line also
-  goes to a file directly in `-record-dir`, which the module makes
+  goes to a file directly in `recordDir`, which the module makes
   `/var/lib/frisket/records` by `StateDirectory`, the user's own and 0700:
   the one place a daemon under `ProtectSystem=strict` writes, readable by
   the user's own `chase record` afterwards, and bound into no sandbox.

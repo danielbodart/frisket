@@ -19,10 +19,31 @@ let
   # A session names its document by path, and the daemon reads it when the
   # session opens and again if the session is restored: a switch that
   # tightens a policy tightens the sessions already running under it. The
-  # daemon's own file says only where names are resolved.
-  configFile = pkgs.writeText "frisket.json" (builtins.toJSON { inherit (cfg) dns; });
-
+  # daemon's own file, /etc/frisket/config.json, holds its settings, keys
+  # named as the options are; it is checked as serve will read it when the
+  # system is built.
   gitSigning = lib.attrNames (lib.filterAttrs (_: p: p.gitSigning) cfg.policies);
+
+  configFile = pkgs.runCommand "frisket-config.json"
+    {
+      nativeBuildInputs = [ cfg.package ];
+      config = builtins.toJSON ({
+        inherit (cfg) dns logLevel controlSocket askerConcurrent askerPerSession maxConnections;
+        policyRoots = [ "/etc/frisket/policies" ] ++ cfg.policyRoots;
+        # Where a recording session's lines are appended, beside the
+        # journal, which rate-limits: the user's, 0700, under
+        # ProtectSystem's read-only /var, and bound into no sandbox.
+        recordDir = "/var/lib/frisket/records";
+      }
+      // lib.optionalAttrs (cfg.asker != null) { inherit (cfg) asker; }
+      // lib.optionalAttrs (gitSigning != [ ]) {
+        gitSigning = { inherit (cfg.gitSigning) agent; policies = gitSigning; };
+      });
+      passAsFile = [ "config" ];
+    } ''
+    cp "$configPath" "$out"
+    frisket check -config "$out"
+  '';
 
   document = name: p: {
     inherit name;
@@ -884,6 +905,7 @@ in
       # A directory of the documents, so the path a session names stays the
       # same across a switch while what it holds changes.
       environment.etc."frisket/policies".source = policies;
+      environment.etc."frisket/config.json".source = configFile;
 
       # THE USER'S SOCKET, MADE BY SYSTEMD. The launchers that steer sessions
       # run as the user whose credentials the daemon holds -- the daemon's own
@@ -915,41 +937,16 @@ in
         # that touches this unit, which is exactly what the store is for.
         stopIfChanged = false;
 
-        # A changed policy restarts the daemon, and every session comes back
+        # A changed policy or setting restarts the daemon, and every session comes back
         # from the fd store served under its document as it reads now. The
         # documents are not in the unit, so without this a switch would leave
         # running sessions under what they were opened with.
-        restartTriggers = [ policies ];
+        restartTriggers = [ policies configFile ];
 
         serviceConfig = {
           # An argument list, quoted for systemd by systemd's own rules rather
           # than a shell's, which are not the same.
-          ExecStart = utils.escapeSystemdExecArgs ([
-            (lib.getExe cfg.package)
-            "serve"
-            "-log-level"
-            cfg.logLevel
-            "-control"
-            cfg.controlSocket
-            "-config"
-            "${configFile}"
-          ]
-          ++ lib.optionals (cfg.asker != null) [ "-asker" cfg.asker ]
-          ++ [
-            "-asker-concurrent"
-            (toString cfg.askerConcurrent)
-            "-asker-per-session"
-            (toString cfg.askerPerSession)
-            # Where a recording session's lines are appended, beside the
-            # journal, which rate-limits: the user's, 0700, under
-            # ProtectSystem's read-only /var, and bound into no sandbox.
-            "-record-dir"
-            "/var/lib/frisket/records"
-          ]
-          ++ lib.concatMap (r: [ "-policy-root" r ]) ([ "/etc/frisket/policies" ] ++ cfg.policyRoots)
-          ++ lib.optionals (cfg.maxConnections > 0) [ "-max-conns" (toString cfg.maxConnections) ]
-          ++ lib.concatMap (name: [ "-git-signing" name ]) gitSigning
-          ++ lib.optionals (gitSigning != [ ]) [ "-git-signing-agent" cfg.gitSigning.agent ]);
+          ExecStart = utils.escapeSystemdExecArgs [ (lib.getExe cfg.package) "serve" "-config" "/etc/frisket/config.json" ];
           User = cfg.user;
           Group = cfg.group;
           Restart = "on-failure";

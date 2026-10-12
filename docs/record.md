@@ -32,7 +32,7 @@ otherwise; nothing in a project's own files can ask for it.
   refused when the session opens.
 - `sink` is a file the lines are appended to as well as the journal, which
   rate-limits: by its absolute path, directly in the daemon's
-  `-record-dir` -- `/var/lib/frisket/records` under the NixOS module. It is
+  `recordDir` -- `/var/lib/frisket/records` under the NixOS module. It is
   created 0600, not followed if it is a link, refused if it has another name
   (a hard link), and bounded at 64 MiB, after which one `{"truncated": true}`
   line ends it. Absent, the journal alone.
@@ -208,7 +208,7 @@ makes for it: `StateDirectory=frisket/records`, which is
 The user's `chase record` reads a session's file there after the session
 ends, and, being its owner, can remove it; no sandbox binds `/var/lib`, so
 none can read another session's lines, or its own. A daemon without
-`-record-dir` keeps no records, and refuses a document with a sink.
+`recordDir` keeps no records, and refuses a document with a sink.
 
 ## Asking
 

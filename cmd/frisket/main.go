@@ -45,22 +45,29 @@ var version = "dev"
 
 const usage = `frisket -- credentials on the wire, never in the sandbox
 
-  frisket serve -config FILE [-control PATH]
+  frisket serve [-config FILE] [-control PATH] [-log-level LEVEL]
         The daemon. Holds every session's listeners from the host and serves
         each connection and query steered to them under the session's policy:
         DNS against the allowlist, egress to what that DNS resolved, and
         interception for the routes' hosts, with a CA of the session's own.
-        FILE says where names are resolved; each session names its own policy
-        document, read when it opens and again if it is restored. Under
-        systemd it is socket-activated, and
+        Each session names its own policy document, read when it opens and
+        again if it is restored. Under systemd it is socket-activated, and
         keeps its sessions -- and their CAs -- across a restart in the
-        service's file-descriptor store. -asker names the program questions
-        go to, -asker-concurrent and -asker-per-session how many may be open
-        at once and per session, and -record-dir where a recording session's
-        lines may be appended. -git-signing POLICY, repeatable, serves
-        that policy's git signing socket at /run/frisket-sign/POLICY/agent:
-        the identities of -git-signing-agent, and its signatures in the git
-        SSHSIG namespace, and nothing else.
+        service's file-descriptor store. FILE (default ` + defaultConfig + `)
+        holds its settings: where names are resolved, the directories
+        documents may be read from, the program questions go to and how many
+        may be open at once and per session, where a recording session's
+        lines may be appended, and the policies whose git signing socket is
+        served at /run/frisket-sign/POLICY/agent, with the agent whose
+        identities it lists and whose signatures in the git SSHSIG namespace
+        it passes on. -control and -log-level stand in for the file's
+        controlSocket and logLevel.
+
+  frisket check -config FILE
+        Read FILE as serve would, and say what is wrong with it.
+
+  frisket schema -config
+        Print the config file's JSON Schema.
 
   frisket steer -netns PATH -mntns PATH -roots BUNDLE -steering FILE -name NAME -policy DOCUMENT [-param K=V]...
         The launcher's first step, from its hook: create the session's
@@ -142,6 +149,8 @@ func main() {
 		err = runSteering(args)
 	case "check":
 		err = runCheck(args)
+	case "schema":
+		err = runSchema(args)
 	case "dns":
 		err = runDNS(args)
 	case "helper":
@@ -178,27 +187,33 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 
 func runServe(argv []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	path := fs.String("control", control.DefaultPath, "control socket to create when systemd has not passed one")
+	configPath := fs.String("config", defaultConfig, "the settings file")
+	path := fs.String("control", "", "the control socket to create when systemd has not passed one, in place of the file's controlSocket")
 	uid := fs.Int("control-uid", os.Getuid(), "the only uid the control socket answers (default: the daemon's own)")
-	maxConns := fs.Int("max-conns", 0, "concurrent connections per session (0: the default)")
-	configPath := fs.String("config", "", "the policies, as the NixOS module writes them")
-	var roots stringList
-	fs.Var(&roots, "policy-root", "a directory policy documents may be read from; repeatable (none: anywhere)")
 	policyDir := fs.String("policy-dir", "/etc/frisket/policies", "where a session stored under a policy name, before policies were documents, finds that policy")
-	askerPath := fs.String("asker", "", "the program a request a route asks about is put to (none: those requests are refused)")
-	askerConcurrent := fs.Int("asker-concurrent", 1, "questions open at once, daemon-wide; the rest wait their turn")
-	askerPerSession := fs.Int("asker-per-session", 1, "questions one session may have queued or open; another is refused at once, but a recording session's waits")
-	recordDir := fs.String("record-dir", "", "the directory a recording session's sink may be in (none: a document with a sink is refused)")
-	var gitPolicies policyNames
-	fs.Var(&gitPolicies, "git-signing", "a policy whose git signing socket is served at "+gitSigningDir+"/POLICY/agent; repeatable")
-	gitAgent := fs.String("git-signing-agent", "", "the agent a git signing socket's git signatures are made by")
-	var level slog.Level
-	fs.TextVar(&level, "log-level", slog.LevelInfo, "debug adds each intercepted request's headers, credentials described and never shown")
+	logLevel := fs.String("log-level", "", "debug, info, warn or error, in place of the file's logLevel")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if *configPath == "" {
-		return errors.New("-config is required")
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected arguments %q", fs.Args())
+	}
+	c, err := loadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	if *path != "" {
+		c.ControlSocket = *path
+	}
+	if *logLevel != "" {
+		c.LogLevel = *logLevel
+		if err := c.validate(); err != nil {
+			return fmt.Errorf("-log-level: %w", err)
+		}
+	}
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(c.LogLevel)); err != nil {
+		return err
 	}
 	log := slog.New(slog.NewJSONHandler(&lockedWriter{w: os.Stderr}, &slog.HandlerOptions{Level: level}))
 
@@ -207,39 +222,27 @@ func runServe(argv []string) error {
 	// start. The policies themselves are each session's to name, and are
 	// read when it opens: `frisket check` is how a document is refused
 	// before any session is.
-	cfg, err := store.Load(*configPath)
-	if err != nil {
-		return err
-	}
+	cfg := &store.Config{DNS: c.DNS}
 	classifier, dialer, err := store.Dialer()
 	if err != nil {
 		return err
 	}
-	if *recordDir != "" && (!filepath.IsAbs(*recordDir) || filepath.Clean(*recordDir) != *recordDir) {
-		return fmt.Errorf("-record-dir %q is not an absolute, clean path", *recordDir)
-	}
-	if *askerConcurrent < 1 || *askerPerSession < 1 {
-		return errors.New("-asker-concurrent and -asker-per-session are at least 1")
-	}
-	deps := store.Deps{Classifier: classifier, Dialer: dialer, Log: log, Roots: roots, RecordDir: *recordDir}
-	if *askerPath != "" {
+	deps := store.Deps{Classifier: classifier, Dialer: dialer, Log: log, Roots: c.PolicyRoots, RecordDir: c.RecordDir}
+	if c.Asker != "" {
 		// Only when there is one: a nil *ask.Command in the interface would
 		// be an asker that panics rather than no asker at all.
-		asker, err := ask.NewCommand(*askerPath, ask.Limits{Concurrent: *askerConcurrent, PerSession: *askerPerSession})
+		asker, err := ask.NewCommand(c.Asker, ask.Limits{Concurrent: c.AskerConcurrent, PerSession: c.AskerPerSession})
 		if err != nil {
 			return err
 		}
 		deps.Asker = asker
 	}
-	if len(gitPolicies) > 0 && !filepath.IsAbs(*gitAgent) {
-		return fmt.Errorf("-git-signing needs -git-signing-agent, by absolute path; got %q", *gitAgent)
-	}
-	for _, name := range gitPolicies {
+	for _, name := range c.GitSigning.Policies {
 		ln, err := listenGitSigning(gitSigningDir, name)
 		if err != nil {
 			return err
 		}
-		g := &agentsrv.Git{Policy: name, UID: os.Getuid(), Upstream: *gitAgent, Log: log}
+		g := &agentsrv.Git{Policy: name, UID: os.Getuid(), Upstream: c.GitSigning.Agent, Log: log}
 		go func() { log.Error("git signing socket", "policy", name, "err", g.Serve(ln).Error()) }()
 	}
 	policies, err := store.NewStore(cfg, deps)
@@ -271,7 +274,7 @@ func runServe(argv []string) error {
 		ctl = ul
 	}
 	if ctl == nil {
-		if ctl, err = listenControl(*path); err != nil {
+		if ctl, err = listenControl(c.ControlSocket); err != nil {
 			return err
 		}
 	}
@@ -280,7 +283,7 @@ func runServe(argv []string) error {
 		Log:        log,
 		Policies:   policies,
 		ControlUID: *uid,
-		MaxConns:   *maxConns,
+		MaxConns:   c.MaxConnections,
 		PolicyDir:  *policyDir,
 	}
 	// Assigned only when present: a nil *Notifier in the interface would be
@@ -288,7 +291,7 @@ func runServe(argv []string) error {
 	if n := sdnotify.FromEnv(); n != nil {
 		d.Notify = n
 	}
-	log.Info("frisket serve", "version", version, "control", ctl.Addr().String(), "stored", len(stored))
+	log.Info("frisket serve", "version", version, "config", *configPath, "control", ctl.Addr().String(), "stored", len(stored))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -358,10 +361,18 @@ func root(ctx context.Context) (context.Context, context.CancelFunc) {
 func runCheck(argv []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	route := fs.String("exec", "", "an SSH route of the one document named, whose answer to each command on stdin is printed")
+	configPath := fs.String("config", "", "a settings file to read as serve would, in place of policy documents")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
 	argv = fs.Args()
+	if *configPath != "" {
+		if len(argv) > 0 || *route != "" {
+			return errors.New("-config checks the one settings file: name no documents and no -exec")
+		}
+		_, err := loadConfig(*configPath)
+		return err
+	}
 	if len(argv) == 0 {
 		return errors.New("name at least one policy document")
 	}
@@ -391,6 +402,21 @@ func runCheck(argv []string) error {
 	if *route != "" {
 		return decideCommands(argv[0], *route, os.Stdin, os.Stdout)
 	}
+	return nil
+}
+
+// runSchema prints the config file's JSON Schema. -config is required, so
+// that a schema of the policy document can be added beside it.
+func runSchema(argv []string) error {
+	fs := flag.NewFlagSet("schema", flag.ContinueOnError)
+	cfg := fs.Bool("config", false, "the config file's schema")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if !*cfg || fs.NArg() > 0 {
+		return errors.New("say which schema: -config")
+	}
+	fmt.Fprint(os.Stdout, schema)
 	return nil
 }
 
@@ -610,18 +636,5 @@ func runSteering(argv []string) error {
 			fmt.Println(st)
 		}
 	}
-	return nil
-}
-
-// stringList is a repeatable flag.
-type stringList []string
-
-func (l *stringList) String() string { return strings.Join(*l, ",") }
-
-func (l *stringList) Set(s string) error {
-	if !filepath.IsAbs(s) {
-		return fmt.Errorf("%q is not an absolute path", s)
-	}
-	*l = append(*l, filepath.Clean(s))
 	return nil
 }

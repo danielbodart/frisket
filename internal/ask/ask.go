@@ -20,9 +20,9 @@
 //     the asker failing, so that an asker that says something frisket does
 //     not know never has it read as a yes;
 //   - one question at a time, daemon-wide -- or as many as the daemon is
-//     told, -asker-concurrent -- while one is open every other waits its
+//     told, askerConcurrent -- while one is open every other waits its
 //     turn, so a person never faces a pile of dialogs;
-//   - one question per session -- or -asker-per-session -- a session with
+//   - one question per session -- or askerPerSession -- a session with
 //     that many waiting has any other refused at once, so no sandbox can
 //     fill the queue ahead of another's, or bury one question among many.
 //     A recording session's waits its turn instead: a person is there to

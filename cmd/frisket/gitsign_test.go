@@ -9,21 +9,14 @@ import (
 
 func TestAPolicyNameIsOnePathComponent(t *testing.T) {
 	for _, s := range []string{"strict", "trusted", "chase-a_b.1"} {
-		var p policyNames
-		if err := p.Set(s); err != nil {
+		if err := checkPolicyName(s); err != nil {
 			t.Errorf("%q: %v", s, err)
 		}
 	}
 	for _, s := range []string{"", ".", "..", "a/b", "-x", ".hidden", "a b"} {
-		var p policyNames
-		if err := p.Set(s); err == nil {
+		if err := checkPolicyName(s); err == nil {
 			t.Errorf("%q was taken", s)
 		}
-	}
-	var p policyNames
-	_ = p.Set("strict")
-	if err := p.Set("strict"); err == nil {
-		t.Error("a policy given twice was taken")
 	}
 }
 

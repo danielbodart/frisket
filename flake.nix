@@ -257,12 +257,12 @@
               };
               off = eval { };
               noAgent = eval { services.frisket.policies.trusted.gitSigning = true; };
-              has = sub: nixpkgs.lib.hasInfix sub (unit on).ExecStart;
+              settings = c: builtins.fromJSON c.config.environment.etc."frisket/config.json".source.config;
               wrong = builtins.filter (x: ! x.ok) [
-                { case = "flags"; ok = has "\"-git-signing\" \"trusted\"" && has "\"-git-signing-agent\" \"/run/frisket-signer/agent\"" && ! has "\"strict\""; }
+                { case = "config"; ok = (settings on).gitSigning == { agent = "/run/frisket-signer/agent"; policies = [ "trusted" ]; }; }
                 { case = "runtime directory"; ok = (unit on).RuntimeDirectory == "frisket-sign" && (unit on).RuntimeDirectoryPreserve == "yes"; }
                 { case = "assertions"; ok = failed on == [ ]; }
-                { case = "off"; ok = ! nixpkgs.lib.hasInfix "-git-signing" (unit off).ExecStart && ! (unit off) ? RuntimeDirectory; }
+                { case = "off"; ok = ! (settings off) ? gitSigning && ! (unit off) ? RuntimeDirectory; }
                 { case = "no agent"; ok = builtins.any (nixpkgs.lib.hasInfix "gitSigning.agent") (failed noAgent); }
               ];
             in

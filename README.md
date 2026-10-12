@@ -252,6 +252,7 @@ A route can do more than add a bearer token. Each is in
 | `services.frisket.asker` | `null` | The program a question goes to; `null` refuses every question. |
 | `services.frisket.askerConcurrent` / `askerPerSession` | `1` / `1` | Questions open at once, and per session; a recording session's wait rather than being refused. |
 | `services.frisket.dns` | host's `resolv.conf` | Where frisket resolves allowed names. |
+| `services.frisket.policyRoots` | `[ ]` | Directories, beside `/etc/frisket/policies`, a session's policy document may be read from. |
 | `services.frisket.controlSocket` | `/run/frisket/control.sock` | The daemon's control socket; never bound into a sandbox. |
 | `services.frisket.logLevel` | `info` | `debug` adds request headers and error bodies; credentials are described, never shown. |
 | `services.frisket.maxSessions` | `256` | Sessions kept across a restart. |
@@ -265,7 +266,14 @@ A route can do more than add a bearer token. Each is in
 | `services.frisket.flong.<launcher>.params` | `{ }` | Recorded with each session, for a policy that reads them. |
 
 Each policy is written to `/etc/frisket/policies/<name>.json` and checked with
-`frisket check` when the system builds. Not using flong? See
+`frisket check` when the system builds. The daemon's own settings -- `dns`,
+`logLevel`, `controlSocket`, `policyRoots`, `asker`, `askerConcurrent`,
+`askerPerSession`, `maxConnections`, `gitSigning` and the module's
+`recordDir` -- are written to `/etc/frisket/config.json`, keys named as the
+options are, checked with `frisket check -config` when the system builds and
+read strictly by `frisket serve -config`, default that path: a key it does not
+know stops it starting, and a change restarts it. `frisket schema -config`
+prints the file's JSON Schema. Not using flong? See
 [docs/launchers.md](docs/launchers.md). The design, and what was measured and
 rejected, is in [PLAN.md](PLAN.md).
 

@@ -214,7 +214,7 @@ func TestAnAskerMaySayItsAnswerOnStdout(t *testing.T) {
 	}
 }
 
-// -asker-concurrent: as many questions open at once as it says, and no more.
+// askerConcurrent: as many questions open at once as it says, and no more.
 func TestAsManyQuestionsOpenAsTheDaemonSays(t *testing.T) {
 	dir := t.TempDir()
 	c, err := NewCommand(script(t, `
@@ -285,7 +285,7 @@ func TestARecordingSessionsQuestionsQueue(t *testing.T) {
 	}
 }
 
-// -asker-per-session lets a session have more than one question waiting.
+// askerPerSession lets a session have more than one question waiting.
 func TestASessionMayHaveAsManyWaitingAsTheDaemonSays(t *testing.T) {
 	dir := t.TempDir()
 	c, err := NewCommand(script(t, `touch `+dir+`/asked.$$; while [ ! -e `+dir+`/go ]; do sleep 0.01; done`),

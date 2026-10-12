@@ -13,21 +13,12 @@ const gitSigningDir = "/run/frisket-sign"
 
 var policyName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
 
-// policyNames is a repeated policy name, each a single path component.
-type policyNames []string
-
-func (p *policyNames) String() string { return fmt.Sprint([]string(*p)) }
-
-func (p *policyNames) Set(s string) error {
-	if !policyName.MatchString(s) {
-		return fmt.Errorf("%q is not a policy name: letters, digits, _, . and -, not starting with . or -", s)
+// checkPolicyName is whether name is a policy name, a single path
+// component.
+func checkPolicyName(name string) error {
+	if !policyName.MatchString(name) {
+		return fmt.Errorf("%q is not a policy name: letters, digits, _, . and -, not starting with . or -", name)
 	}
-	for _, n := range *p {
-		if n == s {
-			return fmt.Errorf("%q given twice", s)
-		}
-	}
-	*p = append(*p, s)
 	return nil
 }
 

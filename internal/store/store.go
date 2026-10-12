@@ -39,25 +39,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Config is the daemon's configuration file. Policies are not in it: each is
-// a document of its own, which a session names by its path.
+// Config is what of the daemon's settings the store uses. Policies are not
+// in it: each is a document of its own, which a session names by its path.
 type Config struct {
 	// DNS is where frisket resolves the names a session is allowed. Empty
 	// means whatever the host's /etc/resolv.conf names, followed as it changes.
 	DNS []string `json:"dns,omitempty"`
-}
-
-// Load reads the daemon's configuration file.
-func Load(path string) (*Config, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var c Config
-	if err := policy.Decode(b, &c); err != nil {
-		return nil, fmt.Errorf("config %s: %w", path, err)
-	}
-	return &c, nil
 }
 
 // interceptHosts is a policy's intercepted names -- its routes' hosts -- each
@@ -547,7 +534,7 @@ func lanHosts(p policy.Policy, allow, icpt *dns.Matcher) (map[string][]uint16, e
 
 // recorder is a recording document's recorder, with its sink open, or nil
 // for every other document. A recording that would ask a person needs an
-// asker to ask, and a sink must be in the daemon's -record-dir: a document
+// asker to ask, and a sink must be in the daemon's recordDir: a document
 // short of either is refused, rather than a session that records nothing.
 func recorder(name string, r *policy.Record, d Deps) (*record.Recorder, error) {
 	if r == nil {

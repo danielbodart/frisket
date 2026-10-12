@@ -275,8 +275,8 @@ One question is open at a time, daemon-wide, and each session has one
 question at most: another while one waits is refused at once, so no sandbox
 can queue ahead of another's or bury a question among many. An asker that
 stacks its questions in one window can take more of both:
-`services.frisket.askerConcurrent` and `askerPerSession` (`-asker-concurrent`
-and `-asker-per-session`), one each by default. A recording session's
+`services.frisket.askerConcurrent` and `askerPerSession` (the same keys in
+`/etc/frisket/config.json`), one each by default. A recording session's
 questions are never refused for being busy: each waits its turn.
 
 Where several rules match, an admission never depends on how literally the
