@@ -11,10 +11,10 @@ claude> sudo systemctl restart foo  # galley: "sudo systemctl restart foo"
                                     #   Password [••••]  Remember for [15] [minutes ▾]  [Cancel] [Allow]
 frisket-sudo: password remembered for this claude until 16:40
 
-claude> sudo journalctl -u foo      # galley: "sudo journalctl -u foo"   [Refuse] [Allow once]
+claude> sudo journalctl -u foo      # galley: "sudo journalctl -u foo"   [Refuse] [Allow]
 
 claude> sudo systemctl stop sshd    # galley, danger: "touches a unit that guards this machine"
-                                    #   [Refuse] [Allow once]   (never opens a window)
+                                    #   [Refuse] [Allow]   (never opens a window)
 
 $ sudo id                           # in a terminal: stock sudo, the gate never sees it
 ```
@@ -80,7 +80,7 @@ the one checked. `sudo -n` gets the dialog too.
 
 - **Outside a window**: the dialog. A wrong password brings it back. A
   verified one runs the command and, with a time above 0, opens a window.
-- **Inside a window**: a question, Allow once or Refuse. The window is
+- **Inside a window**: a question, Allow or Refuse. The window is
   keyed on the claude and pinned to the galley process that took the
   password; it ends at its time, or when either exits. An Allow from any
   other galley process is a refusal.

@@ -317,7 +317,7 @@ func (a *sudoReq) question(inWindow, wrong bool) galleyask.Question {
 	lines = append(lines, a.env...)
 	return galleyask.Question{
 		Title: a.title, Text: strings.Join(lines, "\n"), Level: level,
-		Password: !inWindow, Grantable: !inWindow && a.grantable(),
+		Password: !inWindow, Grantable: !inWindow && a.grantable(), Allow: "Allow",
 	}
 }
 

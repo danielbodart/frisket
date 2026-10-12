@@ -255,7 +255,7 @@ in
         assert run("claude-b", "sudo id -u") == 0
         qs = events("question")[asked:]
         assert len(qs) == 2 and is_question(qs[0]) and is_dialog(qs[1]), qs
-        assert [b["label"] for b in qs[0]["buttons"]] == ["Refuse", "Allow once"], qs[0]
+        assert [b["label"] for b in qs[0]["buttons"]] == ["Refuse", "Allow"], qs[0]
         assert qs[0]["text"].split("\n")[0] == "claude", qs[0]
 
     with subtest("danger inside the window is a danger question with no password"):
