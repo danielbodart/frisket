@@ -51,6 +51,9 @@
         env.CGO_ENABLED = 0;
         # One swtpm per TPM test; set, they fail rather than skip without it.
         env.FRISKET_REQUIRE_SWTPM = "1";
+        # projpolicy's SSHSIG and allowed_signers are held to stock
+        # ssh-keygen; set, those tests fail rather than skip without it.
+        env.FRISKET_REQUIRE_SSH_KEYGEN = "1";
 
         ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
         excludedPackages = [ "tests/fakegalley" "tests/agenttamper" "cmd/frisket-signer" "cmd/frisket-sudo" ];
@@ -68,7 +71,7 @@
         '';
         # The ruleset lib.steering writes is loaded by nft, in a namespace of
         # the test's own, to see a relayed port reach the session's listener.
-        nativeCheckInputs = [ pkgs.nftables pkgs.swtpm ];
+        nativeCheckInputs = [ pkgs.nftables pkgs.swtpm pkgs.openssh ];
 
         meta = {
           description = "Keeps credentials out of sandboxes by adding them on the wire";
