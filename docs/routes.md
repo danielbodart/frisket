@@ -1,7 +1,8 @@
 # Routes
 
 What a route can do beyond adding a token. The basics are in the
-[README](../README.md).
+[README](../README.md). The examples are version 1 documents, which chase
+writes; [Version 2](#version-2) is the shape layers are merged in.
 
 ## Credential files
 
@@ -313,3 +314,125 @@ refusal = {
 
 `{{message}}` is frisket's reason and the matched operation's summary --
 `frisket: refused: declined (Create a Namespace)` -- never the request's.
+
+## Version 2
+
+A document with `"version": 2` says all of the above in the shape every layer
+of a policy is written in ([policy.md](policy.md#frisket-the-policy-document-version-2)):
+each collection an object keyed by what each entry is, so that a layer
+merged over another by JSON Merge Patch adds or deletes one entry. A route
+says what its requests *are*, in `paths`, and how each is *answered*, in
+`operations` and its class answers; frisket answers each request when it is
+made.
+
+```json
+{
+  "version": 2,
+  "name": "work",
+  "allow": {"api.github.com": true, "github.com": true, "**.googleapis.com": true},
+  "writes": "ask", "guarded": "refuse", "unmatched": "ask",
+  "ceiling": {"guarded": "ask"},
+  "routes": {
+    "api": {
+      "host": "api.github.com",
+      "upstream": "https://api.github.com",
+      "credentialFile": "/run/secrets/gh-token",
+      "placeholder": "proxy-injected",
+      "paths": {
+        "POST /repos/*/*/pulls":   {"operation": {"id": "pulls/create", "summary": "Create a pull request", "class": "write", "category": "pulls"}},
+        "POST /repos/*/*/issues":  {"operation": {"id": "issues/create", "summary": "Create an issue", "class": "write", "category": "issues"}},
+        "DELETE /repos/*/*":       {"operation": {"id": "repos/delete", "summary": "Delete a repository", "class": "guarded", "category": "repos"}},
+        "GET /repos/*/*":          {"operation": {"id": "repos/get", "summary": "Get a repository", "class": "read", "category": "repos"}}
+      },
+      "graphql": {"/graphql": {
+        "query": {"operation": {"id": "graphql-query", "summary": "A GraphQL query", "class": "read"}},
+        "mutations": {"closePullRequest": {"operation": {"id": "closePullRequest", "summary": "Close a pull request.", "class": "write", "category": "pulls"}}}
+      }},
+      "operations": {
+        "pulls/create": "allow",
+        "category:issues": "ask",
+        "GET,HEAD /**": "allow",
+        "POST /repos/me/*/dispatches": "allow"
+      }
+    },
+    "github": {
+      "host": "github.com", "upstream": "https://github.com",
+      "credentialFile": "/run/secrets/gh-token", "placeholder": "proxy-injected", "basicUser": "x-access-token",
+      "git": {"repos": {"*": true}},
+      "operations": {"git-receive-pack": "ask", "GET,HEAD /**": "allow"}
+    }
+  }
+}
+```
+
+A request is answered by the first of these that says:
+
+1. `operations` by the **id** of the operation the request is -- the most
+   specific `paths` entry that matches it (ranked as path rules are), a
+   GraphQL field, or git's push, `git-receive-pack` -- then by
+   **`category:<its category>`**;
+2. `operations` by the most specific **endpoint pattern** that matches it,
+   `"METHOD[,METHOD] /path"`: `*` is one segment (`*:verb` one ending so), a
+   last `**` any number of them, none included (`/a/**` is version 1's
+   prefix `/a`), a literal beats a pattern and an exact path any `**`;
+3. the route's answer for the operation's **class**: `writes` for `write`,
+   `guarded` for `guarded`, and `unmatched` for a request no operation
+   describes, or one whose operation has no class; a `read` is allowed;
+4. the document's;
+5. the built-in: writes ask, guarded refuse, unmatched refuse (an SSH
+   route's, ask).
+
+Then it is **clamped**: an answer more lenient than the route's `ceiling` or
+the document's for its class is the ceiling's, `allow` < `ask` < `refuse`, the
+stricter winning. A read has no ceiling. So an id answer decides even where a
+narrower pattern says otherwise, but never past a ceiling, and an operation
+answered by its class is overruled by any pattern that matches the request,
+however wide. `unmatched` may now be `allow`, and what it admits is still
+held to any stricter operation or pattern a lenient reading of the request
+matches, as every admission is.
+
+git and GraphQL decide every request at their paths first, as in version 1:
+a push is `git-receive-pack`, of class `write`, and a GraphQL field is
+answered by its operation's id (its name where it has none), then category,
+then class; a field no entry names is the endpoint's `unmatched`, else the
+route's, else the document's. `encodedSlashes` names the path templates --
+or single endpoints, `"GET /storage/v1/b/*/o/*"` -- whose `*` takes a segment
+holding an encoded slash.
+
+An SSH route answers in `exec`, keyed by the rule as execrule names one:
+`"systemctl status *"`, `"less ** [arg +*]"`, `"[arg .ssh]"` for every
+command; an arg rule answered `allow` is no rule, since one only tightens.
+`commands`, by the same key, is what each rule is, and a rule there that
+`exec` does not answer is answered by its class. An SSH key that is a host
+pattern, `"*-ap"`, is no machine: its `exec`, `env` and answers apply to
+every machine whose name it matches, the machine's own winning and a
+narrower pattern's over a wider one's. `unmatched: "allow"` admits every
+readable command no rule matches and refuses what cannot be read.
+
+Hosts: `allow` and `lan` keys are names or host patterns, the signer's grammar
+(hostpattern): `*` one label, `*` within a label a run of it (`*-ap.lan`),
+and `**` as the first label one or more -- so version 1's `*.example.com` is
+`**.example.com` here, and `*` is `**`. A route's `host` is a name or
+`**.suffix`, its `upstream` `https://**.suffix` to match. A lan pattern needs
+a literal label, and reaches only names the allowlist allows too.
+
+Version 1 says nothing version 2 cannot:
+
+| Version 1 | Version 2 |
+|---|---|
+| `{methods: [GET, HEAD], prefix: "/v1"}` | `operations: {"GET,HEAD /v1/**": "allow"}` |
+| `{methods: [DELETE], path: "/x/*", ask: true, operation: {id: d, ...}}` | `paths: {"DELETE /x/*": {operation: {id: d, ...}}}`, `operations: {d: "ask"}` |
+| `{..., refuse: true}` with no operation | `operations: {"DELETE /x/**": "refuse"}` |
+| `encodedSlashes: true` on a rule | `encodedSlashes: {"GET /b/*/o/*": true}` |
+| route `unmatched: "ask"` | route `unmatched: "ask"` |
+| `git: {repos: [o/r], push: ask}` | `git: {repos: {"o/r": true}}`, `operations: {"git-receive-pack": "ask"}` |
+| GraphQL `mutations: [{field: f, refuse: true}]` | `mutations: {f: {}}`, `operations: {f: "refuse"}` |
+| SSH `exec: [{command: c, arg: g, ask: true}]` | `exec: {"c [arg g]": "ask"}` |
+| `allow: ["*.example.com", "*"]` | `allow: {"**.example.com": true, "**": true}` |
+
+`tests/fixtures` holds the repository's version 1 documents each with its
+version 2 equivalent, decided the same by a test, request for request.
+`frisket check -http ROUTE DOCUMENT` answers lines of `METHOD /path` on stdin
+as the route's scope would before reading a body -- answer, reason and
+operation -- for either version, and `frisket check` says on stderr of a
+version 2 document each pattern in it that can never match.

@@ -158,7 +158,8 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 | **P1** | Nix-rendered host rules in the final shape: `signer.ssh` (done for github.com), `sudo.exec` | `internal/agentsrv/agentsrv.go`, `internal/sudogate/gate.go` |
 | **P2** | Signing core: `projpolicy`, public for chase (SSHSIG verify, allowed_signers parser, namespace, canonical JSON, mergePatch), courier unit, signer `policy-sign@` + raw refusal, galley `sign` block/diff/receipt/`redeem`, `frisket policy sign\|verify` | frisket, galley `wire/wire.go`, `daemon/` |
 | **P3** | Always on the host: signer and gate read the project policy via the courier and offer Always | `agentsrv.go:409-445`, galleyask, `gate.go` |
-| **P4** | frisket policy v2 (operations, class answers, ceiling, maps, `x-scope`, `check --layer project`), live always-overlay, asker `always`; flong `seccomp.syscalls` map, `x-scope` | `policy/policy.go`, `internal/ask`, `internal/intercept`, flong `decl-options.json` |
+| **P4a** (done) | frisket policy v2 (operations, class answers, ceiling, maps, `x-scope`, `check --layer project`), evaluated by frisket at request time | `policy/`, `internal/intercept/scope_v2.go`, `hostpattern/` |
+| **P4b** (pending, after P5) | live always-overlay in containers, asker `always`; flong `seccomp.syscalls` map, `x-scope` | `internal/ask`, `internal/intercept`, flong `decl-options.json` |
 | **P5** | chase: `chase.json` v2 sections, mergePatch replaces policydoc, signature replaces the approver state, `chase check\|schema\|fmt\|sign\|migrate`, `chase record apply` writes then signs | `internal/grant/{file,approve,launch}.go`, `internal/policydoc/*`, `lib/operations.nix` |
 | **P6** | nix-config: tiers as layers, `/etc/frisket/allowed_signers`, courier on, asker/approver to the sign flow | `features/chase/{tiers,asker,approver}.nix` |
 
@@ -195,6 +196,16 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
   - Always is offered when the root is known: the courier's read now returns the nearest `.git` directory up to home as `root`, with no `digest`, when there is no file yet.
   - `frisket policy sign FILE`, over `policy-sign@frisket`: FILE must be canonical; the old bytes are `-old` or git's `HEAD`; Refuse and Allow once only. Refused to frisket's main process and to a peer whose `/proc/<pid>/uid_map` is not the host's (the signer cannot open another user's namespace).
   - Sudo: no Always, and the gate does not read the project yet.
+
+- frisket P4a, the gateway's policy document version 2 ([routes.md](routes.md#version-2), [policy.md](policy.md#frisket-the-policy-document-version-2)):
+  - `"version": 2` selects it; version 1, which chase still writes, is read beside it for one release.
+  - Maps keyed by identity throughout: `allow` name→true, `lan` and `routes` and `ssh` by name, a route's `paths` (what each `"METHOD[,METHOD] /path"` is: operation, class, category) and `operations` (answers by id, `category:x` or endpoint pattern), an SSH route's `exec` and `commands` by execrule's rule name (`"cmd **"`, `"cmd ** [arg GLOB]"`, `"[arg GLOB]"`).
+  - At each request: id, then category, then the most specific endpoint pattern (§1.6: `*` one segment, a last `**` the rest; literal over pattern, narrower over wider), then the route's class answer (`writes`, `guarded`, `unmatched`), the document's, the built-in (writes ask, guarded refuse, unmatched refuse; SSH unmatched ask); then clamped to the route's and the document's `ceiling`, stricter winning. git's push is the operation `git-receive-pack`; a GraphQL field is answered by its id (its name where it has no operation). `unmatched` may allow.
+  - `allow`, `lan` and `ssh` keys take the signer's host grammar, now the public `hostpattern` package; a route's host is a name or `**.suffix`. An `ssh` pattern key is answers for every machine it matches.
+  - `scope:"host"` on the host's fields; `frisket schema` prints the schema with `x-scope: "host"`; `frisket check -layer project -base BASE [-section frisket] LAYER` refuses host fields, new or deleted routes and patterns that can never match, then merges and checks. `frisket check -http ROUTE DOC` answers request lines.
+  - Golden equivalence: `tests/fixtures` has each of the repository's version 1 documents with its version 2 equivalent, decided the same request for request; and every scope every intercept test builds is decided again as version 2 says it, 16574 requests, with no difference.
+  - What differs from §1.3–§1.6: a route's operation catalogue (`paths`, `graphql`, `git`) and `encodedSlashes` are host-scoped, since an operation's class picks its answer and ceiling; an operation with no class is answered and clamped as unmatched; frisket refuses (rather than ignores) an `operations` id or category no operation of the route has; SSH routes answer by rule, with no id or category answers of their own.
+  - So chase can drop T1 (emit the tier's `writes`/`guarded`/`unmatched` and `ceiling` as answers, the catalogue as `paths`), T2 (a project's lists become `operations` entries, push `git-receive-pack`), T3 (MergePatch) and T4 (`allow`/`lan` are maps a layer merges); T5 is flong's.
 
 ## Appendix: why JSON, not ZON
 
