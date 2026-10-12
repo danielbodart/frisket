@@ -160,7 +160,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 | **P3** | Always on the host: signer and gate read the project policy via the courier and offer Always | `agentsrv.go:409-445`, galleyask, `gate.go` |
 | **P4a** (done) | frisket policy v2 (operations, class answers, ceiling, maps, `x-scope`, `check --layer project`), evaluated by frisket at request time | `policy/`, `internal/intercept/scope_v2.go`, `hostpattern/` |
 | **P4b** (pending, after P5) | live always-overlay in containers, asker `always`; flong `seccomp.syscalls` map, `x-scope` | `internal/ask`, `internal/intercept`, flong `decl-options.json` |
-| **P5** | chase: `chase.json` v2 sections, mergePatch replaces policydoc, signature replaces the approver state, `chase check\|schema\|fmt\|sign\|migrate`, `chase record apply` writes then signs | `internal/grant/{file,approve,launch}.go`, `internal/policydoc/*`, `lib/operations.nix` |
+| **P5** (done) | chase: `chase.json` v2 sections, mergePatch replaces policydoc, signature replaces the approver state, `chase check\|schema\|fmt\|sign\|migrate`, `chase record apply` writes then signs | `internal/grant/{file,approve,launch}.go`, `internal/policydoc/*`, `lib/operations.nix` |
 | **P6** | nix-config: tiers as layers, `/etc/frisket/allowed_signers`, courier on, asker/approver to the sign flow | `features/chase/{tiers,asker,approver}.nix` |
 
 **Migration:**
@@ -206,6 +206,18 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
   - Golden equivalence: `tests/fixtures` has each of the repository's version 1 documents with its version 2 equivalent, decided the same request for request; and every scope every intercept test builds is decided again as version 2 says it, 16574 requests, with no difference.
   - What differs from §1.3–§1.6: a route's operation catalogue (`paths`, `graphql`, `git`) and `encodedSlashes` are host-scoped, since an operation's class picks its answer and ceiling; an operation with no class is answered and clamped as unmatched; frisket refuses (rather than ignores) an `operations` id or category no operation of the route has; SSH routes answer by rule, with no id or category answers of their own.
   - So chase can drop T1 (emit the tier's `writes`/`guarded`/`unmatched` and `ceiling` as answers, the catalogue as `paths`), T2 (a project's lists become `operations` entries, push `git-receive-pack`), T3 (MergePatch) and T4 (`allow`/`lan` are maps a layer merges); T5 is flong's.
+
+- chase P5 (`c6f0d44`, `80209c8`, `fe9ef66`, `119ad23`; chase's README and PLAN.md decisions 10, 17, 18 and 20), on frisket `cf4bfc4` and flong `5061921`:
+  - A checkout's grant is `chase.json`, version 2, §1.1's sections, strict JSON. Signed beside it as `chase.json.sig`, it launches with nothing asked when the signature verifies against `/etc/frisket/allowed_signers`; otherwise the launch puts it, canonical, to the signer's `policy-sign@frisket` against what git's `HEAD` signed, writes the signature beside it, and ends if refused. No approver state is kept for it.
+  - `secretsSHA256` and `chase.apps.docker.project` are in the signed bytes, and a file saying other than the checkout is refused; `chase sign` writes both, canonicalises and signs. `chase check|fmt|schema` read, format and describe a project's file, the schema made of frisket's own; the module's configuration moved to `chase check -config` and `chase schema -config`.
+  - Tiers' frisket documents are version 2, rendered by `lib/operations.nix` (T1 gone) and checked by `frisket check` at build time; a project's `frisket` section is merged by `policy.CheckProjectLayer` (T2, T3, T4 gone, `internal/policydoc` deleted). chase first refuses a document-wide answer, `**`, a public suffix's names and a `lan` pattern. Its `flong` section, `seccomp.syscalls` plus `@group` lists, is checked by `flong check --layer project` and printed as `seccompPolicy` lines (T5 kept as output, not translation).
+  - `chase record` writes `proposal.json` in `chase.json`'s shape; `chase record apply` merges it and has it signed.
+  - Migration as planned: a checkout with only `chase.jsonc` is approved as before, applied as the `chase.json` it migrates to, and told to run `chase migrate`, which writes, prints dropped comments, removes the `.jsonc` and signs. Every `chase.jsonc` in chase's tests and docs is migrated in a test against a golden `chase.json`.
+  - What differs from §1:
+    - Only the cloudflare, gcloud, git, github and huggingface routes take a project's answers (chase's `answerable`); an answer for Claude Code's, Codex's or Docker's route, a route the tier lacks, or an anonymous one is said and left out.
+    - Strict's ceiling (§1.4, §1.5) applies to unauthenticated apps only: a route with no credential gets a `ceiling` refusing `writes`, `guarded` and `unmatched`. An authenticated app in strict is held by its tier's answers, and strict takes no grant.
+    - SSH catalogue ids and `category:` names stay as `chase.apps.ssh.hosts.<name>` sugar, turned into `exec` answers by frisket's rule names with the catalogue operation under `commands`; `frisket.ssh.<machine>.exec` answers a tier's own machines directly.
+    - The `sudo` section is shaped and checked (`exec` → `{runAs, answer}`) but not yet read by the gate.
 
 ## Appendix: why JSON, not ZON
 
