@@ -984,7 +984,7 @@ Done: dan-desktop has the gate, with Claude Code's `SUDO_ASKPASS` and the graphi
 3. Check by hand from dan-blade's Claude Code: `ssh dan-desktop sudo systemctl restart foo` asks in dan-blade's galley, naming dan-desktop and the command; Refuse refuses; `sudo systemctl stop galley.service` shows danger; `ssh -t dan-desktop sudo id` asks dan-desktop's password.
 4. Then the other way round.
 
-Done: both hosts list dan's login keys (both TPM keys) as remote keys, with `ForwardAgent yes` between them. From dan-desktop's Claude Code, `ssh dan-blade sudo id -u` was asked in dan-desktop's galley as remote sudo, with dan-blade, `/run/current-system/sw/bin/id -u` and `dan as root in /home/dan`, and returned 0; `ssh -t dan-blade sudo id -u` asked dan-blade's password.
+Done: both hosts list dan's login keys (both TPM keys) as remote keys, with `ForwardAgent yes` between them. From dan-desktop's Claude Code, `ssh dan-blade sudo id -u` was asked in dan-desktop's galley as remote sudo, with dan-blade, `/run/current-system/sw/bin/id -u` and `dan as root in /home/dan`, and returned 0; `ssh -t dan-blade sudo id -u` asked dan-blade's password. The other way round, from dan-blade to dan-desktop, was checked as in step 3.
 
 ### M4: stock agent removed
 
