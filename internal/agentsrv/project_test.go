@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielbodart/frisket/hostpattern"
 	"github.com/danielbodart/frisket/internal/courier"
 	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/projpolicy"
@@ -41,11 +42,11 @@ func TestAHostPatternMatchesALabelOrMore(t *testing.T) {
 		{"*", "github.com", false},
 		{"**", "github.com", true},
 	} {
-		p, err := compileHost(c.key)
+		p, err := hostpattern.Compile(c.key)
 		if err != nil {
 			t.Fatalf("%s: %v", c.key, err)
 		}
-		if got := p.match(c.name); got != c.want {
+		if got := p.Match(c.name); got != c.want {
 			t.Errorf("%s matching %s: %v", c.key, c.name, got)
 		}
 	}
