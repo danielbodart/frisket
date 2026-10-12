@@ -984,6 +984,8 @@ Done: dan-desktop has the gate, with Claude Code's `SUDO_ASKPASS` and the graphi
 3. Check by hand from dan-blade's Claude Code: `ssh dan-desktop sudo systemctl restart foo` asks in dan-blade's galley, naming dan-desktop and the command; Refuse refuses; `sudo systemctl stop galley.service` shows danger; `ssh -t dan-desktop sudo id` asks dan-desktop's password.
 4. Then the other way round.
 
+Done: both hosts list dan's login keys (both TPM keys) as remote keys, with `ForwardAgent yes` between them. From dan-desktop's Claude Code, `ssh dan-blade sudo id -u` was asked in dan-desktop's galley as remote sudo, with dan-blade, `/run/current-system/sw/bin/id -u` and `dan as root in /home/dan`, and returned 0; `ssh -t dan-blade sudo id -u` asked dan-blade's password.
+
 ### M4: stock agent removed
 
 After M2 has settled on both hosts, delete the M0.5 branch from nix-config. The key files in `~/.ssh` stay; they are useless to dan outside `tss`.
