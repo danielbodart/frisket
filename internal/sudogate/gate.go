@@ -23,19 +23,24 @@ import (
 	"github.com/danielbodart/frisket/internal/grant"
 	"github.com/danielbodart/frisket/internal/peer"
 	"github.com/danielbodart/frisket/sudo"
+	"golang.org/x/crypto/ssh"
 )
 
 type Gate struct {
 	User string
 	Log  *slog.Logger
+	// RemoteKeys are the keys whose signature approves a remote sudo; none
+	// is remote mode off.
+	RemoteKeys []ssh.PublicKey
+	// Danger are the host's danger rules, beside the built-in catalogue.
+	Danger map[string]sudo.Extra
 
 	who   func(*net.UnixConn) (peer.Proc, error)
 	ask   func(context.Context, string, galleyask.Question) (galleyask.Answer, error)
 	alive func(pid int, start uint64) bool
 	now   func() time.Duration
 
-	remoteKeys string
-	hostKeys   string
+	hostKeys string
 
 	danger   *execrule.Rules
 	mu       sync.Mutex
@@ -80,15 +85,12 @@ func (g *Gate) init() error {
 	if g.now == nil {
 		g.now = grant.Now
 	}
-	if g.remoteKeys == "" {
-		g.remoteKeys = "/etc/frisket-sudo/remote-keys"
-	}
 	if g.hostKeys == "" {
 		g.hostKeys = "/etc/ssh/ssh_host_*_key.pub"
 	}
-	danger, err := sudo.Danger()
+	danger, err := sudo.Danger(g.Danger)
 	if err != nil {
-		return fmt.Errorf("danger.json: %w", err)
+		return err
 	}
 	g.danger = danger
 	g.checkins = map[proc]int{}

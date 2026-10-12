@@ -60,11 +60,10 @@ func authorized(k ssh.PublicKey) string {
 // it returns.
 func (h *harness) remote(listed ...ssh.Signer) []ssh.PublicKey {
 	h.t.Helper()
-	var lines []string
+	h.g.RemoteKeys = nil
 	for _, k := range listed {
-		lines = append(lines, authorized(k.PublicKey()))
+		h.g.RemoteKeys = append(h.g.RemoteKeys, k.PublicKey())
 	}
-	h.write("remote-keys", strings.Join(lines, ""))
 	hosts := []ssh.PublicKey{edKey(h.t), edKey(h.t)}
 	h.write("ssh_host_ed25519_key.pub", authorized(hosts[0]))
 	h.write("ssh_host_rsa_key.pub", authorized(hosts[1]))
@@ -312,23 +311,15 @@ func TestTheNonceIsSpentOnceAndDiesWithTheCheckIn(t *testing.T) {
 	c.want(replyNo, "signature did not verify")
 }
 
-func TestRemoteModeIsOffWithNoParseableKeys(t *testing.T) {
+func TestRemoteModeIsOffWithNoKeys(t *testing.T) {
 	h := newHarness(t)
 	h.remote()
 	c := h.remoteSudo(500)
 	c.send(approval(remoteCmd("foo")))
 	c.want(replyNo, "remote sudo is off on this host")
 
-	h.write("remote-keys", "# a comment\n\nnot a key\n")
-	c = h.remoteSudo(501)
-	c.send(approval(remoteCmd("foo")))
-	c.want(replyNo, "remote sudo is off on this host")
-	if !strings.Contains(h.log.String(), `"msg":"remote key skipped","path":"`+filepath.Join(h.dir, "remote-keys")+`","line":3`) {
-		t.Errorf("the skipped line is not journaled:\n%s", h.log.String())
-	}
-
 	k := agentKey(t)
-	h.write("remote-keys", "not a key\n"+authorized(k.PublicKey()))
+	h.remote(k)
 	c = h.remoteSudo(502)
 	c.send(approval(remoteCmd("foo")))
 	if r := c.readMessage(); len(r.keys) != 1 || !bytes.Equal(r.keys[0], k.PublicKey().Marshal()) {
@@ -409,7 +400,9 @@ func TestARemoteMessageWhoseSignRequestIsOverTheAgentLimitIsRefused(t *testing.T
 func TestAnMReplyOverItsLimitIsNo(t *testing.T) {
 	h := newHarness(t)
 	h.remote()
-	h.write("remote-keys", strings.Repeat(authorized(edKey(t)), 25000))
+	for range 25000 {
+		h.g.RemoteKeys = append(h.g.RemoteKeys, edKey(t))
+	}
 	c := h.remoteSudo(500)
 	c.send(approval(remoteCmd("foo")))
 	c.want(replyNo, "too many remote keys for the gate")

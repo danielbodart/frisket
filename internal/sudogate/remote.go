@@ -29,7 +29,7 @@ func (s *session) approveRemote(req *request) {
 		s.reply(replyNo, "bad request")
 		return
 	}
-	listed := s.g.listedKeys()
+	listed := s.g.RemoteKeys
 	if len(listed) == 0 {
 		s.record(a, "refuse", "remote sudo is off", []any{"remote", true})
 		s.reply(replyNo, "remote sudo is off on this host")
@@ -121,34 +121,6 @@ func (s *session) sign(req *request) {
 	}
 	s.recordRemote(c, "allow", "signature", fp, nil)
 	s.reply(replyYes, "")
-}
-
-// listedKeys are the public keys in the remote keys file; a line that does
-// not parse is skipped with one journal line.
-func (g *Gate) listedKeys() []ssh.PublicKey {
-	b, err := os.ReadFile(g.remoteKeys)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			g.Log.Warn("remote keys unreadable", "path", g.remoteKeys, "err", err.Error())
-		}
-		return nil
-	}
-	var keys []ssh.PublicKey
-	n := 0
-	for line := range bytes.Lines(b) {
-		n++
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 || line[0] == '#' {
-			continue
-		}
-		k, _, _, _, err := ssh.ParseAuthorizedKey(line)
-		if err != nil {
-			g.Log.Warn("remote key skipped", "path", g.remoteKeys, "line", n, "err", err.Error())
-			continue
-		}
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 // ownHostKeys are this host's public host key blobs.

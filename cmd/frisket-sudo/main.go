@@ -17,9 +17,16 @@ import (
 
 const usage = `frisket-sudo -- the gate for sudo with no terminal, asked through galley
 
-  frisket-sudo serve -user NAME
+  frisket-sudo serve [-config FILE]
         Serve the gate socket systemd passes as the fd named gate, asking
-        NAME through galley.
+        forUser through galley, under the settings in FILE (default
+        ` + defaultConfig + `).
+
+  frisket-sudo check FILE
+        Read FILE as serve would, and say what is wrong with it.
+
+  frisket-sudo schema
+        Print the config file's JSON Schema.
 `
 
 func main() {
@@ -31,6 +38,10 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = runServe(os.Args[2:])
+	case "check":
+		err = runCheck(os.Args[2:])
+	case "schema":
+		fmt.Fprint(os.Stdout, schema)
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 	default:
@@ -48,12 +59,16 @@ func main() {
 
 func runServe(argv []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	name := fs.String("user", "", "the gated user, and the galley user asked")
+	path := fs.String("config", defaultConfig, "the settings file")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if *name == "" {
-		return errors.New("-user is required")
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected arguments %q", fs.Args())
+	}
+	cfg, err := loadConfig(*path)
+	if err != nil {
+		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	slog.SetDefault(log)
@@ -67,8 +82,16 @@ func runServe(argv []string) error {
 			return err
 		}
 	}
-	log.Info("frisket-sudo serve", "user", *name)
-	return (&sudogate.Gate{User: *name, Log: log}).Serve(ln)
+	log.Info("frisket-sudo serve", "config", *path, "user", cfg.ForUser, "remote_keys", len(cfg.keys), "danger", cfg.Danger)
+	return (&sudogate.Gate{User: cfg.ForUser, Log: log, RemoteKeys: cfg.keys, Danger: cfg.Danger}).Serve(ln)
+}
+
+func runCheck(argv []string) error {
+	if len(argv) != 1 {
+		return errors.New("name one config file")
+	}
+	_, err := loadConfig(argv[0])
+	return err
 }
 
 func gateListener() (*net.UnixListener, error) {

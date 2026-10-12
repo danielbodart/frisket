@@ -21,6 +21,7 @@ import (
 
 	"github.com/danielbodart/frisket/internal/galleyask"
 	"github.com/danielbodart/frisket/internal/peer"
+	"github.com/danielbodart/frisket/sudo"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 	"pgregory.net/rapid"
@@ -84,9 +85,8 @@ func newHarness(t *testing.T) *harness {
 			defer h.mu.Unlock()
 			return !h.dead[proc{pid, start}]
 		},
-		now:        func() time.Duration { return time.Duration(h.clock.Load()) },
-		remoteKeys: filepath.Join(dir, "remote-keys"),
-		hostKeys:   filepath.Join(dir, "ssh_host_*_key.pub"),
+		now:      func() time.Duration { return time.Duration(h.clock.Load()) },
+		hostKeys: filepath.Join(dir, "ssh_host_*_key.pub"),
 	}
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: h.path, Net: "unix"})
 	if err != nil {
@@ -697,6 +697,26 @@ func TestTheGuardUnitsAreDanger(t *testing.T) {
 	}
 }
 
+func TestTheHostsDangerRulesAreDangerBesideTheGuardUnits(t *testing.T) {
+	h := newHarness(t)
+	h.g.Danger = map[string]sudo.Extra{"systemctl **": {Args: map[string]string{"postgresql*": "touches the database"}}}
+	if err := h.g.init(); err != nil {
+		t.Fatal(err)
+	}
+	for argv, want := range map[string]string{
+		"systemctl restart postgresql.service": "touches the database",
+		"systemctl stop frisket.service":       "touches a unit that guards this machine",
+	} {
+		a := h.describe(sudoCmd{links: claude(100), program: bin + "systemctl", argv: strings.Fields(argv)})
+		if len(a.danger) != 1 || a.danger[0] != want {
+			t.Errorf("%s: %q", argv, a.danger)
+		}
+	}
+	if a := h.describe(restart(claude(100), "foo")); len(a.danger) != 0 {
+		t.Errorf("restart foo: %q", a.danger)
+	}
+}
+
 func TestAProgramOutsideTheRootOwnedDirsIsDanger(t *testing.T) {
 	for _, p := range []string{
 		bin + "systemctl", "/run/wrappers/bin/mount", "/etc/profiles/per-user/dan/bin/make-usb",
@@ -839,7 +859,6 @@ func FuzzNoRequestCrashesTheGate(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(dir, "remote-keys"), ssh.MarshalAuthorizedKey(pub), 0o644)
 	os.WriteFile(filepath.Join(dir, "ssh_host_ecdsa_key.pub"), ssh.MarshalAuthorizedKey(pub), 0o644)
 	f.Fuzz(func(t *testing.T, b []byte) {
 		fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
@@ -892,7 +911,7 @@ func FuzzNoRequestCrashesTheGate(f *testing.F) {
 			},
 			alive:      func(int, uint64) bool { return true },
 			now:        func() time.Duration { return time.Hour },
-			remoteKeys: filepath.Join(dir, "remote-keys"),
+			RemoteKeys: []ssh.PublicKey{pub},
 			hostKeys:   filepath.Join(dir, "ssh_host_*_key.pub"),
 		}
 		if err := g.init(); err != nil {

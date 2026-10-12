@@ -8,7 +8,8 @@ let
   inherit (lib) mkOption types;
   system = pkgs.stdenv.hostPlatform.system;
   plugin = (import ./sudo-zig.nix { inherit pkgs; sudo = config.security.sudo.package; }).package;
-  gate = lib.getExe self.packages.${system}.frisket-sudo;
+  package = self.packages.${system}.frisket-sudo;
+  gate = lib.getExe package;
   sudoConf = import ./sudo-conf.nix { inherit pkgs plugin; } {
     version = config.security.sudo.package.version;
     user = cfg.forUser;
@@ -26,6 +27,20 @@ let
   refused = lib.unique (map (m: lib.elemAt m 1) (matches "(^|[^!A-Za-z_])(rootpw|targetpw|runaspw|intercept|log_subcmds|INTERCEPT|LOG_SUBCMDS)([^A-Za-z_]|$)"));
 
   ptraceScope = config.boot.kernel.sysctl."kernel.yama.ptrace_scope" or null;
+
+  # Checked as serve will read it, when the system is built.
+  configFile = pkgs.runCommand "frisket-sudo-config.json"
+    {
+      nativeBuildInputs = [ package ];
+      config = builtins.toJSON {
+        inherit (cfg) forUser remoteKeys;
+        danger = lib.mapAttrs (_: d: lib.filterAttrs (_: v: v != null && v != { }) d) cfg.danger;
+      };
+      passAsFile = [ "config" ];
+    } ''
+    cp "$configPath" "$out"
+    frisket-sudo check "$out"
+  '';
 in
 {
   options.services.frisket.sudoGate = {
@@ -39,6 +54,33 @@ in
       type = types.listOf (types.strMatching "[^\n]+");
       default = [ ];
       description = "SSH public key lines whose signature approves forUser's remote sudo with no tty (`ssh -A host sudo x`); empty is remote mode off.";
+    };
+    danger = mkOption {
+      type = types.attrsOf (types.submodule {
+        options = {
+          reason = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = "The danger line for any command the pattern matches.";
+          };
+          args = mkOption {
+            type = types.attrsOf types.str;
+            default = { };
+            description = "The danger line for a command the pattern matches with an argument this glob matches: `*` is any run of characters but `/`.";
+          };
+        };
+      });
+      default = { };
+      example = {
+        "reboot **".reason = "reboots this machine";
+        "systemctl **".args."postgresql*" = "touches the database";
+      };
+      description = ''
+        Danger rules beside the built-in catalogue, keyed by a command
+        pattern: words, `*` for one, `**` last for any number. A match is
+        always asked, with galley's danger banner and no window, so no rule
+        here takes the catalogue's danger away.
+      '';
     };
   };
 
@@ -74,10 +116,7 @@ in
     users.groups.sudo-gate.gid = 952;
 
     environment.etc."sudo.conf".source = sudoConf;
-    environment.etc."frisket-sudo/remote-keys" = lib.mkIf (cfg.remoteKeys != [ ]) {
-      text = lib.concatMapStrings (k: k + "\n") cfg.remoteKeys;
-      mode = "0644";
-    };
+    environment.etc."frisket-sudo/config.json".source = configFile;
 
     security.sudo.extraConfig = ''
       Defaults noninteractive_auth
@@ -109,8 +148,9 @@ in
       requires = [ "frisket-sudo.socket" ];
       after = [ "frisket-sudo.socket" ];
       startLimitIntervalSec = 0;
+      restartTriggers = [ configFile ];
       serviceConfig = {
-        ExecStart = utils.escapeSystemdExecArgs [ gate "serve" "-user" cfg.forUser ];
+        ExecStart = utils.escapeSystemdExecArgs [ gate "serve" "-config" "/etc/frisket-sudo/config.json" ];
         Type = "notify";
         NotifyAccess = "main";
         User = "sudo-gate";

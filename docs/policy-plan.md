@@ -177,6 +177,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 - galley `4ffa704` + frisket `0ef612c`: process chain as a scrolling table, wrappers folded, scripts split at operators.
 - frisket `76c0d08`: signer `-config /etc/frisket-signer/config.json`, `check`, `schema`, `ssh.hosts.<name> = allow|ask`.
 - frisket `019e92a`: signer questions show the claude/tab above git (display only).
+- frisket: sudo gate `-config /etc/frisket-sudo/config.json`, `check`, `schema`; `remoteKeys` in the file, `danger.<pattern>` adds rules beside the built-in catalogue.
 - nix-config: `work` tier (Triptease, push asks); trusted and ops push unasked; forks by owner alone; `github.com` signs unasked from the host.
 
 ## Appendix: why JSON, not ZON

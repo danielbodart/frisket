@@ -68,6 +68,14 @@ let
     print(f"C median {cs[100]:.2f} ms, max {cs[-1]:.2f} ms; G median {gs[100]:.2f} ms, max {gs[-1]:.2f} ms")
   '';
 
+  # A terminal for a command, as script(1) gives one but read to the end:
+  # script lost the whole of a command's output now and then under load,
+  # where pty.spawn reads the terminal until it hangs up.
+  ptyrun = pkgs.writeText "ptyrun.py" ''
+    import os, pty, sys
+    sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))
+  '';
+
   sleeper = { wantedBy = [ "multi-user.target" ]; serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity"; };
 in
 {
@@ -76,6 +84,7 @@ in
   nodes.machine = { pkgs, ... }: {
     imports = [ self.nixosModules.sudoGate ];
     services.frisket.sudoGate.enable = true;
+    services.frisket.sudoGate.danger."systemctl **".args."bar*" = "touches bar";
 
     specialisation.nopasswd.configuration = nopasswd;
     specialisation.misread.configuration = {
@@ -126,7 +135,7 @@ in
         return machine.execute(f"setsid -w runuser -u {user} -- {clean_env(user, extra)} bash -c {shlex.quote(cmd)} </dev/null 2>&1")
 
     def tty(cmd, user="dan", feed=pw):
-        inner = f"(sleep 2; printf '%s\\n' {shlex.quote(feed)}) | script -qec {shlex.quote(cmd)} /dev/null"
+        inner = f"(sleep 2; printf '%s\\n' {shlex.quote(feed)}) | python3 ${ptyrun} bash -c {shlex.quote(cmd)}"
         return machine.execute(f"runuser -u {user} -- {clean_env(user, 'TERM=dumb')} bash -c {shlex.quote(inner)} 2>&1")
 
     def galley(*script):
@@ -354,6 +363,17 @@ in
         assert len(qs) == 2 and all(q["level"] == "danger" for q in qs), qs
         assert qs[0]["text"].split("\n")[0] == "touches a unit that guards this machine", qs[0]
         assert qs[1]["text"].split("\n")[0] == "a shell command frisket cannot read", qs[1]
+
+    with subtest("the host's danger rule from config.json is danger beside the catalogue's"):
+        machine.succeed("${lib.getExe self.packages.${system}.frisket-sudo} check /etc/frisket-sudo/config.json")
+        assert "-config /etc/frisket-sudo/config.json" in machine.succeed("systemctl show -P ExecStart frisket-sudo.service")
+        asked = len(events("question"))
+        notty("sudo systemctl restart bar.service")
+        notty("sudo systemctl restart nftables.service")
+        qs = events("question")[asked:]
+        assert len(qs) == 2 and all(q["level"] == "danger" for q in qs), qs
+        assert qs[0]["text"].split("\n")[0] == "touches bar", qs[0]
+        assert qs[1]["text"].split("\n")[0] == "touches a unit that guards this machine", qs[1]
 
     with subtest("a preserved variable outside the allowlist is shown"):
         asked = len(events("question"))

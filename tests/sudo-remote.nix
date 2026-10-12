@@ -305,7 +305,7 @@ in
 
     with subtest("Remote mode off: no remote keys is stock, no check-in"):
         server.succeed("/run/booted-system/specialisation/off/bin/switch-to-configuration test")
-        server.fail("test -e /etc/frisket-sudo/remote-keys")
+        assert json.loads(server.succeed("cat /etc/frisket-sudo/config.json"))["remoteKeys"] == []
         assert "remote" not in server.succeed("cat /etc/sudo.conf").split()
         signed, gated = len(signs()), len(checkins())
         rc, out = remote_sudo("sudo id -u")

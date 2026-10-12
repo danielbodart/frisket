@@ -53,6 +53,21 @@ previous generation.
 | `enable` | `false` | The plugin line in `/etc/sudo.conf`, the PAM rule, the `frisket-sudo` PAM service, the sudoers defaults and the gate. |
 | `forUser` | `"dan"` | The gated user, and whose galley is asked. |
 | `remoteKeys` | `[ ]` | SSH public key lines whose signature approves a remote sudo (below); empty is remote mode off. |
+| `danger.<pattern>` | `{ }` | Danger rules beside the built-in catalogue (below): `reason` for any command the pattern matches, `args.<glob>` for one with an argument the glob matches. |
+
+The options are written to `/etc/frisket-sudo/config.json`, which
+`frisket-sudo serve -config` reads, keys named as the options are:
+
+```json
+{ "forUser": "alice", "remoteKeys": [ "ecdsa-sha2-nistp256 AAAA… alice@laptop" ],
+  "danger": { "reboot **": { "reason": "reboots this machine" },
+              "systemctl **": { "args": { "postgresql*": "touches the database" } } } }
+```
+
+A key it does not know, a remote key that does not parse or a danger rule
+that does not compile stops it starting; the build runs `frisket-sudo
+check` on the file first, and a change restarts the gate. `frisket-sudo
+schema` prints its JSON Schema.
 
 The module sets `Defaults noninteractive_auth` and `Defaults
 timestamp_type=tty`, and evaluation fails when:
@@ -85,8 +100,8 @@ the one checked. `sudo -n` gets the dialog too.
   password; it ends at its time, or when either exits. An Allow from any
   other galley process is a refusal.
 - **Danger**: a `systemctl` on `frisket*`, `galley*`, `sshd*`,
-  `nftables*` or `debug-shell*`, a program outside
-  `/run/current-system/sw/bin`, `/run/wrappers/bin` and
+  `nftables*` or `debug-shell*`, a command matching a `danger` rule, a
+  program outside `/run/current-system/sw/bin`, `/run/wrappers/bin` and
   `/etc/profiles/per-user/<user>/bin`, or a `<shell> -c STRING` (`sh`,
   `bash`, `dash`, `zsh`, `ksh`, `mksh`, `fish`, …), `sudo -s`, `sudo -i`
   or `env` whose inner command is either or cannot be read. A shell run
@@ -127,7 +142,7 @@ one of those keys:
 services.frisket.sudoGate.remoteKeys = [ "ecdsa-sha2-nistp256 AAAA… alice@laptop" ];
 ```
 
-The keys are written to `/etc/frisket-sudo/remote-keys` and `remote` is
+The keys are written to `/etc/frisket-sudo/config.json` and `remote` is
 added to the plugin line; there are no new PAM lines. The client needs
 only `ForwardAgent` for the host.
 

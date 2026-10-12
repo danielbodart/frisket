@@ -401,8 +401,9 @@ One structured record per decision: requester chain, anchor, destination, key, c
 - **No panic on the ungated path**: a ReleaseSafe panic in `open()` aborts every sudo, terminal sudo included. `open()` touches no handle until it has decided to gate, and returns errors rather than panicking.
 - `sudo/frisket-sudo-check-plugin.zig` (build time only): `dlopen(RTLD_NOW)`, `dlsym`, then checks plugin type 3 (audit), the API major and the sudo version. A wrong type makes every sudo segfault [spike: SV1], so this check is mandatory.
 - `nixosModules.sudoGate` builds the plugin, the helper and the check-plugin with the host's pkgs against the host's `security.sudo.package`, so the plugin is always built for the sudo that loads it; guard 1 still checks the type, the API major and that version. The flake's own package and checks build with frisket's pkgs.
-- `cmd/frisket-sudo serve`: fd `gate` from `sdnotify.Listen()`; refuses to start without it.
-- `sudo/danger.json`, embedded with `go:embed`, checked by a unit test.
+- `cmd/frisket-sudo serve [-config FILE]`: reads its settings from FILE (default `/etc/frisket-sudo/config.json`), strictly: an unknown key, a second value, a remote key that does not parse or a danger rule that does not compile is an error. fd `gate` from `sdnotify.Listen()`; refuses to start without it.
+- `check FILE`: reads FILE as `serve` would. `schema`: prints the file's JSON Schema.
+- `sudo/danger.json`, embedded with `go:embed`, checked by a unit test; the config's `danger` rules are compiled after it.
 
 ### When it is involved
 
@@ -543,7 +544,7 @@ While asking, the gate polls the plugin's connection for `POLLRDHUP` and withdra
 
 Remote 'A':
 
-1. Read `/etc/frisket-sudo/remote-keys` (§10), one public key line each; a line that does not parse is skipped with one journal line. None → 'N' "remote sudo is off on this host".
+1. Take the config's `remoteKeys` (§10), parsed when the gate started; a line that does not parse stops it starting, and `check` at build time catches it first. None → 'N' "remote sudo is off on this host".
 2. Classify as on a local 'A' step 1, with the warning for a Cut or SessionRoot chain and the environment text lines: these give the level and the reasons.
 3. Read every `/etc/ssh/ssh_host_*_key.pub`. None → 'N'.
 4. Make a 32-byte nonce (`crypto/rand`) and keep it, the message and the listed keys on the check-in. Reply 'M'.
@@ -594,6 +595,8 @@ The question:
 ### Danger catalogue
 
 frisket's `policy.ExecRule` list, compiled by execrule and matched with `execrule.DecideWords`. An Ask match is danger and its summary is the reason line; no match is normal. `ask` and `operation.id` are there because the format requires them with `arg`.
+
+The host adds rules through the config's `danger`, a map keyed by the command pattern: `{"reboot **": {"reason": "…"}, "systemctl **": {"args": {"postgresql*": "…"}}}`. Each becomes an Ask rule after the catalogue's, so it can add danger and never take the catalogue's away; one that repeats a catalogue rule is refused.
 
 ```json
 [
@@ -717,15 +720,18 @@ Hardening: `NoNewPrivileges`, `CapabilityBoundingSet = ""`, `ProtectSystem = "st
 | `enable` | bool | false | Plugin line in `sudo.conf`, PAM rule, `frisket-sudo` PAM service, sudoers defaults, gate |
 | `forUser` | str | `"dan"` | The gated user |
 | `remoteKeys` | list of str | `[ ]` | SSH public key lines whose signature approves a remote sudo (remote mode, §7); empty is remote mode off |
+| `danger.<pattern>` | `{ reason; args.<glob>; }` | `{ }` | Danger rules beside the built-in catalogue |
 
-Fixed: user and group `sudo-gate` (952); `/run/frisket-sudo/gate.sock`; `/etc/frisket-sudo/remote-keys`.
+The options are written to `/etc/frisket-sudo/config.json` (strict JSON, keys as the options are named), checked by `frisket-sudo check` when the system is built, and read by `serve -config`; a change restarts the gate.
+
+Fixed: user and group `sudo-gate` (952); `/run/frisket-sudo/gate.sock`; `/etc/frisket-sudo/config.json`.
 
 Load-bearing lines:
 
 | What | Line |
 |---|---|
 | `sudo.conf` (guard 1, build-time on every rebuild path) | a derivation that runs `frisket-sudo-check-plugin <so> frisket_audit <sudo version>` and writes `Plugin frisket_audit <so> user=<forUser>`; the plugin is built with the host's pkgs against `security.sudo.package` |
-| Remote keys | `environment.etc."frisket-sudo/remote-keys"`, root 0644, one line per `remoteKeys` entry, and ` remote` appended to the Plugin line, only when `remoteKeys` is non-empty. No new PAM lines; the auth stack assertion is unchanged |
+| Remote keys | `remoteKeys` in `/etc/frisket-sudo/config.json`, and ` remote` appended to the Plugin line, only when `remoteKeys` is non-empty. No new PAM lines; the auth stack assertion is unchanged |
 | PAM rule | `sudo` auth `frisket-sudo-pam`: `sufficient pam_exec.so seteuid quiet <helper> <forUser>`, order `unix.order - 10` |
 | Auth stack assertion | sudo's enabled auth rules are exactly `frisket-sudo-pam`, `unix`, `deny`: "a conversation-free auth module would run on every terminal sudo -n" |
 | PAM service | `security.pam.services.frisket-sudo = { }` |
