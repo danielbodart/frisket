@@ -1,4 +1,4 @@
-# Plan: uniform settings, signed project policy, and "Always for this project"
+# Plan: uniform settings, signed project policy, and "Always"
 
 Across flong, frisket, chase, galley and nix-config. Like [signer-and-sudo-plan.md](signer-and-sudo-plan.md), a plan: each part moves into the component's own docs as it is built.
 
@@ -16,7 +16,8 @@ Outside `strict`, this guards against an agent's *accidental* damage, not a dete
 - Signature covers exact bytes: any edit, comments included, needs re-signing. Fine, since JSON has no comments.
 - frisket does not hard-code `chase.json`: its config says `projectPolicy.file`, which nix-config sets to `chase.json`.
 - Sudo keeps prompting for the password the first time, as today; no "Always" for sudo for now.
-- Timed grants ("Allow for 15 min") stay keyed to the claude process; "Always for this project" is the explicit project-scoped answer.
+- Timed grants ("Allow for 15 min") stay keyed to the claude process; "Always" is the explicit project-scoped answer.
+- Always writes the specific rule asked about, but the file takes patterns: I, or an agent, widen a rule by editing it, and signing it again is the check. One general rule beats five hundred near-identical ones.
 - nix-config-in-an-ops-container is parked (direction of travel).
 
 ## 0. Today: chase translates between vocabularies
@@ -84,12 +85,26 @@ T1–T5 become a plain merge once frisket and flong understand the vocabulary th
 
 1. **Field scope.** `x-scope: "host"` in the schema marks fields a project may never set; `check --layer project` refuses them.
    - flong: user, closure, hooks, mounts, overlays, network forwarding, nested sandbox, environment.
-   - frisket: route host/upstream/credential, ssh agent/key, record, `allow."*"`, ceiling.
+   - frisket: route host/upstream/credential, ssh agent/key, record, ceiling.
    - signer: user, terminal, key dir, known_hosts, max grant.
    - sudo: user, remote keys, danger catalogue (add only), trusted dirs, env allowlist.
    - chase: tiers, match, approver, app enable/scope/trust, egress, caches.
 2. **Value ceilings.** A `ceiling` object (allow < ask < refuse, stricter wins), set by tier or host only.
+   - Strict's ceilings refuse what a project may widen there, whatever its file says: strict is the one tier hard-coded against an adversary.
    - Fixed in code: sudo danger always asks; forwarded signs never silent; raw `frisket-policy*` SSHSIG refused; flong's fixed seccomp filters; private-address refusals; fallback never bare.
+
+### 1.6 Patterns
+
+Every rule key may be a pattern, in one grammar for every component, frisket's `execrule`'s: `*` matches one word (a command), label (a host) or segment (a path), and `**` matches the rest. A literal key beats a pattern, and a narrower pattern beats a wider one.
+
+| Rule | Exact | Widened |
+|---|---|---|
+| host (signer, frisket `allow`/`ssh`) | `gateway` | `*-ap`, `*.bodar.com` |
+| HTTP operation | `pulls/create`, `POST /repos/o/r/dispatches` | `category:pulls`, `POST /repos/o/*/dispatches`, `GET /**` |
+| command (gateway ssh, later sudo) | `uci show wireless` | `uci show **`, `logread **` |
+| SSHSIG namespace | `git` | `file` (no patterns: namespaces are few) |
+
+`check` reports a pattern that can never match, and `frisket policy propose` (from the logs) can suggest the pattern a set of exact rules share.
 
 ## 2. Host-level project policy
 
@@ -97,7 +112,7 @@ T1–T5 become a plain merge once frisket and flong understand the vocabulary th
 - **Courier:** `frisket-policy.service`, running as dan with no network, socket `/run/frisket-policy/sock`, peers checked by uid and cgroup.
   - Given an anchor (pid, start), it resolves cwd → nearest ancestor with the policy file (bounded at `$HOME`) → returns `{root, bytes, sig}`.
   - It can't forge (verifiers check the signature); it is trusted only for anchor → root.
-- **Weakness, accepted:** the project is cwd-derived, so any process of dan's that `cd`s into X gets X's rules. Rules are exact, which bounds it.
+- **Weakness, accepted:** the project is cwd-derived, so any process of dan's that `cd`s into X gets X's rules. Accepted under the threat model.
 - **Trust root:** root-owned `/etc/frisket/allowed_signers`, from nix-config's TPM public keys: `dan namespaces="frisket-policy:*" ecdsa-sha2-nistp256 …`. Separate from git's.
 
 ## 3. Sidecar `chase.json.sig`
@@ -111,11 +126,11 @@ T1–T5 become a plain merge once frisket and flong understand the vocabulary th
 - `secretsSHA256` and `docker.project` live inside the signed bytes, so no multi-subject statement is needed.
 - `chase fmt` gives the canonical form (sorted keys, 2-space indent, trailing newline); `chase sign` canonicalises first.
 
-## 4. "Always for this project"
+## 4. "Always"
 
 - **Galley:**
   - An item may carry `sign: {namespace, path, old, new}`. Galley renders the diff itself.
-  - The button "Always for ~/Projects/foo" is never the Enter default.
+  - The button reads "Always", with the project root in the question's text; it is never the Enter default.
   - It returns `{answer: "always", receipt}`; the receipt is single-use and lasts 60 s.
 - **Signer `policy-sign@frisket`:**
   1. redeems the receipt with galley;
@@ -125,11 +140,12 @@ T1–T5 become a plain merge once frisket and flong understand the vocabulary th
 - **Courier write:** `flock`, compare-and-swap on the old digest, then write temp files and rename json then sig.
   - On a conflict (you were editing): allowed once, rule not saved, notice shown.
 - **Offered only when** the current file verifies (or is absent) and is canonical, so it can't bless an agent's unsigned edits.
-- **Rules written are exact, never generalised:**
+- **The rule Always writes is the specific one asked about** (the glove's default fit):
   - signer: host plus key (forwarded needs its own answer);
   - gateway HTTP: the operation id, else `METHOD /exact/path`;
   - gateway ssh: the literal command.
   - Sudo: none for now (decided).
+- **Widening is by editing, then signing.** Any rule may use the patterns in §1.6; the signing dialog's diff is where a widening is seen and approved.
 - **Inside containers:** the root is the session's workspace, from flong's `$workspace`.
   - frisket applies the rule to the live session at once; the file applies from the next launch.
 - **Git:** the working tree is modified; you commit `chase.json` and `chase.json.sig`.
