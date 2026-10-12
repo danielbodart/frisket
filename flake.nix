@@ -56,7 +56,7 @@
         env.FRISKET_REQUIRE_SSH_KEYGEN = "1";
 
         ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
-        excludedPackages = [ "tests/fakegalley" "tests/agenttamper" "cmd/frisket-signer" "cmd/frisket-sudo" ];
+        excludedPackages = [ "tests/fakegalley" "tests/agenttamper" "cmd/frisket-signer" "cmd/frisket-sudo" "cmd/frisket-policy" ];
 
         # `go test ./...` rather than buildGoModule's own check, which would
         # leave out the excluded packages' tests. The namespace tests create a
@@ -110,6 +110,13 @@
         key = "github:danielbodart/frisket#nixosModules.sudoGate";
         imports = [ (import ./nix/sudo-gate.nix self) ];
       };
+      # The allowed signers a project's policy is verified against, and the
+      # courier that carries it from the user's home. The signer and the gate
+      # import it, each naming itself a courier peer.
+      nixosModules.policy = {
+        key = "github:danielbodart/frisket#nixosModules.policy";
+        imports = [ (import ./nix/policy.nix self) ];
+      };
 
       packages = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
@@ -141,6 +148,13 @@
             excludedPackages = [ ];
             doCheck = false;
             meta = old.meta // { mainProgram = "frisket-signer"; };
+          });
+          frisket-policy = (mkFrisket pkgs).overrideAttrs (old: {
+            pname = "frisket-policy";
+            subPackages = [ "cmd/frisket-policy" ];
+            excludedPackages = [ ];
+            doCheck = false;
+            meta = old.meta // { mainProgram = "frisket-policy"; };
           });
           frisket-sudo = (mkFrisket pkgs).overrideAttrs (old: {
             pname = "frisket-sudo";
@@ -196,6 +210,8 @@
                   self.nixosModules.signer
                   self.nixosModules.sudoGate
                   self.nixosModules.sudoGate
+                  self.nixosModules.policy
+                  self.nixosModules.policy
                   { boot.isContainer = true; system.stateVersion = "26.05"; }
                 ];
               };
@@ -205,14 +221,15 @@
                 inherit (eval.config.services.frisket) enable;
                 signer = eval.config.services.frisket.signer.enable;
                 sudoGate = eval.config.services.frisket.sudoGate.enable;
+                courier = eval.config.services.frisket.policy.courier.enable;
               });
 
           # Every flong session is kept from the signer's, the gate's and
           # galley's sockets while the signer or the gate is enabled, and
-          # only then.
+          # from the courier's while it is, and only then.
           flong-protect =
             let
-              protect = signer: sudoGate: (nixpkgs.lib.nixosSystem {
+              protect = signer: sudoGate: courier: (nixpkgs.lib.nixosSystem {
                 inherit system;
                 modules = [
                   flong.nixosModules.default
@@ -225,15 +242,59 @@
                     services.frisket.flong.box.policy = "p";
                     services.frisket.signer.enable = signer;
                     services.frisket.sudoGate.enable = sudoGate;
+                    services.frisket.policy.courier.enable = courier;
                   }
                 ];
               }).config.flong.box.protect;
               on = [ "/run/frisket" "/run/frisket-signer" "/run/galley-ask" "/run/frisket-sudo" ];
-              want = { signer = on; sudoGate = on; off = [ "/run/frisket" ]; };
-              got = { signer = protect true false; sudoGate = protect false true; off = protect false false; };
+              want = { signer = on; sudoGate = on; all = on ++ [ "/run/frisket-policy" ]; courier = [ "/run/frisket" "/run/frisket-policy" ]; off = [ "/run/frisket" ]; };
+              got = { signer = protect true false false; sudoGate = protect false true false; all = protect true true true; courier = protect false false true; off = protect false false false; };
             in
             assert nixpkgs.lib.assertMsg (got == want) "flong protect is ${builtins.toJSON got}, want ${builtins.toJSON want}";
             pkgs.writeText "frisket-flong-protect" "ok";
+
+          # The policy module: allowed signers rendered and read as the
+          # verifiers will (building this builds the file, which runs frisket
+          # policy signers on it), the courier's config with the signer and
+          # the gate as its peers, and its unit as the user with no network
+          # and only the home writable.
+          policy-module =
+            let
+              key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7wrGycGisT+fHX2DD9ohFP+IzDJOQ4cqprClYHszBR";
+              eval = nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  self.nixosModules.signer
+                  self.nixosModules.sudoGate
+                  {
+                    boot.isContainer = true;
+                    system.stateVersion = "26.05";
+                    users.users.alice = { isNormalUser = true; group = "users"; home = "/home/alice"; };
+                    services.frisket.signer = { enable = true; forUser = "alice"; };
+                    services.frisket.sudoGate = { enable = true; forUser = "alice"; };
+                    services.frisket.policy = {
+                      fileName = "chase.json";
+                      allowedSigners = [{ principal = "alice"; inherit key; } "bob ${key} bob@example"];
+                      courier = { enable = true; forUser = "alice"; };
+                    };
+                  }
+                ];
+              };
+              etc = eval.config.environment.etc;
+              signers = etc."frisket/allowed_signers".source;
+              settings = builtins.fromJSON etc."frisket-policy/config.json".source.config;
+              unit = eval.config.systemd.services.frisket-policy.serviceConfig;
+              wrong = builtins.filter (x: ! x.ok) [
+                { case = "allowed signers"; ok = signers.text == "alice namespaces=\"frisket-policy:*\" ${key}\nbob ${key} bob@example\n"; }
+                { case = "config"; ok = settings == { fileName = "chase.json"; allowedSigners = "/etc/frisket/allowed_signers"; peers = { "frisket-signer.service" = "ssh-signer"; "frisket-sudo.service" = "sudo-gate"; }; }; }
+                { case = "user"; ok = unit.User == "alice" && unit.Group == "users"; }
+                { case = "home"; ok = unit.ReadWritePaths == [ "/home/alice" ] && unit.ProtectHome == "read-only" && unit.ProtectSystem == "strict"; }
+                { case = "network"; ok = unit.PrivateNetwork && unit.RestrictAddressFamilies == [ "AF_UNIX" ]; }
+                { case = "socket"; ok = eval.config.systemd.sockets.frisket-policy.socketConfig.ListenStream == "/run/frisket-policy/sock"; }
+              ];
+            in
+            assert nixpkgs.lib.assertMsg (wrong == [ ]) "the policy module is wrong: ${builtins.toJSON (map (x: x.case) wrong)}";
+            pkgs.runCommand "frisket-policy-module" { } "cp ${signers} $out";
 
           # A policy with gitSigning gets its socket under /run/frisket-sign,
           # in a directory systemd keeps across a restart, and needs the agent.
@@ -508,6 +569,10 @@
           # frisket-sudo's remote mode: a client with the signer, a server with
           # the gate and remoteKeys, and a second sshd, in three VMs.
           sudo-remote = pkgs.testers.runNixOSTest (import ./tests/sudo-remote.nix { inherit self; });
+
+          # frisket-policy as nixosModules.policy runs it, read and written by
+          # a stand-in peer unit, in a VM.
+          policy = pkgs.testers.runNixOSTest (import ./tests/policy.nix { inherit self; });
 
           # frisket-signer with a software TPM, two sshds and fakegalley, in a VM.
           signer = pkgs.testers.runNixOSTest (import ./tests/signer.nix { inherit self; });

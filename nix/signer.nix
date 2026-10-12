@@ -39,6 +39,8 @@ let
   '';
 in
 {
+  imports = [ self.nixosModules.policy ];
+
   options.services.frisket.signer = {
     enable = lib.mkEnableOption "frisket-signer, the SSH agent whose keys live in the TPM";
     forUser = mkOption {
@@ -69,6 +71,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    services.frisket.policy.courier.peers."frisket-signer.service" = "ssh-signer";
+
     assertions = [{
       assertion = inTss == [ ];
       message = "a login user in tss could sign with any key blob: ${toString inTss}";

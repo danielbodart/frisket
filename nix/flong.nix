@@ -144,7 +144,8 @@ in
           # socket would steer sessions, its own included.
           protect = [ (dirOf cfg.controlSocket) ]
             ++ lib.optionals (cfg.signer.enable or false || cfg.sudoGate.enable or false)
-            [ "/run/frisket-signer" "/run/galley-ask" "/run/frisket-sudo" ];
+            [ "/run/frisket-signer" "/run/galley-ask" "/run/frisket-sudo" ]
+            ++ lib.optional (cfg.policy.courier.enable or false) "/run/frisket-policy";
           # Listeners, handed over, the rules, and the session's CA in its
           # mount namespace. A failure here ends the session: flong ends a
           # session whose hook exits non-zero.

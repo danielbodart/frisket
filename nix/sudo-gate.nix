@@ -43,6 +43,8 @@ let
   '';
 in
 {
+  imports = [ self.nixosModules.policy ];
+
   options.services.frisket.sudoGate = {
     enable = lib.mkEnableOption "frisket-sudo: the plugin line in sudo.conf, the PAM rule, the frisket-sudo PAM service, the sudoers defaults and the gate";
     forUser = mkOption {
@@ -85,6 +87,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    services.frisket.policy.courier.peers."frisket-sudo.service" = "sudo-gate";
+
     assertions = [
       {
         assertion = authStack "sudo" == [ "frisket-sudo-pam" "unix" "deny" ];
