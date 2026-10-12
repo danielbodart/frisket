@@ -44,9 +44,15 @@ type Link struct {
 
 // Requester is a chain, leaf first, and what it resolves to. Anchor points
 // into Chain, and is nil only for a Cut chain with no link to key on.
+//
+// Shown is the link a question names as the requester, also into Chain: the
+// Anchor, but for git's signing program the link Anchor would be were
+// ssh-keygen -Y sign a pass-through, so a commit's signature reads
+// claude ← git commit. It decides nothing: grants, windows, SessionRoot and
+// Terminal are all the Anchor's, as they were.
 type Requester struct {
 	Chain                      []Link
-	Anchor                     *Link
+	Anchor, Shown              *Link
 	Cut, SessionRoot, Terminal bool
 	PeerUID                    int
 	CgroupID                   uint64
@@ -158,22 +164,51 @@ func resolve(links []Link) *Requester {
 	}
 	r := &Requester{Chain: links[:n:n]}
 	r.Cut = n == 0 || r.Chain[n-1].Pid != 1
+	a := -1
 	for i := range r.Chain {
 		if terminal(r.Chain, i) {
 			r.Terminal = true
-			r.Anchor = &r.Chain[i]
+			a = i
 			break
 		}
 	}
-	for i := 0; r.Anchor == nil && i < n; i++ {
-		if tabShell(r.Chain, i) || !transient[r.Chain[i].Comm] {
-			r.Anchor = &r.Chain[i]
+	if a < 0 {
+		a = anchorFrom(r.Chain, 0)
+	}
+	if a >= 0 {
+		r.Anchor, r.Shown = &r.Chain[a], &r.Chain[a]
+		r.SessionRoot = r.Anchor.Pid == 1 || systemdUser(*r.Anchor) || r.Anchor.Comm == terminalServer
+		if s := anchorFrom(r.Chain, a+1); !r.Terminal && gitSigner(*r.Anchor) && s >= 0 {
+			r.Shown = &r.Chain[s]
 		}
 	}
-	if a := r.Anchor; a != nil {
-		r.SessionRoot = a.Pid == 1 || systemdUser(*a) || a.Comm == terminalServer
-	}
 	return r
+}
+
+// anchorFrom is the first link from i up that a grant could key on: a tab's
+// shell, or a link that is not transient; -1 if there is none.
+func anchorFrom(chain []Link, i int) int {
+	for ; i < len(chain); i++ {
+		if tabShell(chain, i) || !transient[chain[i].Comm] {
+			return i
+		}
+	}
+	return -1
+}
+
+// gitSigner is ssh-keygen -Y sign, which git runs to sign a commit or tag
+// with an ssh key. Its comm and argv are its own to set, so it only ever
+// changes what a question shows, never what is decided.
+func gitSigner(l Link) bool {
+	if l.Comm != "ssh-keygen" {
+		return false
+	}
+	for i := 1; i+1 < len(l.Cmdline); i++ {
+		if l.Cmdline[i] == "-Y" && l.Cmdline[i+1] == "sign" {
+			return true
+		}
+	}
+	return false
 }
 
 func tabShell(chain []Link, i int) bool {

@@ -251,6 +251,11 @@ in
         q = events("question")[-1]
         assert q["kind"] == "question" and q["title"] == "SSHSIG signature", q
         assert 'SSHSIG namespace "file"' in q["text"].split("\n"), q
+        rows = q["table"]["rows"]
+        assert rows[0][1] == "claude" and rows[-1][1].startswith("ssh-keygen -Y sign"), q
+        assert q["table"]["summary"].startswith("claude ← ssh-keygen -Y sign"), q
+        d = decisions()[-1]
+        assert d["namespace"] == "file" and d["anchor"]["Comm"] == "ssh-keygen", d
 
     with subtest("ssh -A: the far-side sign is asked as forwarded, from a claude and from a tab"):
         for where in ("claude", "tab"):

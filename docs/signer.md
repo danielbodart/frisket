@@ -102,6 +102,11 @@ terminal server, and for a process chain cut short; galley shows the last
 two with a warning. A question goes when
 the ssh that asked exits.
 
+A question shows the process chain from the asking program down. For a
+commit's signature that is the claude or tab above `git commit`, since
+git's `ssh-keygen -Y sign` is shown through; the decision, and the
+journal's anchor, are still ssh-keygen's.
+
 ## Journal
 
 ```

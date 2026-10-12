@@ -193,6 +193,49 @@ func TestTheClaudeChainAnchorsOnClaude(t *testing.T) {
 	}
 }
 
+func TestGitsSigningProgramIsShownThroughButStillTheAnchor(t *testing.T) {
+	bashTool := spawn(claude, "bash", "/run/current-system/sw/bin/bash", "-c", "git commit -S -m x")
+	bashTool.Sid, bashTool.TTY = bashTool.Pid, 0
+	sign := []string{"ssh-keygen", "ssh-keygen", "-Y", "sign", "-n", "git", "-f", "/home/dan/.ssh/id_ecdsa.pub", "/tmp/.git_signing_buffer_x"}
+	r := FromLinks(chain(append([]Link{bashTool, claude}, above...), []string{"git", "git", "commit", "-S", "-m", "x"}, sign))
+	if anchorOf(r) != "ssh-keygen" || r.Shown == nil || r.Shown.Pid != claude.Pid || r.Cut || r.SessionRoot || r.Terminal {
+		t.Errorf("anchor %s, shown %v, cut %v, session root %v, terminal %v", anchorOf(r), r.Shown, r.Cut, r.SessionRoot, r.Terminal)
+	}
+
+	r = FromLinks(chain(above, []string{"git", "git", "commit", "-S"}, sign))
+	if anchorOf(r) != "ssh-keygen" || r.Shown == nil || r.Shown.Pid != tab.Pid || r.Terminal {
+		t.Errorf("from a tab: anchor %s, shown %v, terminal %v", anchorOf(r), r.Shown, r.Terminal)
+	}
+
+	r = FromLinks(chain([]Link{userRoot, pid1}, sign))
+	if anchorOf(r) != "ssh-keygen" || r.SessionRoot || r.Shown == nil || r.Shown.Pid != userRoot.Pid {
+		t.Errorf("under systemd --user: anchor %s, shown %v, session root %v", anchorOf(r), r.Shown, r.SessionRoot)
+	}
+
+	for _, other := range [][]string{
+		{"ssh-keygen", "ssh-keygen", "-Y", "verify", "-n", "git"},
+		{"ssh-keygen", "ssh-keygen", "-l", "-f", "sign"},
+		{"ssh-keygen-x", "ssh-keygen", "-Y", "sign"},
+	} {
+		r := FromLinks(chain([]Link{claude, tab, kgx, userRoot, pid1}, other))
+		if r.Shown != r.Anchor || anchorOf(r) != other[0] {
+			t.Errorf("%q: anchor %s, shown %v", other[1:], anchorOf(r), r.Shown)
+		}
+	}
+}
+
+func TestEveryOtherChainIsShownFromItsAnchor(t *testing.T) {
+	for _, links := range [][]Link{
+		chain(above, []string{"ssh", "ssh", "server"}),
+		chain([]Link{claude, tab, kgx, userRoot, pid1}, []string{"git", "git", "push"}, []string{"ssh", "ssh", "git@github.com"}),
+		chain([]Link{kgx, userRoot, pid1}, []string{"ssh", "ssh", "server"}),
+	} {
+		if r := FromLinks(links); r.Shown != r.Anchor {
+			t.Errorf("anchor %s, shown %v", anchorOf(r), r.Shown)
+		}
+	}
+}
+
 func TestAScriptRunFromATabAnchorsOnTheTabsShell(t *testing.T) {
 	r := FromLinks(chain(above, []string{"bash", "bash", "deploy.sh"}, []string{"ssh", "ssh", "server"}))
 	if r.Anchor == nil || r.Anchor.Pid != tab.Pid || r.Cut || r.SessionRoot || r.Terminal {

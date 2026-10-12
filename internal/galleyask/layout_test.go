@@ -261,12 +261,18 @@ func TestASignersChainIsItsLinksAndItsSummaryTheLeaf(t *testing.T) {
 	if !reflect.DeepEqual(c.Rows, want) || c.Summary != "claude ← ssh git@github.com git-receive-pack 'danielbodart/galley.git'" {
 		t.Errorf("got %q %q", c.Rows, c.Summary)
 	}
-	c = Chain(chainFixture(t, "signer-commit"))
-	if len(c.Rows) != 1 || c.Rows[0][1] != "ssh-keygen" || !strings.HasPrefix(c.Summary, "ssh-keygen -Y sign -n git -f ") {
+	r := chainFixture(t, "signer-commit")
+	c = Chain(r)
+	want = [][]string{{"2953050", "claude"}, {"3037369", "git commit -S -m Show the process chain as a table under the \\\n    text"},
+		{"3037370", "ssh-keygen -Y sign -n git -f /home/dan/.ssh/id_ecdsa.pub \\\n    /tmp/.git_signing_buffer_tmpyGAU8k"}}
+	if !reflect.DeepEqual(c.Rows, want) || c.Summary != "claude ← git commit -S -m Show the process chain as a table under the text" {
 		t.Errorf("got %q %q", c.Rows, c.Summary)
 	}
+	if r.Anchor.Comm != "ssh-keygen" || r.SessionRoot || r.Cut {
+		t.Errorf("the decision's anchor is %s, session root %v, cut %v", r.Anchor.Comm, r.SessionRoot, r.Cut)
+	}
 	it := item("dan", Question{Title: "t", Chain: c})
-	if it.Table == nil || it.Table.Summary != c.Summary || len(it.Table.Rows) != 1 || wire.Needs(it) != 4 {
+	if it.Table == nil || it.Table.Summary != c.Summary || len(it.Table.Rows) != 3 || wire.Needs(it) != 4 {
 		t.Errorf("item table %+v", it.Table)
 	}
 }

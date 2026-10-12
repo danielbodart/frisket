@@ -33,17 +33,12 @@ type link struct {
 	lines []string
 }
 
-// shown runs from the anchor, or the top of the chain, down to the leaf,
+// shown runs from the link the question names (topOf), or the top of the chain, down to the leaf,
 // leaving out the shells between them: the top by its name, the rest by
 // their commands, laid out by Command, each folded against the one below
 // it (fold).
 func shown(r *peer.Requester) []link {
-	top := len(r.Chain) - 1
-	for i := range r.Chain {
-		if &r.Chain[i] == r.Anchor {
-			top = i
-		}
-	}
+	top := topOf(r)
 	var pids []int
 	var argvs [][]string
 	for i := top; i >= 0; i-- {
@@ -72,6 +67,21 @@ func shown(r *peer.Requester) []link {
 		out[i] = link{pids[i], Command(argv, Width)}
 	}
 	return out
+}
+
+// topOf is the index of the link the chain is shown from: r.Shown, or
+// r.Anchor where Shown is not set, or the top of the chain.
+func topOf(r *peer.Requester) int {
+	from := r.Shown
+	if from == nil {
+		from = r.Anchor
+	}
+	for i := range r.Chain {
+		if &r.Chain[i] == from {
+			return i
+		}
+	}
+	return len(r.Chain) - 1
 }
 
 // Folded is what stands in a folded command for what the row below it shows.
@@ -129,20 +139,22 @@ func Chain(r *peer.Requester) *ChainTable {
 // maxSummary is the most characters of a summary: a row shows far fewer.
 const maxSummary = 300
 
-// Summary is the chain in a line: the anchor's name, and what the leaf
-// runs -- a shell's script, or the script inside Claude Code's eval, on
-// one line -- or the anchor's command when it is the leaf.
+// Summary is the chain in a line: the name of the link topOf finds, and
+// what the leaf runs -- a shell's script, or the script inside Claude
+// Code's eval, on one line -- or that link's command when it is the leaf.
+// Where the leaf is git's signing program, shown through, the line is what
+// its parent runs, unless that is a shell: git commit, not ssh-keygen's
+// buffer file.
 func Summary(r *peer.Requester) string {
 	if len(r.Chain) == 0 {
 		return ""
 	}
-	top := len(r.Chain) - 1
-	for i := range r.Chain {
-		if &r.Chain[i] == r.Anchor {
-			top = i
-		}
+	top := topOf(r)
+	leaf := 0
+	if r.Anchor == &r.Chain[0] && r.Shown != r.Anchor && top > 1 && !Shell(r.Chain[1].Comm) {
+		leaf = 1
 	}
-	line := leafLine(r.Chain[0])
+	line := leafLine(r.Chain[leaf])
 	if top > 0 {
 		line = Name(r.Chain[top]) + " ← " + line
 	}
