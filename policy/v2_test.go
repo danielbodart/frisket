@@ -179,6 +179,7 @@ func TestAProjectLayerSetsNothingOfTheHosts(t *testing.T) {
 		{`{"allow": {"*-Ap.lan": true}}`, "a capital"},
 		{`{"ssh": {"*-ap": {"exec": {"ls": "allow"}}}}`, "matches no SSH route"},
 		{`{"version": 1}`, "version 1"},
+		{`{"routes": {"api": {"always": true}}}`, "routes.api.always: the host's"},
 	} {
 		_, err := policy.CheckProjectLayer([]byte(c.layer), base)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
@@ -304,11 +305,11 @@ func TestTheSchemaMarksTheHostsFields(t *testing.T) {
 	slices.Sort(host)
 	want := []string{
 		"ceiling", "name", "record",
-		"routes.*.basicUser", "routes.*.ceiling", "routes.*.credentialFile", "routes.*.credentialJSON",
+		"routes.*.always", "routes.*.basicUser", "routes.*.ceiling", "routes.*.credentialFile", "routes.*.credentialJSON",
 		"routes.*.docker", "routes.*.encodedSlashes", "routes.*.git", "routes.*.graphql", "routes.*.header",
 		"routes.*.host", "routes.*.paths", "routes.*.placeholder", "routes.*.refusal", "routes.*.sessionKey",
 		"routes.*.upstream", "routes.*.upstreamCA",
-		"ssh.*.address", "ssh.*.agent", "ssh.*.ceiling", "ssh.*.commands", "ssh.*.hostKeys", "ssh.*.identity",
+		"ssh.*.address", "ssh.*.agent", "ssh.*.always", "ssh.*.ceiling", "ssh.*.commands", "ssh.*.hostKeys", "ssh.*.identity",
 		"ssh.*.keyFile", "ssh.*.passwordFile", "ssh.*.shell", "ssh.*.user",
 	}
 	if !slices.Equal(host, want) {
@@ -322,5 +323,26 @@ func TestTheSchemaMarksTheHostsFields(t *testing.T) {
 	}
 	if len(props) != 11 {
 		t.Errorf("schema has %d top-level keys", len(props))
+	}
+}
+
+// Always is offered for the routes and machines the host marks, never a
+// pattern's, which is no machine.
+func TestAlwaysIsTheHostsMarkOfARouteOrMachine(t *testing.T) {
+	key := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl ap"
+	l := lowered(t, `{"version": 2, "name": "p", "allow": {"a.test": true, "b.test": true},
+	  "routes": {"a": {"host": "a.test", "upstream": "https://a.test", "always": true},
+	             "b": {"host": "b.test", "upstream": "https://b.test"}},
+	  "ssh": {"gw": {"address": "192.168.1.1", "user": "root", "hostKeys": ["`+key+`"], "agent": "/run/a", "always": true},
+	          "nas": {"address": "192.168.1.2", "user": "root", "hostKeys": ["`+key+`"], "agent": "/run/a"}}}`)
+	if !reflect.DeepEqual(l.Always, map[string]bool{"a": true}) || !reflect.DeepEqual(l.SSHAlways, map[string]bool{"gw": true}) {
+		t.Errorf("always %v, ssh %v", l.Always, l.SSHAlways)
+	}
+	if l := lowered(t, github); l.Always != nil || l.SSHAlways != nil {
+		t.Errorf("unmarked: %v %v", l.Always, l.SSHAlways)
+	}
+	_, err := policy.Load([]byte(`{"version": 2, "name": "p", "ssh": {"*-ap": {"always": true}}}`))
+	if err == nil || !strings.Contains(err.Error(), "a pattern is no machine") {
+		t.Errorf("a pattern's always: %v", err)
 	}
 }

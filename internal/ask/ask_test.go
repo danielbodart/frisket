@@ -310,3 +310,61 @@ func TestASessionMayHaveAsManyWaitingAsTheDaemonSays(t *testing.T) {
 		}
 	}
 }
+
+// A question offering Always carries the diff, and may be answered always
+// on stdout, whatever the status; one that does not offer it may not.
+func TestAlwaysIsAnAnswerOnlyWhereOffered(t *testing.T) {
+	dir := t.TempDir()
+	got := filepath.Join(dir, "question.json")
+	offered := question
+	offered.Always = true
+	offered.Diff = &intercept.Diff{Path: "~/p/chase.json", Old: "", New: "{\n  \"version\": 2\n}\n"}
+	for _, status := range []string{"0", "1"} {
+		c := mustCommand(t, script(t, `cat > `+got+`; echo Always; exit `+status))
+		a, err := c.Ask(context.Background(), offered)
+		if err != nil || a != record.Always || !a.Admits() {
+			t.Errorf("exit %s: (%v, %v)", status, a, err)
+		}
+		b, _ := os.ReadFile(got)
+		var q intercept.Question
+		if err := json.Unmarshal(b, &q); err != nil || !reflect.DeepEqual(q, offered) {
+			t.Errorf("the asker read %s", b)
+		}
+	}
+	c := mustCommand(t, script(t, `echo always`))
+	if a, err := c.Ask(context.Background(), question); a != record.Refuse || err == nil || !strings.Contains(err.Error(), "did not offer it") {
+		t.Errorf("not offered: (%v, %v)", a, err)
+	}
+	if _, ok := record.ParseAnswer("always"); ok {
+		t.Error("ParseAnswer reads always, which a recording's answer never is")
+	}
+}
+
+// A notice runs the asker with kind notice, beside a question open, and
+// what it prints answers nothing.
+func TestANoticeIsSaidBesideAQuestion(t *testing.T) {
+	dir := t.TempDir()
+	got := filepath.Join(dir, "notice.json")
+	c := mustCommand(t, script(t, `q=$(cat); case $q in *'"kind":"notice"'*) printf '%s' "$q" > `+got+`; echo refuse; exit 0;; esac; sleep 5`))
+	asked := make(chan struct{})
+	go func() {
+		defer close(asked)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		c.Ask(ctx, question)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	n := intercept.Question{Session: "s", Workspace: "/home/dan/p", Text: "The rule was not saved."}
+	if err := c.Notify(context.Background(), n); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(got)
+	var q intercept.Question
+	if err := json.Unmarshal(b, &q); err != nil || q.Kind != intercept.KindNotice || q.Text != n.Text || q.Workspace != n.Workspace {
+		t.Errorf("the asker read %s", b)
+	}
+	if err := mustCommand(t, script(t, `exit 3`)).Notify(context.Background(), n); err == nil {
+		t.Error("a failing notice is no error")
+	}
+	<-asked
+}

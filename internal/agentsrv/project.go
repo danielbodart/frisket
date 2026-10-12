@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/danielbodart/frisket/projpolicy"
 	"github.com/danielbodart/galley/wire"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 // Policy is where the signer finds a project's signed policy: the courier
@@ -396,12 +398,17 @@ const PolicySignExtension = "policy-sign@frisket"
 // PolicySignRequest is policy-sign's contents, as JSON: the project's
 // directory and its policy file's name, the new bytes, and the bytes the
 // old signature was made over with that signature, if there are any.
+//
+// Approved is frisket's main process saying a person approved the new
+// bytes already, answering Always in a question of its own that showed the
+// change: it is signed unasked. From anyone else it is refused.
 type PolicySignRequest struct {
-	Root   string `json:"root"`
-	Name   string `json:"name"`
-	New    []byte `json:"new"`
-	Old    []byte `json:"old,omitempty"`
-	OldSig []byte `json:"oldSig,omitempty"`
+	Root     string `json:"root"`
+	Name     string `json:"name"`
+	New      []byte `json:"new"`
+	Old      []byte `json:"old,omitempty"`
+	OldSig   []byte `json:"oldSig,omitempty"`
+	Approved bool   `json:"approved,omitempty"`
 }
 
 // PolicySignResponse is policy-sign's answer, after SSH_AGENT_SUCCESS: the
@@ -438,9 +445,6 @@ func (c *conn) policySignErr(contents []byte) ([]byte, error) {
 	if c.s.Policy == nil {
 		return nil, refuse("this signer has no project policy configured")
 	}
-	if c.s.frisket(c.r) {
-		return nil, refuse("frisket's main process serves sandboxes, and signs no policy")
-	}
 	if err := c.s.inHost(c.c); err != nil {
 		return nil, refuse(err.Error())
 	}
@@ -452,6 +456,17 @@ func (c *conn) policySignErr(contents []byte) ([]byte, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
 		return nil, refuse("request: " + err.Error())
+	}
+	// frisket's main process serves sandboxes: it asks for nothing but a
+	// rule a person answered Always in its own question, which showed the
+	// change, and that is signed unasked. Nobody else may say a change
+	// was approved.
+	fromFrisket := c.s.frisket(c.r)
+	switch {
+	case fromFrisket && !p.Approved:
+		return nil, refuse("frisket's main process signs only what a person answered Always, approved")
+	case !fromFrisket && p.Approved:
+		return nil, refuse("only frisket's main process may send a change approved")
 	}
 	switch {
 	case !filepath.IsAbs(p.Root) || filepath.Clean(p.Root) != p.Root:
@@ -482,6 +497,16 @@ func (c *conn) policySignErr(contents []byte) ([]byte, error) {
 	req := &request{class: classPolicySign, namespace: ns, dest: path, key: key}
 	pub, _ := ssh.NewPublicKey(key.Signer.Public())
 	req.keyFP = ssh.FingerprintSHA256(pub)
+	if p.Approved {
+		sig, err := signPolicy(key, ns, p.New)
+		if err != nil {
+			c.s.Log.Error("sign failed", "key", req.keyFP, "err", err.Error())
+			return nil, err
+		}
+		c.s.Log.Info("decision", "class", classPolicySign, "outcome", "sign", "source", "always",
+			"namespace", ns, "dest", path, "key", req.keyFP, "digest", projpolicy.Digest(p.New), "chain", r.Chain)
+		return sig, nil
+	}
 	lines := galleyask.Warnings(r)
 	lines = append(lines, fmt.Sprintf("Signs %s as %s's policy, in %s.", p.Name, rootName, galleyask.Clean(ns)))
 	old := ""
@@ -517,4 +542,40 @@ func (c *conn) policySignErr(contents []byte) ([]byte, error) {
 		return nil, err
 	}
 	return sig, nil
+}
+
+// PolicySign asks the agent at sock to sign req's file, through
+// policy-sign@frisket, and returns the armoured signature.
+func PolicySign(ctx context.Context, sock string, req PolicySignRequest) ([]byte, error) {
+	contents, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "unix", sock)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = c.SetDeadline(dl)
+	}
+	out, err := agent.NewClient(c).Extension(PolicySignExtension, contents)
+	if errors.Is(err, agent.ErrExtensionUnsupported) {
+		return nil, fmt.Errorf("the agent at %s does not sign policies: it is not frisket-signer", sock)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var resp PolicySignResponse
+	if len(out) < 1 || json.Unmarshal(out[1:], &resp) != nil {
+		return nil, fmt.Errorf("the agent's answer %q is not policy-sign's", out)
+	}
+	if resp.Error != "" {
+		return nil, fmt.Errorf("the signer: %s", resp.Error)
+	}
+	if resp.Sig == nil {
+		return nil, errors.New("the signer sent no signature")
+	}
+	return resp.Sig, nil
 }

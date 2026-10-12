@@ -393,6 +393,8 @@ type options struct {
 	userKey ed25519.PrivateKey
 	// sshd sets the fake machine up before it serves.
 	sshd func(*sshd)
+	// always is the session's Always.
+	always intercept.Always
 }
 
 func newFixture(t *testing.T, o options) *fixture {
@@ -447,6 +449,7 @@ func newFixture(t *testing.T, o options) *fixture {
 		Expiry:   time.Now().Add(time.Hour),
 		Asker:    o.asker,
 		Recorder: o.recorder,
+		Always:   o.always,
 		Policy:   "p",
 		Log:      slog.New(slog.NewJSONHandler(j, nil)),
 		Dial: func(ctx context.Context, to netip.AddrPort) (net.Conn, error) {

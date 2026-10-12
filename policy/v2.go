@@ -121,6 +121,12 @@ type RouteV2 struct {
 	Operations map[string]string `json:"operations,omitempty"`
 	Answers
 	Ceiling *Answers `json:"ceiling,omitempty" scope:"host"`
+	// Always offers, on a question this route asks, to answer it Always:
+	// the request's operation, or its METHOD and exact path, answered
+	// allow in the session's project file and at once in the session. For
+	// a route whose answers a project's file is merged into, which only
+	// the host knows.
+	Always bool `json:"always,omitempty" scope:"host"`
 }
 
 // EndpointV2 is what an endpoint is: its operation, and, on a Docker
@@ -175,6 +181,11 @@ type SSHRouteV2 struct {
 	Commands map[string]Operation `json:"commands,omitempty" scope:"host"`
 	Answers
 	Ceiling *Answers `json:"ceiling,omitempty" scope:"host"`
+	// Always offers, on a question this machine asks, to answer it Always:
+	// the command, a simple command of plain words, answered allow by
+	// that literal rule in the session's project file and at once in the
+	// session. A machine's, never a pattern's.
+	Always bool `json:"always,omitempty" scope:"host"`
 }
 
 // Version is a document's version: 1, absent or 0 for version 1, which

@@ -25,6 +25,9 @@ type Lowered struct {
 	// by route name; Policy's route of that name holds its endpoint
 	// patterns as Paths.
 	Scopes map[string]*ScopeV2
+	// Always and SSHAlways are the routes and machines, by name, whose
+	// questions offer Always (RouteV2.Always, SSHRouteV2.Always).
+	Always, SSHAlways map[string]bool
 }
 
 // ScopeV2 is what a version 2 route says that version 1 cannot.
@@ -241,6 +244,20 @@ func Lower(d DocumentV2) (*Lowered, error) {
 		}
 		l.Policy.Routes = append(l.Policy.Routes, r)
 		l.Scopes[name] = sc
+		if d.Routes[name].Always {
+			if l.Always == nil {
+				l.Always = map[string]bool{}
+			}
+			l.Always[name] = true
+		}
+	}
+	for name, m := range d.SSH {
+		if p, err := hostpattern.Compile(name); err == nil && p.Literal() && m.Always {
+			if l.SSHAlways == nil {
+				l.SSHAlways = map[string]bool{}
+			}
+			l.SSHAlways[name] = true
+		}
 	}
 	ssh, err := lowerSSH(d)
 	if err != nil {
@@ -557,7 +574,7 @@ func lowerSSH(d DocumentV2) ([]SSHRoute, error) {
 		if p.Literal() {
 			continue
 		}
-		if sshHostOnly(d.SSH[k]) || len(d.SSH[k].Commands) > 0 {
+		if sshHostOnly(d.SSH[k]) || len(d.SSH[k].Commands) > 0 || d.SSH[k].Always {
 			return nil, fmt.Errorf("ssh %s: a pattern is no machine, and sets only env, exec, writes, guarded, unmatched and ceiling", k)
 		}
 		patterns = append(patterns, pat{k, p})

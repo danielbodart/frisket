@@ -19,6 +19,17 @@
 //     Nothing on stdout leaves the status to answer; anything else there is
 //     the asker failing, so that an asker that says something frisket does
 //     not know never has it read as a yes;
+//   - a question with `always` set, and a `diff` beside it -- the
+//     session's project file, `path`, as it is, `old`, and with the one
+//     rule asked about added, `new` -- offers Always, and only such a
+//     question may be answered always: it admits the request, and the
+//     rule admits the same request for the rest of the session and is
+//     signed into the file. An asker that does not show the diff answers
+//     as ever;
+//   - a notice, `kind` "notice", is said rather than asked: its `text` is
+//     all of it, such as an Always whose rule was not saved. It is run as
+//     a question is, beside any question open, and its status and stdout
+//     are nobody's answer;
 //   - one question at a time, daemon-wide -- or as many as the daemon is
 //     told, askerConcurrent -- while one is open every other waits its
 //     turn, so a person never faces a pile of dialogs;
@@ -196,7 +207,7 @@ func (c *Command) Ask(ctx context.Context, q intercept.Question) (record.Answer,
 		answer = record.Refuse
 	}
 	if answer != "" {
-		return c.said(answer, stdout.String())
+		return c.said(q, answer, stdout.String())
 	}
 	if s := strings.TrimSpace(stderr.String()); s != "" {
 		return record.Refuse, fmt.Errorf("asker %s: %w: %s", c.path, err, s)
@@ -206,7 +217,7 @@ func (c *Command) Ask(ctx context.Context, q intercept.Question) (record.Answer,
 
 // said is the answer of an asker that exited 0 or 1, by status: what it
 // printed on stdout, if it printed anything, and the status otherwise.
-func (c *Command) said(status record.Answer, out string) (record.Answer, error) {
+func (c *Command) said(q intercept.Question, status record.Answer, out string) (record.Answer, error) {
 	if len(out) > maxStdout {
 		return record.Refuse, fmt.Errorf("asker %s: more than %d bytes on stdout, where one answer goes", c.path, maxStdout)
 	}
@@ -216,7 +227,43 @@ func (c *Command) said(status record.Answer, out string) (record.Answer, error) 
 	if a, ok := record.ParseAnswer(out); ok {
 		return a, nil
 	}
+	if strings.EqualFold(strings.TrimSpace(out), string(record.Always)) {
+		if q.Always {
+			return record.Always, nil
+		}
+		return record.Refuse, fmt.Errorf("asker %s: always on stdout, to a question that did not offer it", c.path)
+	}
 	return record.Refuse, fmt.Errorf("asker %s: %q on stdout is not allow, ask or refuse", c.path, out)
+}
+
+// noticeTimeout is how long a notice's asker has to show it.
+const noticeTimeout = 30 * time.Second
+
+// Notify runs the program with a notice, a Question of Kind "notice": not
+// in turn with the questions, since it waits for nobody, and with its
+// stdout ignored. The error is the program failing.
+func (c *Command) Notify(ctx context.Context, q intercept.Question) error {
+	q.Kind = intercept.KindNotice
+	doc, err := json.Marshal(q)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, noticeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.path)
+	cmd.Stdin = bytes.NewReader(doc)
+	stderr := &bounded{max: maxStderr}
+	cmd.Stdout, cmd.Stderr = &bounded{max: maxStdout}, stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+	cmd.WaitDelay = waitDelay
+	if err := cmd.Run(); err != nil {
+		if s := strings.TrimSpace(stderr.String()); s != "" {
+			return fmt.Errorf("asker %s: %w: %s", c.path, err, s)
+		}
+		return fmt.Errorf("asker %s: %w", c.path, err)
+	}
+	return nil
 }
 
 // bounded keeps the first max bytes written to it and discards the rest,

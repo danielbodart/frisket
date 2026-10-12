@@ -159,7 +159,7 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
 | **P2** | Signing core: `projpolicy`, public for chase (SSHSIG verify, allowed_signers parser, namespace, canonical JSON, mergePatch), courier unit, signer `policy-sign@` + raw refusal, galley `sign` block/diff/receipt/`redeem`, `frisket policy sign\|verify` | frisket, galley `wire/wire.go`, `daemon/` |
 | **P3** | Always on the host: signer and gate read the project policy via the courier and offer Always | `agentsrv.go:409-445`, galleyask, `gate.go` |
 | **P4a** (done) | frisket policy v2 (operations, class answers, ceiling, maps, `x-scope`, `check --layer project`), evaluated by frisket at request time | `policy/`, `internal/intercept/scope_v2.go`, `hostpattern/` |
-| **P4b** (pending, after P5) | live always-overlay in containers, asker `always`; flong `seccomp.syscalls` map, `x-scope` | `internal/ask`, `internal/intercept`, flong `decl-options.json` |
+| **P4b** (done) | live always-overlay in containers, asker `always`; flong `seccomp.syscalls` map, `x-scope` | `internal/ask`, `internal/intercept`, `internal/always`, flong `decl-options.json` |
 | **P5** (done) | chase: `chase.json` v2 sections, mergePatch replaces policydoc, signature replaces the approver state, `chase check\|schema\|fmt\|sign\|migrate`, `chase record apply` writes then signs | `internal/grant/{file,approve,launch}.go`, `internal/policydoc/*`, `lib/operations.nix` |
 | **P6** | nix-config: tiers as layers, `/etc/frisket/allowed_signers`, courier on, asker/approver to the sign flow | `features/chase/{tiers,asker,approver}.nix` |
 
@@ -218,6 +218,17 @@ Every rule key may be a pattern, in one grammar for every component, frisket's `
     - Strict's ceiling (§1.4, §1.5) applies to unauthenticated apps only: a route with no credential gets a `ceiling` refusing `writes`, `guarded` and `unmatched`. An authenticated app in strict is held by its tier's answers, and strict takes no grant.
     - SSH catalogue ids and `category:` names stay as `chase.apps.ssh.hosts.<name>` sugar, turned into `exec` answers by frisket's rule names with the catalogue operation under `commands`; `frisket.ssh.<machine>.exec` answers a tier's own machines directly.
     - The `sudo` section is shaped and checked (`exec` → `{runAs, answer}`) but not yet read by the gate.
+
+- frisket P4b, Always on the gateway's questions in containers ([routes.md](routes.md#always), [policy.md](policy.md#frisket-always-in-a-session)), on galley `fb4307b` and `a79ebab` (`--diff-path`, `--diff-old`, `--diff-new`, or `--diff=FILE|-` with the question's `diff` as JSON, and `--always`, on a `--question`, answered `always`):
+  - A question about an HTTP request, or an SSH command, on a version 2 route or machine marked `"always": true` offers Always: `always` and `diff`, the workspace's `chase.json` as it is and with the specific rule added -- the operation id, else `METHOD /exact/path`, under `frisket.routes.<route>.operations`; the SSH command's literal words under `frisket.ssh.<machine>.exec`, for one simple command of plain words. The workspace is flong's `$workspace`, which frisket holds for the session.
+  - Offered only where it would stand: the file absent (and no `chase.jsonc` beside it) or verifying and canonical; the rule merged over the session's document by `policy.CheckProjectLayer` admitting the same request (so a ceiling at ask, a Docker route, a request of several operations, a path a rule would read as a pattern and a recording's question get none).
+  - The asker contract gains `diff`, `always` and the answer `always`, taken only where offered, and a notice, `kind` "notice" with `text`, whose answer is nobody's.
+  - Answered always: the rule admits for the rest of the session at once (logged rule `always`); frisket's main process has the signer's `policy-sign@frisket` sign the new bytes with `approved`, checks the signature, and has the courier write the file and `.sig` with the digest it read. A failed sign or write leaves the request admitted for the session, logs `always` `not saved`, and puts a notice to the asker.
+  - The next launch is chase's: it merges the signed file's frisket section over the tier's document, so the rule admits unasked.
+  - What differs from §4:
+    - No receipt and no `redeem`: frisket's main process is trusted, under the threat model, as the signer already trusts it for a session's ssh logins, so the person's answer in its own question is the approval. The signer signs `approved` from frisket.service's main process unasked, refuses `approved` from anyone else, and still refuses frisket's main process anything else.
+    - Which sessions offer Always is the host's mark on each route and machine, `always` (scope `host`), rather than read off the tier: chase marks the routes a project answers in a tier that takes grants, and strict's never, so strict offers no Always whatever asks there.
+    - The courier, not frisket, writes the file, since frisket.service's home is read-only: `frisket.service` is one of its peers, as its user, when `services.frisket.always.enable` (on when the signer and the courier are).
 
 ## Appendix: why JSON, not ZON
 

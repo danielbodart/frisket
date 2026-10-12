@@ -40,7 +40,7 @@
         # and go-tpm with go-tpm-keyfiles for the signer's TPM keys.
         # vendorHash = null is a nice property
         # and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-BVoFCmPbyWvmPxSSpqT8Q3e05N7Dz9hruVSRg3m5Pnw=";
+        vendorHash = "sha256-0Q5louB/wSGO8LB8MbpbrKB2Vq8ZcJhJG7/iW5nyx8w=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has
@@ -467,6 +467,11 @@
 
           # frisket in flong's real shape, end to end, in two VMs.
           flong = pkgs.testers.runNixOSTest (import ./tests/flong.nix { inherit self flong; });
+
+          # Always on a session's question: answered, the session admits the
+          # rule at once and the signer and courier write the workspace's
+          # chase.json, which the next launch takes; strict offers none.
+          always = pkgs.testers.runNixOSTest (import ./tests/always.nix { inherit self flong; });
 
           # No login user may be in tss while the signer is enabled, however
           # the membership is spelled.

@@ -58,6 +58,9 @@ type Config struct {
 	// Policy and Workspace are the session's, for a question.
 	Policy    string
 	Workspace string
+	// Always is the session's, nil for none: what it was answered Always,
+	// and the offer of it on a question.
+	Always intercept.Always
 	// Log is the session's; it gets a line per command, and one for a
 	// connection that ran none.
 	Log *slog.Logger
@@ -75,6 +78,7 @@ type Handler struct {
 	recorder  *record.Recorder
 	policy    string
 	workspace string
+	always    intercept.Always
 	log       *slog.Logger
 	dial      Dialer
 }
@@ -108,6 +112,7 @@ func New(cfg Config) (*Handler, error) {
 		recorder:  cfg.Recorder,
 		policy:    cfg.Policy,
 		workspace: cfg.Workspace,
+		always:    cfg.Always,
 		log:       cfg.Log,
 		dial:      cfg.Dial,
 	}

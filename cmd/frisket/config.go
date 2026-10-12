@@ -36,6 +36,18 @@ type config struct {
 	RecordDir      string           `json:"recordDir"`
 	MaxConnections int              `json:"maxConnections"`
 	GitSigning     gitSigningConfig `json:"gitSigning"`
+	// Always is where an answer of Always is signed and written. None
+	// offers Always on no question.
+	Always *alwaysConfig `json:"always"`
+}
+
+// alwaysConfig is always.Config, as the module writes it: every field.
+type alwaysConfig struct {
+	Signer         string `json:"signer"`
+	Courier        string `json:"courier"`
+	AllowedSigners string `json:"allowedSigners"`
+	FileName       string `json:"fileName"`
+	Home           string `json:"home"`
 }
 
 type gitSigningConfig struct {
@@ -119,6 +131,18 @@ func (c *config) validate() error {
 	if len(c.GitSigning.Policies) > 0 && !filepath.IsAbs(c.GitSigning.Agent) {
 		return fmt.Errorf("gitSigning.policies needs gitSigning.agent, by absolute path; got %q", c.GitSigning.Agent)
 	}
+	if a := c.Always; a != nil {
+		for _, p := range []struct{ name, path string }{
+			{"signer", a.Signer}, {"courier", a.Courier}, {"allowedSigners", a.AllowedSigners}, {"home", a.Home},
+		} {
+			if !absClean(p.path) {
+				return fmt.Errorf("always.%s %q is not an absolute, clean path", p.name, p.path)
+			}
+		}
+		if a.FileName == "" || a.FileName != filepath.Base(a.FileName) || a.FileName == "." || a.FileName == ".." {
+			return fmt.Errorf("always.fileName %q is not a file's name", a.FileName)
+		}
+	}
 	return nil
 }
 
@@ -184,6 +208,19 @@ const schema = `{
           "uniqueItems": true,
           "items": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$" }
         }
+      }
+    },
+    "always": {
+      "description": "Where an answer of Always is signed and written: the rule asked about, into the session's workspace's project file. None offers Always on no question.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signer", "courier", "allowedSigners", "fileName", "home"],
+      "properties": {
+        "signer": { "description": "frisket-signer's agent socket, whose policy-sign@frisket signs the file.", "$ref": "#/$defs/path" },
+        "courier": { "description": "frisket-policy's socket, whose write replaces the file.", "$ref": "#/$defs/path" },
+        "allowedSigners": { "description": "What the file must verify against.", "$ref": "#/$defs/path" },
+        "fileName": { "description": "The project file's name.", "type": "string", "pattern": "^[^/]+$" },
+        "home": { "description": "The home a project's namespace is named from.", "$ref": "#/$defs/path" }
       }
     }
   },

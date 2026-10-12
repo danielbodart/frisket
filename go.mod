@@ -8,7 +8,7 @@ module github.com/danielbodart/frisket
 go 1.26.0
 
 require (
-	github.com/danielbodart/galley v0.27.19-0.20261012113032-e62b65fd5e18
+	github.com/danielbodart/galley v0.29.21-0.20261012161250-a79ebab9952e
 	github.com/foxboron/go-tpm-keyfiles v0.0.0-20260427185012-515ba073c4c1
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/go-tpm v0.9.9-0.20260124013517-8f8f42cba0de

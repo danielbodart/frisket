@@ -44,7 +44,7 @@ func (i *Interceptor) record(r *http.Request, ic *interceptedConn, v Verdict) st
 	res := decide(r.Context(), httpLine(ic, r, v), key, func(ctx context.Context) (recording.Answer, string, error) {
 		// The request's own context, which Decide's is: the question goes
 		// when the client does.
-		a, reason := RecordAnswer(i.askPerson(r, ic, v, true))
+		a, reason := RecordAnswer(i.askPerson(r, ic, v, true, AlwaysRule{}))
 		return a, reason, nil
 	})
 	switch {

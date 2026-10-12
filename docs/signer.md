@@ -98,7 +98,12 @@ absolute stops it starting; the build runs `frisket-signer check` on the file fi
 frisket's main process is always trusted, a forwarded sign (`ssh -A`) is
 always asked, and nothing is refused unasked but an SSHSIG in a
 `frisket-policy` namespace, which `check` also refuses as an `sshsig` key,
-and a `policy-sign` from frisket's main process or another user namespace.
+and a `policy-sign` from another user namespace, or from frisket's main
+process without `approved`. With `approved`, frisket's main process's
+`policy-sign` is signed unasked: it sends only a rule a person answered
+Always in its own question about a session's request, which showed the
+change ([routes.md](routes.md#always)); `approved` from anyone else is
+refused.
 
 ## What is asked
 
@@ -160,8 +165,10 @@ the diff against the bytes the old `.sig` verifies over (`-old FILE`, else
 git's `HEAD`), or against nothing, saying why, with Refuse and Allow once
 only, and on Allow `FILE.sig` is written. FILE must already be canonical
 (`frisket policy fmt`). It is refused unasked to frisket's main process,
-which serves sandboxes, and to a process in another user namespace; a
-sandbox's git signing socket refuses every extension in any case.
+which serves sandboxes, unless it sends the request `approved` -- a rule
+answered Always in its own question -- and to a process in another user
+namespace; a sandbox's git signing socket refuses every extension in any
+case.
 Allow once is the only choice for a sign ssh did not bind to a host, for an
 SSHSIG, for a program launched straight from `systemd --user` or the
 terminal server, and for a process chain cut short; galley shows the last

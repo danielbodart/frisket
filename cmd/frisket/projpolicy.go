@@ -2,13 +2,12 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/danielbodart/frisket/internal/agentsrv"
 	"github.com/danielbodart/frisket/projpolicy"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 const defaultAllowedSigners = "/etc/frisket/allowed_signers"
@@ -210,33 +208,7 @@ func gitHead(root, name string) []byte {
 }
 
 func policySign(sock string, req agentsrv.PolicySignRequest) ([]byte, error) {
-	contents, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	c, err := net.Dial("unix", sock)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-	out, err := agent.NewClient(c).Extension(agentsrv.PolicySignExtension, contents)
-	if errors.Is(err, agent.ErrExtensionUnsupported) {
-		return nil, fmt.Errorf("the agent at %s does not sign policies: it is not frisket-signer", sock)
-	}
-	if err != nil {
-		return nil, err
-	}
-	var resp agentsrv.PolicySignResponse
-	if len(out) < 1 || json.Unmarshal(out[1:], &resp) != nil {
-		return nil, fmt.Errorf("the agent's answer %q is not policy-sign's", out)
-	}
-	if resp.Error != "" {
-		return nil, fmt.Errorf("the signer: %s", resp.Error)
-	}
-	if resp.Sig == nil {
-		return nil, errors.New("the signer sent no signature")
-	}
-	return resp.Sig, nil
+	return agentsrv.PolicySign(context.Background(), sock, req)
 }
 
 // writeBeside replaces path with b through a temporary file beside it.

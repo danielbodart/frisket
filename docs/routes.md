@@ -315,6 +315,49 @@ refusal = {
 `{{message}}` is frisket's reason and the matched operation's summary --
 `frisket: refused: declined (Create a Namespace)` -- never the request's.
 
+### Always
+
+A version 2 route or SSH machine marked `"always": true` -- a field only the
+host sets, for a route whose answers a project's file is merged into, which
+chase marks and strict's tiers never are -- offers Always on its questions,
+when frisket's settings name the signer and the courier (`always` in
+`/etc/frisket/config.json`, which the module fills in when both are on). The
+question then also has:
+
+```json
+{"always": true,
+ "diff": {"path": "~/Projects/site/chase.json",
+          "old": "<the file as it is, or empty for none>",
+          "new": "<the file with the one rule added>"}}
+```
+
+The rule is the specific one asked about: the request's operation id, or
+failing one its `METHOD /exact/path`, under `frisket.routes.<route>.operations`;
+an SSH command's literal words, under `frisket.ssh.<machine>.exec`, for a
+command that is one simple command of plain words. It is offered only where
+it would stand: the session's workspace's file (`services.frisket.policy.fileName`)
+is absent or verifies and is canonical, with no `chase.jsonc`-style commented
+form beside an absent one; the rule merged over the session's document by
+`frisket check -layer project`'s own check admits the request, so no ceiling
+holds it at ask; and the question is not a recording's. A request holding
+several operations, a Docker route's, or a path a rule would read as a
+pattern is offered none.
+
+`always` on stdout, with exit 0 or 1, answers it, and only such a question may
+be answered so. galley shows both and prints it: `jq -c .diff | galley
+--question ... --diff=- --always`, the diff as JSON on stdin, which
+`systemd-run --user --pipe` passes on where a file in frisket's private
+`/tmp` would not reach. The request is admitted, and the rule admits what it
+names for the rest of the session at once, logged with rule `always`.
+Meanwhile frisket's main process has frisket-signer's `policy-sign@frisket`
+sign the new file, approved -- the answer was the approval, so the signer asks
+nothing more, and takes approved from no one else -- and the courier writes it
+and its `.sig` over the file as read; the next launch merges it. A sign or
+write that fails (the file changed meanwhile, say) leaves the request
+admitted for the session, logs `always` with `outcome` `not saved`, and puts a
+notice to the asker: `{"kind": "notice", "text": "…"}`, said rather than
+asked, its exit and stdout answering nothing.
+
 ## Version 2
 
 A document with `"version": 2` says all of the above in the shape every layer

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -240,8 +241,17 @@ func (c *channel) exec(r *ssh.Request) {
 		c.refuse(r, line, start, exitRefused)
 		return
 	case intercept.Ask:
+		rule, ok := c.alwaysRule(p.Command)
+		if ok && c.s.h.always != nil && c.s.h.always.Admits(rule) {
+			// Answered Always earlier in this session.
+			line.rule = intercept.RuleAlways
+			break
+		}
+		if !ok {
+			rule = intercept.AlwaysRule{}
+		}
 		line.asked = true
-		_, reason, rest := c.ask(p.Command, d, false)
+		_, reason, rest := c.ask(p.Command, d, false, rule)
 		if reason != "" {
 			line.decision, line.reason = intercept.DecisionRefused, reason
 			c.refuse(r, line, start, exitRefused)
@@ -395,7 +405,10 @@ func (c *channel) refuse(r *ssh.Request, line *execLine, start time.Time, status
 // ask puts the command to the asker with the start of its stdin, and
 // returns the answer and why it is refused, or "" and the stdin to send, the
 // preview first. A recording session's question says so.
-func (c *channel) ask(command string, d Decision, recorded bool) (record.Answer, string, io.Reader) {
+//
+// rule, when it has a Key, is offered Always where the session's Always
+// says it may be; a recording's question never is.
+func (c *channel) ask(command string, d Decision, recorded bool, rule intercept.AlwaysRule) (record.Answer, string, io.Reader) {
 	h := c.s.h
 	if h.asker == nil {
 		return record.Refuse, intercept.ReasonNobodyToAsk, nil
@@ -435,13 +448,54 @@ func (c *channel) ask(command string, d Decision, recorded bool) (record.Answer,
 		Record:     recorded,
 		ID:         record.ID(c.s.c.Session, record.KindSSH, c.recordKey(command)),
 	}
+	var save func()
+	if !recorded && rule.Key != "" && h.always != nil {
+		save = h.always.Offer(&q, rule)
+	}
 	answer, reason, err := intercept.AskAbout(c.ctx, h.asker, q)
 	if err != nil {
 		// Its own line, not the command's: the error is the asker's, and
 		// may quote whatever it was sent.
 		h.log.Error("ask", "session", c.s.c.Session, "conn", c.s.c.ID, "channel", c.n, "route", rt.Name, "error", err.Error())
 	}
+	if answer == record.Always && reason == "" && save != nil {
+		save()
+	}
 	return answer, reason, rest
+}
+
+// alwaysRule is the rule an Always would write for command: the literal
+// rule naming its words, for a command that is one simple command of plain
+// words, which a rule of the same words matches and nothing else does.
+func (c *channel) alwaysRule(command string) (intercept.AlwaysRule, bool) {
+	cmds, ok := c.s.route.rules.Parse(command)
+	if !ok || len(cmds) != 1 || len(cmds[0].Words) == 0 {
+		return intercept.AlwaysRule{}, false
+	}
+	for _, w := range cmds[0].Words {
+		if !plainWord(w) {
+			return intercept.AlwaysRule{}, false
+		}
+	}
+	return intercept.AlwaysRule{Route: c.s.route.Name, SSH: true, Key: strings.Join(cmds[0].Words, " "), Command: command}, true
+}
+
+// plainWord is a word a rule names literally: execrule's plain alphabet,
+// and so no * or [ that a rule would read as a pattern.
+func plainWord(w string) bool {
+	if w == "" {
+		return false
+	}
+	for i := 0; i < len(w); i++ {
+		b := w[i]
+		switch {
+		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		case strings.IndexByte("_@%+=:,./-", b) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // record decides a command the rules refuse or ask about, in a recording
@@ -457,7 +511,7 @@ func (c *channel) record(command string, d Decision) (string, io.Reader) {
 		decide = c.s.h.recorder.DecideEach
 	}
 	res := decide(c.ctx, c.recordLine(command, d), c.recordKey(command), func(context.Context) (record.Answer, string, error) {
-		a, reason, r := c.ask(command, d, true)
+		a, reason, r := c.ask(command, d, true, intercept.AlwaysRule{})
 		rest = r
 		a, reason = intercept.RecordAnswer(a, reason)
 		return a, reason, nil

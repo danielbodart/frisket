@@ -42,10 +42,15 @@ const (
 	Allow  Answer = "allow"
 	Ask    Answer = "ask"
 	Refuse Answer = "refuse"
+	// Always admits the subject now and answers it allow from now on, in
+	// the session and in its project's file. An asker says it only where
+	// the question offered it, never to a recording's; ParseAnswer does
+	// not read it.
+	Always Answer = "always"
 )
 
 // Admits is whether the subject goes ahead now.
-func (a Answer) Admits() bool { return a == Allow || a == Ask }
+func (a Answer) Admits() bool { return a == Allow || a == Ask || a == Always }
 
 // ParseAnswer reads an answer, in any case, around any space; ok is false
 // for anything else, the empty string included.

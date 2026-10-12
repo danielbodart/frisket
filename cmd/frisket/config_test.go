@@ -25,7 +25,9 @@ func TestAConfigReadsEverySetting(t *testing.T) {
 		"policyRoots": ["/etc/frisket/policies", "/run/user/1000/chase"],
 		"asker": "/nix/store/x-ask", "askerConcurrent": 4, "askerPerSession": 2,
 		"recordDir": "/var/lib/frisket/records", "maxConnections": 64,
-		"gitSigning": {"agent": "/run/frisket-signer/agent", "policies": ["trusted", "work"]}
+		"gitSigning": {"agent": "/run/frisket-signer/agent", "policies": ["trusted", "work"]},
+		"always": {"signer": "/run/frisket-signer/agent", "courier": "/run/frisket-policy/sock",
+			"allowedSigners": "/etc/frisket/allowed_signers", "fileName": "chase.json", "home": "/home/dan"}
 	}`)
 	c, err := loadConfig(path)
 	if err != nil {
@@ -37,6 +39,8 @@ func TestAConfigReadsEverySetting(t *testing.T) {
 		Asker:       "/nix/store/x-ask", AskerConcurrent: 4, AskerPerSession: 2,
 		RecordDir: "/var/lib/frisket/records", MaxConnections: 64,
 		GitSigning: gitSigningConfig{Agent: "/run/frisket-signer/agent", Policies: []string{"trusted", "work"}},
+		Always: &alwaysConfig{Signer: "/run/frisket-signer/agent", Courier: "/run/frisket-policy/sock",
+			AllowedSigners: "/etc/frisket/allowed_signers", FileName: "chase.json", Home: "/home/dan"},
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("got %+v", c)
@@ -77,6 +81,10 @@ func TestAConfigThatWouldSilentlyNotApplyIsRefused(t *testing.T) {
 		`{"gitSigning": {"agent": "/a", "policies": ["trusted", "trusted"]}}`,
 		`{"gitSigning": {"agent": "/a", "policy": ["trusted"]}}`,
 		`{} {}`,
+		`{"always": {}}`,
+		`{"always": {"signer": "/a", "courier": "/b", "allowedSigners": "/c", "fileName": "chase.json", "home": "home"}}`,
+		`{"always": {"signer": "/a", "courier": "/b", "allowedSigners": "/c", "fileName": "x/chase.json", "home": "/h"}}`,
+		`{"always": {"signer": "/a", "courier": "/b", "allowedSigners": "/c", "fileName": "chase.json", "home": "/h", "extra": 1}}`,
 	} {
 		if err := runCheck([]string{"-config", writeConfig(t, bad)}); err == nil {
 			t.Errorf("%s was accepted", bad)

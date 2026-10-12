@@ -28,6 +28,7 @@ import (
 	"github.com/danielbodart/frisket/hostpattern"
 	"github.com/danielbodart/frisket/policy"
 
+	"github.com/danielbodart/frisket/internal/always"
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/credential"
 	"github.com/danielbodart/frisket/internal/dns"
@@ -108,6 +109,9 @@ type Deps struct {
 	// RecordDir is where a recording document's sink may be: directly in
 	// it. Empty refuses every document with a sink.
 	RecordDir string
+	// Always offers Always on a version 2 document's questions, for its
+	// routes and machines marked always. Nil offers it on none.
+	Always *always.Writer
 
 	// checking builds a document without watching its credential files.
 	checking bool
@@ -184,7 +188,7 @@ func (s *Store) Open(path string) (serve.Policy, func(), error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("policy %s: %w", path, err)
 		}
-		p, closers, err := build(doc, s.deps, s.up)
+		p, closers, err := build(doc, b, s.deps, s.up)
 		if err != nil {
 			return nil, nil, fmt.Errorf("policy %s: %w", path, err)
 		}
@@ -255,7 +259,7 @@ func CheckDocument(b []byte, d Deps) error {
 	if err != nil {
 		return err
 	}
-	_, closers, err := build(doc, s.deps, s.up)
+	_, closers, err := build(doc, b, s.deps, s.up)
 	return errors.Join(err, closeAll(closers))
 }
 
@@ -316,7 +320,10 @@ func closeAll(closers []func() error) error {
 
 // build builds one policy and everything behind it, returning what closes
 // it. Nothing is left running if it fails.
-func build(doc *policy.Lowered, d Deps, up dns.Exchanger) (_ serve.Policy, closers []func() error, err error) {
+//
+// raw is the document's bytes, which a session's Always merges a rule
+// over to see that it stands.
+func build(doc *policy.Lowered, raw []byte, d Deps, up dns.Exchanger) (_ serve.Policy, closers []func() error, err error) {
 	name, p := doc.Name, doc.Policy
 	defer func() {
 		if err != nil {
@@ -489,9 +496,15 @@ func build(doc *policy.Lowered, d Deps, up dns.Exchanger) (_ serve.Policy, close
 		if err != nil {
 			return serve.Handlers{}, err
 		}
+		// The session's Always, where its document offers it: the rules
+		// answered Always in it, kept for as long as it runs.
+		var alw intercept.Always
+		if as := d.Always.Session(s.Name, name, s.Params["workspace"], raw, doc, RouteScope); as != nil {
+			alw = as
+		}
 		h := serve.Handlers{
 			Egress:    eg,
-			Intercept: ic.For(ca, s.Params["workspace"]),
+			Intercept: ic.ForSession(ca, s.Params["workspace"], alw),
 			DNS:       srv,
 			Authority: authority,
 			CACert:    ca.CertPEM(),
@@ -516,7 +529,7 @@ func build(doc *policy.Lowered, d Deps, up dns.Exchanger) (_ serve.Policy, close
 		// not steered, until it is relaunched; one it has lost falls to
 		// Egress, which refuses a private address structurally.
 		if len(shells) > 0 {
-			if h.SSH, h.SSHRoutes, err = sessionSSH(shells, ca, d.Asker, rec, name, s.Params["workspace"], log); err != nil {
+			if h.SSH, h.SSHRoutes, err = sessionSSH(shells, ca, d.Asker, rec, name, s.Params["workspace"], alw, log); err != nil {
 				return serve.Handlers{}, err
 			}
 		}
@@ -759,7 +772,7 @@ func sshRoutes(p policy.Policy, hosts []string) ([]*sshroute.Route, error) {
 // record holds it -- so a session restored from its record has the SSH CA
 // its sandbox's known_hosts names, with nothing added to the record; the host
 // key under it is new each time, and trusted all the same.
-func sessionSSH(routes []*sshroute.Route, ca *intercept.CA, asker intercept.Asker, rec *record.Recorder, policyName, workspace string, log *slog.Logger) (serve.SSHHandler, *serve.SSHRoutes, error) {
+func sessionSSH(routes []*sshroute.Route, ca *intercept.CA, asker intercept.Asker, rec *record.Recorder, policyName, workspace string, alw intercept.Always, log *slog.Logger) (serve.SSHHandler, *serve.SSHRoutes, error) {
 	key, err := ca.KeyPKCS8()
 	if err != nil {
 		return nil, nil, fmt.Errorf("ssh: the session's CA key: %w", err)
@@ -776,6 +789,7 @@ func sessionSSH(routes []*sshroute.Route, ca *intercept.CA, asker intercept.Aske
 		Recorder:  rec,
 		Policy:    policyName,
 		Workspace: workspace,
+		Always:    alw,
 		Log:       log,
 	})
 	if err != nil {

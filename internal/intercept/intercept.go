@@ -178,6 +178,14 @@ type Question struct {
 	// ID names what is asked about within its session: the same for a
 	// second asking of the same subject, different for any other.
 	ID string `json:"id"`
+	// Diff and Always offer Always: the session's project file as it is
+	// and as answering always would write it, the one rule added. An
+	// asker that shows them may answer always; one that does not answers
+	// as ever.
+	Diff   *Diff `json:"diff,omitempty"`
+	Always bool  `json:"always,omitempty"`
+	// Text is a notice's, Kind "notice": what is said, all of it.
+	Text string `json:"text,omitempty"`
 }
 
 // KindEgress is a Question's Kind for a recording session's connection.
@@ -529,24 +537,30 @@ func (i *Interceptor) lookup(name string) *route {
 // For is the handler for one session's connections: the routes are the
 // policy's, the certificates are minted from ca, the session's own.
 func (i *Interceptor) For(ca *CA, workspace string) steer.Handler {
-	return sessionHandler{i: i, ca: ca, workspace: workspace}
+	return i.ForSession(ca, workspace, nil)
+}
+
+// ForSession is For with the session's Always, nil for none.
+func (i *Interceptor) ForSession(ca *CA, workspace string, always Always) steer.Handler {
+	return sessionHandler{i: i, ca: ca, workspace: workspace, always: always}
 }
 
 type sessionHandler struct {
 	i         *Interceptor
 	ca        *CA
 	workspace string
+	always    Always
 }
 
 func (h sessionHandler) ServeConn(ctx context.Context, c *steer.Conn) {
-	h.i.serveConn(ctx, c, h.ca, h.workspace)
+	h.i.serveConn(ctx, c, h.ca, h.workspace, h.always)
 }
 
 // serveConn terminates TLS on a steered connection and hands it to the HTTP
 // server, returning when the connection is finished. The session's slot is
 // held for exactly that long.
-func (i *Interceptor) serveConn(ctx context.Context, c *steer.Conn, ca *CA, workspace string) {
-	ic := &interceptedConn{Conn: c, session: c.Session, workspace: workspace, id: c.ID, dst: c.Orig, ca: ca, done: make(chan struct{})}
+func (i *Interceptor) serveConn(ctx context.Context, c *steer.Conn, ca *CA, workspace string, always Always) {
+	ic := &interceptedConn{Conn: c, session: c.Session, workspace: workspace, always: always, id: c.ID, dst: c.Orig, ca: ca, done: make(chan struct{})}
 	defer ic.Close()
 
 	tc := tls.Server(ic, i.tlsConfig)
@@ -787,7 +801,16 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.refuse(lw, status, v.Reason, v.Operation)
 		return
 	case Ask:
-		if reason := i.ask(r, ic, v); reason != "" {
+		rule, ok := alwaysRule(rt, r, decided, v)
+		if ok && ic.always != nil && ic.always.Admits(rule) {
+			// Answered Always earlier in this session.
+			rec.rule = RuleAlways
+			break
+		}
+		if !ok {
+			rule = AlwaysRule{}
+		}
+		if reason := i.ask(r, ic, v, rule); reason != "" {
 			rec.refuse(reason)
 			rt.refuse(lw, http.StatusForbidden, reason, v.Operation)
 			return
@@ -854,18 +877,21 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 // it was admitted. Before the credential is looked at: what the person is
 // asked is whether this request may go, and that does not depend on whether
 // the token has since expired.
-func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict) string {
+func (i *Interceptor) ask(r *http.Request, ic *interceptedConn, v Verdict, rule AlwaysRule) string {
 	if i.asker == nil {
 		return ReasonNobodyToAsk
 	}
-	_, reason := i.askPerson(r, ic, v, false)
+	_, reason := i.askPerson(r, ic, v, false, rule)
 	return reason
 }
 
 // askPerson puts a request to the Asker, the start of its body with it, and
 // returns the answer, or why there was none and it is refused. A recording
 // session's question says so.
-func (i *Interceptor) askPerson(r *http.Request, ic *interceptedConn, v Verdict, recorded bool) (recording.Answer, string) {
+//
+// rule, when it has a Key, is offered Always, where the session's Always
+// says it may be: a recording's question never is.
+func (i *Interceptor) askPerson(r *http.Request, ic *interceptedConn, v Verdict, recorded bool, rule AlwaysRule) (recording.Answer, string) {
 	q := Question{
 		Session:    ic.session,
 		Workspace:  ic.workspace,
@@ -891,11 +917,18 @@ func (i *Interceptor) askPerson(r *http.Request, ic *interceptedConn, v Verdict,
 		q.BodyLength = max(r.ContentLength, 0)
 		r.Body = rest
 	}
+	var save func()
+	if !recorded && rule.Key != "" && ic.always != nil {
+		save = ic.always.Offer(&q, rule)
+	}
 	answer, reason, err := AskAbout(r.Context(), i.asker, q)
 	if err != nil {
 		// Said in the log where it happened, not in the request's line: the
 		// error is the asker's, and may quote whatever it was sent.
 		i.log.Error("ask", "session", ic.session, "conn", ic.id, "route", ic.route.Name, "error", err.Error())
+	}
+	if answer == recording.Always && reason == "" && save != nil {
+		save()
 	}
 	return answer, reason
 }
@@ -1251,6 +1284,7 @@ type interceptedConn struct {
 	net.Conn
 	session   string
 	workspace string
+	always    Always
 	id        uint64
 	dst       netip.AddrPort
 	ca        *CA

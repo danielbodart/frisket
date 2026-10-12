@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/danielbodart/frisket/internal/agentsrv"
+	"github.com/danielbodart/frisket/internal/always"
 	"github.com/danielbodart/frisket/internal/ask"
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/dns"
@@ -282,6 +283,11 @@ func runServe(argv []string) error {
 			return err
 		}
 		deps.Asker = asker
+		if a := c.Always; a != nil {
+			deps.Always = always.New(always.Config{
+				Signer: a.Signer, Courier: a.Courier, AllowedSigners: a.AllowedSigners, FileName: a.FileName, Home: a.Home,
+			}, log, asker.Notify)
+		}
 	}
 	for _, name := range c.GitSigning.Policies {
 		ln, err := listenGitSigning(gitSigningDir, name)

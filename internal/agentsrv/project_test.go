@@ -16,6 +16,7 @@ import (
 	"github.com/danielbodart/frisket/hostpattern"
 	"github.com/danielbodart/frisket/internal/courier"
 	"github.com/danielbodart/frisket/internal/galleyask"
+	"github.com/danielbodart/frisket/internal/peer"
 	"github.com/danielbodart/frisket/projpolicy"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -539,6 +540,41 @@ func TestPolicySignRefusesWhatItMayNotSign(t *testing.T) {
 	if r := policySign(t, h.dial(tab()), good); r.Error == "" {
 		t.Errorf("no policy: %+v", r)
 	}
+}
+
+// frisket's main process sends a rule a person answered Always in its own
+// question as approved, and it is signed unasked; nobody else's approved
+// is taken, and frisket's main process sends nothing else.
+func TestPolicySignSignsFrisketsApprovedUnasked(t *testing.T) {
+	fc := &fakeCourier{}
+	h := newHarness(t, 1, withPolicy(fc))
+	ns := "frisket-policy:~/Projects/foo"
+	approved := PolicySignRequest{Root: foo, Name: "chase.json", New: []byte(project(`{"a.example": "allow"}`)), Approved: true}
+	signers, _ := projpolicy.ReadAllowedSigners(h.s.Policy.AllowedSigners)
+
+	h.frisket.Store(true)
+	r := policySign(t, h.dial(claude(100)), approved)
+	if _, err := projpolicy.Verify(approved.New, r.Sig, ns, signers, "dan", time.Now()); err != nil || r.Error != "" {
+		t.Errorf("approved: %+v: %v", r, err)
+	}
+	h.nothingAsked()
+	if !strings.Contains(h.log.String(), `"source":"always"`) {
+		t.Errorf("log: %s", h.log.String())
+	}
+	// Its canonical form and namespace are held to as anyone's are.
+	bad := approved
+	bad.New = []byte(`{"version":2}`)
+	if r := policySign(t, h.dial(claude(100)), bad); r.Error == "" {
+		t.Errorf("not canonical: %+v", r)
+	}
+
+	h.frisket.Store(false)
+	for _, who := range []*peer.Requester{tab(), claude(100)} {
+		if r := policySign(t, h.dial(who), approved); r.Sig != nil || !strings.Contains(r.Error, "only frisket's main process") {
+			t.Errorf("approved from another: %+v", r)
+		}
+	}
+	h.nothingAsked()
 }
 
 // A policy's git signing socket, the only one a sandbox is given, refuses

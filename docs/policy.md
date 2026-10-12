@@ -106,7 +106,8 @@ It answers only the system units its config names, each as the user it
 names: a caller must have that uid and be in that unit's cgroup (by inode,
 under `system.slice`). The signer adds `frisket-signer.service` as
 `ssh-signer` and the gate `frisket-sudo.service` as `sudo-gate` when they are
-enabled.
+enabled, and frisket's own module `frisket.service` as its user when Always
+is on, to write the rule a session's question was answered Always with.
 
 It is trusted for one thing, which project a process is in. It cannot forge a
 policy, since every reader verifies the signature, and it writes only one
@@ -213,6 +214,36 @@ alone one label, `*` within a label any run of it, `**` as the first label
 one or more. See [signer.md](signer.md#what-is-asked) for the order and
 the precedence.
 
+## frisket: Always in a session
+
+A session's question about an HTTP request or an SSH command, on a version 2
+route or machine its document marks `always`, offers Always with the diff of
+its workspace's file -- the workspace frisket was given by flong's hook,
+`$workspace`, which the session cannot choose -- adding the specific rule:
+the operation id or `METHOD /exact/path` under `frisket.routes.<route>.operations`,
+or the command's literal words under `frisket.ssh.<machine>.exec`. It is
+offered when the file is absent or verifies, against the allowed signers in
+the workspace's namespace, and is canonical, and when the rule, merged over
+the session's document as `check -layer project` merges, admits the request.
+See [routes.md](routes.md#always) for the question and the answer.
+
+Answered always, the rule admits for the rest of the session at once, and
+frisket's main process asks the signer's `policy-sign@frisket` to sign the
+new bytes with `approved` set: the signer trusts frisket's main process, as
+it does for a session's ssh logins, so the person's answer in that question
+is the approval and nothing more is asked. The signer refuses `approved` from
+anyone else, and from frisket's main process refuses anything without it.
+frisket checks the signature against the allowed signers and has the courier
+write the file and its `.sig` with the digest it read: frisket.service is one
+of the courier's peers, as its user, since its own home is read-only to it.
+A failed sign or write is logged as `always` `not saved` and said in a notice
+through the asker; the request stays admitted for the session.
+
+`services.frisket.always.enable` is on when the signer and the courier are,
+for frisket's own user, and writes `always` into `/etc/frisket/config.json`:
+the signer's and courier's sockets, the allowed signers, the file's name and
+the home a namespace is named from.
+
 ## frisket: the policy document, version 2
 
 A project's `frisket` section is a layer of the session's policy document,
@@ -247,12 +278,12 @@ A field only the host may set has `"x-scope": "host"` in the schema: the
 document's `name`, `record` and `ceiling`; a route's `host`, `upstream`,
 `upstreamCA`, `credentialFile`, `credentialJSON`, `header`, `basicUser`,
 `placeholder`, `refusal`, `sessionKey` and `docker`, which say where a request
-goes and what it carries, and its `paths`, `graphql`, `git`, `encodedSlashes`
+goes and what it carries, `always`, and its `paths`, `graphql`, `git`, `encodedSlashes`
 and `ceiling`, which say what a request is and so which class answers it and
 which ceiling holds it -- a project that could reclassify a guarded operation
 could lift it past its ceiling; an SSH machine's `address`, `user`, `hostKeys`,
-`agent`, `keyFile`, `passwordFile`, `identity`, `shell`, `commands` and
-`ceiling`. A project answers: `allow`, `lan`, `operations`, `exec`, `env`,
+`agent`, `keyFile`, `passwordFile`, `identity`, `shell`, `commands`,
+`always` and `ceiling`. A project answers: `allow`, `lan`, `operations`, `exec`, `env`,
 `writes`, `guarded`, `unmatched`.
 
 ```

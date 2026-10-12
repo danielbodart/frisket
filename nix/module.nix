@@ -5,10 +5,14 @@
 # DynamicUser can do neither that nor anything else that user can. It holds
 # nothing that user does not already have, and systemd takes the rest away.
 self:
-{ config, lib, pkgs, utils, ... }:
+{ config, options, lib, pkgs, utils, ... }:
 
 let
   cfg = config.services.frisket;
+  # frisket-signer and the courier, each enabled by its own module, which
+  # this one may be imported without.
+  signerOn = config.services.frisket.signer.enable or false;
+  courierOn = config.services.frisket.policy.courier.enable or false;
   inherit (lib) mkOption types;
 
   # A session stores its four listeners and its record: one sealed memfd.
@@ -36,6 +40,18 @@ let
         recordDir = "/var/lib/frisket/records";
       }
       // lib.optionalAttrs (cfg.asker != null) { inherit (cfg) asker; }
+      // lib.optionalAttrs cfg.always.enable {
+        # Always, on a question a route marked `always` asks: the rule
+        # signed by the signer's policy-sign@frisket, approved, and
+        # written into the session's workspace by the courier.
+        always = {
+          signer = "/run/frisket-signer/agent";
+          courier = "/run/frisket-policy/sock";
+          allowedSigners = "/etc/frisket/allowed_signers";
+          inherit (config.services.frisket.policy) fileName;
+          home = config.users.users.${cfg.user}.home;
+        };
+      }
       // lib.optionalAttrs (gitSigning != [ ]) {
         gitSigning = { inherit (cfg.gitSigning) agent; policies = gitSigning; };
       });
@@ -632,6 +648,21 @@ in
       '';
     };
 
+    always.enable = mkOption {
+      type = types.bool;
+      default = signerOn && courierOn;
+      defaultText = lib.literalExpression "config.services.frisket.signer.enable && config.services.frisket.policy.courier.enable";
+      description = ''
+        Offer Always on a question a version 2 document's route or SSH
+        machine marked `always` asks, where the session's workspace's
+        project file (`services.frisket.policy.fileName`) is absent or
+        verifies: answered always, the rule admits the request for the rest
+        of the session at once, and frisket-signer signs it into the file,
+        unasked, since the answer was the approval, and the courier writes
+        it. Needs the signer and the courier, for `user`'s projects.
+      '';
+    };
+
     policyRoots = mkOption {
       type = types.listOf (types.strMatching "/.*");
       default = [ ];
@@ -678,10 +709,17 @@ in
         recorded as one to ask about -- zenity's `--extra-button=Ask` prints
         its label and exits 1 -- and a connection to a name the policy does
         not allow is asked about with `kind` "egress", `host` the name and
-        `address` the ip:port. Everything but `operation` is the
-        workload's choosing: show it as the request, never as prose, and
-        escape it for whatever renders it. Null: everything a route asks
-        about is refused.
+        `address` the ip:port. A question with `always` set offers Always
+        (`always.enable`): `diff` is the session's project file, its `path`
+        as `~/…`, `old` as it is (empty for none) and `new` with the one rule
+        added; show the diff, and `always` on stdout (exit 0 or 1) answers
+        it, which only such a question may be -- galley's `--diff=-`, the
+        diff as JSON on stdin, and `--always` do all of it. A notice,
+        `kind` "notice", is said, not asked: show its `text`, such as an
+        Always whose rule was not saved; its exit and stdout answer nothing.
+        Everything but `operation` is the workload's choosing: show it as
+        the request, never as prose, and escape it for whatever renders it.
+        Null: everything a route asks about is refused.
       '';
     };
 
@@ -856,6 +894,11 @@ in
         };
       }
     ))
+    # The courier writes the rule Always signs: frisket's main process is
+    # one of its peers, as its user.
+    (lib.optionalAttrs (options.services.frisket ? policy) {
+      services.frisket.policy.courier.peers = lib.mkIf (cfg.enable && cfg.always.enable) { "frisket.service" = cfg.user; };
+    })
     (lib.mkIf cfg.enable {
       assertions = [
         {
@@ -865,6 +908,12 @@ in
         {
           assertion = gitSigning == [ ] || cfg.gitSigning.agent != null;
           message = "services.frisket.policies.{${lib.concatStringsSep "," gitSigning}}.gitSigning needs services.frisket.gitSigning.agent.";
+        }
+        {
+          assertion = !cfg.always.enable || (signerOn && courierOn
+            && config.services.frisket.policy.courier.forUser == cfg.user
+            && config.services.frisket.signer.forUser == cfg.user);
+          message = "services.frisket.always needs frisket-signer and the courier, both for services.frisket.user (${cfg.user}): the signer signs the rule and the courier writes it into ${cfg.user}'s project.";
         }
       ] ++ map
         (name: {
