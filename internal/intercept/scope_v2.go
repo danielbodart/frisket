@@ -1,6 +1,9 @@
 package intercept
 
-import "slices"
+import (
+	"net/url"
+	"slices"
+)
 
 // decideV2 decides a request by a version 2 scope's paths, after git and
 // GraphQL have had theirs, as decide does a version 1 scope's.
@@ -191,4 +194,58 @@ func (d v2Decision) verdict() Verdict {
 		return d.decider.docker.verdict()
 	}
 	return Verdict{Outcome: Admit, Reason: "path", Operation: op}
+}
+
+// Answered is what a scope answers one request, before anything is read of
+// its body.
+type Answered struct {
+	Outcome Outcome
+	// Reason is which part of the scope decided, or why it refused.
+	Reason string
+	// Operation is the id of the operation shown, "" for none.
+	Operation string
+	// Deferred is what still decides, from the body or the daemon: "graphql"
+	// or "docker"; "" for nothing.
+	Deferred string
+}
+
+// Answer is what s answers method and target, a path and query as a
+// request line has them, as a route's scope would at the request, but for
+// what its body or a Docker daemon still decides: how whoever writes a
+// route's answers tests them, by frisket's own reading of a request.
+func Answer(s Scope, method, target string) (Answered, error) {
+	c, err := compileScope(s)
+	if err != nil {
+		return Answered{}, err
+	}
+	u, err := url.ParseRequestURI(target)
+	if err != nil {
+		return Answered{}, err
+	}
+	v := c.decide(method, u)
+	a := Answered{Outcome: v.Outcome, Reason: v.Reason}
+	if v.Operation != nil {
+		a.Operation = v.Operation.ID
+	}
+	switch d := v.deferred.(type) {
+	case *compiledGraphQL:
+		a.Deferred = "graphql"
+	case *dockerRule:
+		a.Deferred = "docker"
+		if d.operation != nil {
+			a.Operation = d.operation.ID
+		}
+	}
+	return a, nil
+}
+
+// String is the outcome in the words a document's answers are written in.
+func (o Outcome) String() string {
+	switch o {
+	case Admit:
+		return "allow"
+	case Ask:
+		return "ask"
+	}
+	return "refuse"
 }

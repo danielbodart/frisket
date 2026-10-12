@@ -1,0 +1,50 @@
+{
+  "name": "github",
+  "allow": ["github.com", "api.github.com"],
+  "routes": [
+    {
+      "name": "github",
+      "host": "github.com",
+      "upstream": "https://github.com",
+      "credentialFile": "/run/secrets/gh-token",
+      "placeholder": "proxy-injected",
+      "basicUser": "x-access-token",
+      "git": {"repos": ["owner/repo", "other/thing"], "push": "ask"},
+      "paths": [{"methods": ["GET", "HEAD"], "prefix": "/"}]
+    },
+    {
+      "name": "api",
+      "host": "api.github.com",
+      "upstream": "https://api.github.com",
+      "credentialFile": "/run/secrets/gh-token",
+      "placeholder": "proxy-injected",
+      "unmatched": "ask",
+      "paths": [
+        {"methods": ["GET", "HEAD"], "prefix": "/"},
+        {"methods": ["POST"], "path": "/repos/*/*/pulls",
+         "operation": {"id": "pulls/create", "summary": "Create a pull request", "class": "write", "category": "pulls"}},
+        {"methods": ["PATCH"], "path": "/repos/*/*/pulls/*", "ask": true,
+         "operation": {"id": "pulls/update", "summary": "Update a pull request", "class": "write", "category": "pulls"}},
+        {"methods": ["DELETE"], "path": "/repos/*/*", "refuse": true,
+         "operation": {"id": "repos/delete", "summary": "Delete a repository", "class": "guarded", "category": "repos"}},
+        {"methods": ["POST"], "path": "/repos/*/*/issues", "ask": true,
+         "operation": {"id": "issues/create", "summary": "Create an issue", "class": "write", "category": "issues"}},
+        {"methods": ["GET"], "prefix": "/user/keys", "refuse": true},
+        {"methods": ["POST"], "path": "/repos/me/app/dispatches", "ask": true}
+      ],
+      "graphql": [
+        {
+          "path": "/graphql",
+          "query": {"operation": {"id": "graphql-query", "summary": "A GraphQL query", "class": "read"}},
+          "mutations": [
+            {"field": "closePullRequest", "ask": true,
+             "operation": {"id": "closePullRequest", "summary": "Close a pull request.", "class": "write", "category": "pulls"}},
+            {"field": "deleteRepository", "refuse": true},
+            {"field": "addStar"}
+          ],
+          "unmatched": "ask"
+        }
+      ]
+    }
+  ]
+}

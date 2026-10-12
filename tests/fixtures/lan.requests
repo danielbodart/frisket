@@ -1,0 +1,6 @@
+name nas.home.arpa
+name printer.lan
+name pypi.org
+name other.lan
+http metadata GET /computeMetadata/v1/
+http metadata POST /x

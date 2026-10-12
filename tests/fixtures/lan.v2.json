@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "lan",
+  "allow": {"nas.home.arpa": true, "printer.lan": true, "pypi.org": true, "metadata.example.internal": true},
+  "lan": {"nas.home.arpa": {"ports": [445, 139]}, "printer.lan": {}},
+  "routes": {
+    "metadata": {"host": "metadata.example.internal", "upstream": "https://metadata.example.internal",
+     "operations": {"GET /**": "allow"}}
+  }
+}

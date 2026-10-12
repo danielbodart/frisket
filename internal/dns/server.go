@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/danielbodart/frisket/hostpattern"
 	"github.com/danielbodart/frisket/internal/steer"
 )
 
@@ -97,7 +99,10 @@ type Config struct {
 	// its sessions reach on the local network. egress admits a private,
 	// unique-local or link-local address only from LANResolved, and only
 	// for a name and port the document names. Nil for a document without.
-	LAN         map[string]bool
+	LAN map[string]bool
+	// LANPatterns are a version 2 document's lan keys that are patterns:
+	// a name one matches is a lan name as one in LAN is.
+	LANPatterns []hostpattern.Pattern
 	LANResolved Recorder
 	// OnRefused is told each name refused as not allowed, with no lookup:
 	// a recording session that refuses whatever its policy does, which
@@ -460,7 +465,8 @@ func (s *Server) handle(ctx context.Context, req []byte, l *line, udp bool) []by
 	if unlisted {
 		l.decision, set = DecisionUnlisted, s.cfg.Unlisted
 	}
-	lan := !unlisted && s.cfg.LANResolved != nil && s.cfg.LAN[name]
+	lan := !unlisted && s.cfg.LANResolved != nil && (s.cfg.LAN[name] ||
+		slices.ContainsFunc(s.cfg.LANPatterns, func(p hostpattern.Pattern) bool { return p.Match(name) }))
 	for _, a := range chainAddrs(q.Name, m.Answers) {
 		set.Record(name, a.addr, time.Duration(a.ttl)*time.Second, l.id)
 		if lan {

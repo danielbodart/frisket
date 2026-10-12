@@ -1,0 +1,30 @@
+{
+  "name": "test",
+  "allow": ["allowed.test", "api.test", "*.wild.test"],
+  "routes": [
+    {
+      "name": "api",
+      "host": "api.test",
+      "upstream": "https://api.test",
+      "credentialFile": "/srv/secrets/token",
+      "placeholder": "frisket-placeholder",
+      "paths": [
+        {"methods": ["GET"], "prefix": "/v1"},
+        {"methods": ["DELETE"], "path": "/v1/things/*", "ask": true,
+         "operation": {"id": "delete-thing", "summary": "Delete Thing", "description": "Removes the thing."}}
+      ]
+    },
+    {
+      "name": "wild",
+      "host": "*.wild.test",
+      "upstream": "https://*.wild.test",
+      "credentialFile": "/srv/secrets/token",
+      "placeholder": "frisket-placeholder",
+      "paths": [
+        {"methods": ["GET"], "prefix": "/v1"},
+        {"methods": ["GET"], "path": "/v1/projects/*/secrets/*/versions/*:access", "refuse": true},
+        {"methods": ["GET"], "path": "/storage/v1/b/*/o/*", "encodedSlashes": true}
+      ]
+    }
+  ]
+}

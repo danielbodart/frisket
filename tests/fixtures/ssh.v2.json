@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "name": "ssh",
+  "allow": {"allowed.test": true},
+  "ssh": {
+    "server": {"address": "192.168.50.5", "user": "ops",
+     "hostKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl host"],
+     "agent": "/run/user/1000/ssh-agent",
+     "exec": {
+       "greet *": "allow",
+       "touch **": "ask",
+       "rm **": "refuse",
+       "cd *": "allow",
+       "ls **": "allow",
+       "less **": "allow",
+       "less ** [arg +*]": "ask",
+       "[arg .ssh]": "refuse"
+     },
+     "commands": {
+       "systemctl status *": {"id": "systemctl-status", "summary": "Show a unit's status", "class": "read", "category": "services"},
+       "[arg .ssh]": {"id": "secrets", "summary": "Read a secret", "class": "guarded"}
+     },
+     "env": {"LANG": true, "LC_*": true}},
+    "wrongkey": {"address": "192.168.50.5:2222", "user": "ops",
+     "hostKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl other"],
+     "agent": "/run/user/1000/ssh-agent",
+     "exec": {"greet *": "allow"}, "unmatched": "refuse"},
+    "pw": {"address": "192.168.50.5:2223", "user": "ops",
+     "hostKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl host"],
+     "passwordFile": "/srv/secrets/ssh-password",
+     "exec": {"greet *": "allow"}, "unmatched": "refuse"},
+    "modem": {"address": "192.168.1.1", "user": "admin",
+     "hostKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl modem"],
+     "passwordFile": "/run/secrets/modem-password", "shell": true,
+     "exec": {"xdslctl info **": "allow"}}
+  }
+}

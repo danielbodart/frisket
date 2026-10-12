@@ -37,6 +37,7 @@ import (
 	"github.com/danielbodart/frisket/internal/serve"
 	"github.com/danielbodart/frisket/internal/steering"
 	"github.com/danielbodart/frisket/internal/store"
+	"github.com/danielbodart/frisket/policy"
 )
 
 // version is stamped at build time. scripts/version.sh derives the real one
@@ -68,6 +69,10 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
 
   frisket schema -config
         Print the config file's JSON Schema.
+
+  frisket schema
+        Print a version 2 policy document's JSON Schema; a field only the
+        host may set has "x-scope": "host".
 
   frisket steer -netns PATH -mntns PATH -roots BUNDLE -steering FILE -name NAME -policy DOCUMENT [-param K=V]...
         The launcher's first step, from its hook: create the session's
@@ -106,11 +111,27 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
 
   frisket check DOCUMENT...
         Check policy documents as a session opening one would: everything but
-        whether its credential files exist yet.
+        whether its credential files exist yet. A document is version 1, or
+        version 2 with "version": 2 (docs/policy.md); in a version 2 one, a
+        pattern that can never match is said on stderr.
 
   frisket check -exec ROUTE DOCUMENT
         Check the document, then answer each line of stdin, a command, as its
         SSH route ROUTE decides it: allow, ask or refuse, a tab, and the rule.
+
+  frisket check -http ROUTE DOCUMENT
+        Check the document, then answer each line of stdin, METHOD and a path
+        with any query, as its route ROUTE's scope decides it before reading
+        its body: allow, ask or refuse, a tab, the reason, a tab, and the
+        operation; a GraphQL or Docker request says what still decides it.
+
+  frisket check -layer project -base BASE [-section KEY] LAYER
+        Check LAYER, a project's merge patch over BASE, a version 2 document:
+        refuse a field only the host may set (x-scope host in the schema),
+        a route or SSH machine BASE does not define or one deleted, and a
+        pattern the layer writes that can never match; then merge it over
+        BASE and check the result as a document. -section reads LAYER's key
+        KEY, as chase.json holds frisket's section under "frisket".
 
   frisket dns [-listen ADDR:PORT]
         Answer a Docker project's name, <repo>.<owner>.internal, on the host
@@ -386,11 +407,27 @@ func root(ctx context.Context) (context.Context, context.CancelFunc) {
 func runCheck(argv []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	route := fs.String("exec", "", "an SSH route of the one document named, whose answer to each command on stdin is printed")
+	httpRoute := fs.String("http", "", "a route of the one document named, whose answer to each request on stdin is printed")
 	configPath := fs.String("config", "", "a settings file to read as serve would, in place of policy documents")
+	layer := fs.String("layer", "", "the one document named is a layer of this kind, a merge patch: project")
+	base := fs.String("base", "", "with -layer, the version 2 document it is merged over")
+	section := fs.String("section", "", "with -layer, the key of the named file that holds the layer")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
 	argv = fs.Args()
+	if *layer != "" {
+		if *configPath != "" || *route != "" || *httpRoute != "" || len(argv) != 1 {
+			return errors.New("-layer checks one layer: name it, with -base, and no -config, -exec or -http")
+		}
+		return checkLayer(*layer, *base, *section, argv[0], checkDeps)
+	}
+	if *base != "" || *section != "" {
+		return errors.New("-base and -section are -layer's")
+	}
+	if *route != "" && *httpRoute != "" {
+		return errors.New("-exec or -http, not both")
+	}
 	if *configPath != "" {
 		if len(argv) > 0 || *route != "" {
 			return errors.New("-config checks the one settings file: name no documents and no -exec")
@@ -401,48 +438,64 @@ func runCheck(argv []string) error {
 	if len(argv) == 0 {
 		return errors.New("name at least one policy document")
 	}
-	if *route != "" && len(argv) != 1 {
-		return errors.New("-exec answers by one document's route: name one document")
+	if (*route != "" || *httpRoute != "") && len(argv) != 1 {
+		return errors.New("-exec and -http answer by one document's route: name one document")
 	}
-	// Nothing is dialled and nothing resolved: the host's addresses and its
-	// resolver are no part of whether a document holds together, and a build
-	// sandbox has neither.
-	classifier, err := egress.NewClassifier(nil, egress.StaticHostAddrs())
+	deps, err := checkDeps()
 	if err != nil {
 		return err
 	}
-	deps := store.Deps{
+	for _, path := range argv {
+		if err := store.Check(path, deps); err != nil {
+			return err
+		}
+		warnUnreachable(path, os.Stderr)
+	}
+	if *route != "" {
+		return decideCommands(argv[0], *route, os.Stdin, os.Stdout)
+	}
+	if *httpRoute != "" {
+		return decideRequests(argv[0], *httpRoute, os.Stdin, os.Stdout)
+	}
+	return nil
+}
+
+// checkDeps are what a document is built with to be checked. Nothing is
+// dialled and nothing resolved: the host's addresses and its resolver are
+// no part of whether a document holds together, and a build sandbox has
+// neither.
+func checkDeps() (store.Deps, error) {
+	classifier, err := egress.NewClassifier(nil, egress.StaticHostAddrs())
+	if err != nil {
+		return store.Deps{}, err
+	}
+	return store.Deps{
 		Classifier: classifier,
 		Dialer:     &egress.Dialer{Classifier: classifier},
 		Upstream:   &dns.Upstream{},
 		// A credential file that is not there yet is logged by its watcher,
 		// and is not the document's fault.
 		Log: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	}
-	for _, path := range argv {
-		if err := store.Check(path, deps); err != nil {
-			return err
-		}
-	}
-	if *route != "" {
-		return decideCommands(argv[0], *route, os.Stdin, os.Stdout)
-	}
-	return nil
+	}, nil
 }
 
-// runSchema prints the config file's JSON Schema. -config is required, so
-// that a schema of the policy document can be added beside it.
+// runSchema prints a version 2 policy document's JSON Schema, or with
+// -config the config file's.
 func runSchema(argv []string) error {
 	fs := flag.NewFlagSet("schema", flag.ContinueOnError)
 	cfg := fs.Bool("config", false, "the config file's schema")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if !*cfg || fs.NArg() > 0 {
-		return errors.New("say which schema: -config")
+	if fs.NArg() > 0 {
+		return errors.New("schema takes no arguments: -config for the config file's, none for the policy document's")
 	}
-	fmt.Fprint(os.Stdout, schema)
-	return nil
+	if *cfg {
+		fmt.Fprint(os.Stdout, schema)
+		return nil
+	}
+	_, err := os.Stdout.Write(policy.SchemaV2())
+	return err
 }
 
 // A steer, connect or close as its flags and, with -flong, flong's

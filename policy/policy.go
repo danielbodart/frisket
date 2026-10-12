@@ -7,6 +7,13 @@
 //
 // What a document means, and whether frisket would serve it, is decided when
 // the daemon builds it (frisket check runs the same build without serving).
+//
+// A document is version 1, Document, which chase still writes, or version
+// 2, DocumentV2, with "version": 2: the shape every layer of a policy is
+// written in and merged by JSON Merge Patch, every collection a map, whose
+// routes answer operations by id, category, endpoint pattern and class at
+// each request, under a ceiling. Load reads either; docs/policy.md says
+// what version 2 means.
 package policy
 
 import (
@@ -22,7 +29,9 @@ import (
 // Document is a policy as its file holds it: the policy, and a name for the
 // log lines and questions of the sessions served under it.
 type Document struct {
-	Name string `json:"name"`
+	// Version is absent, or 1: a version 2 document is a DocumentV2.
+	Version int    `json:"version,omitempty"`
+	Name    string `json:"name"`
 	Policy
 }
 

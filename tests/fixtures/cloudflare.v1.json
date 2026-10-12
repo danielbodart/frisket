@@ -1,0 +1,28 @@
+{
+  "name": "cloudflare",
+  "allow": ["api.cloudflare.com"],
+  "routes": [
+    {
+      "name": "cloudflare",
+      "host": "api.cloudflare.com",
+      "upstream": "https://api.cloudflare.com",
+      "credentialFile": "/run/secrets/cloudflare-token",
+      "placeholder": "proxy-injected",
+      "unmatched": "ask",
+      "refusal": {"contentType": "application/json", "body": "{\"success\":false,\"errors\":[{\"code\":403,\"message\":\"{{message}}\"}]}"},
+      "paths": [
+        {"methods": ["GET", "HEAD"], "path": "/client/v4/zones/*/dns_records/*"},
+        {"methods": ["DELETE"], "path": "/client/v4/zones/*/dns_records/*", "ask": true,
+         "operation": {"id": "dns-records-for-a-zone-delete-dns-record", "summary": "Delete DNS Record",
+                       "description": "Permanently removes a DNS record from the zone.", "class": "guarded", "category": "DNS Records for a Zone"}},
+        {"methods": ["PATCH"], "path": "/client/v4/zones/*/dns_records/*",
+         "operation": {"id": "dns-records-for-a-zone-patch-dns-record", "summary": "Update DNS Record", "class": "write", "category": "DNS Records for a Zone"}},
+        {"methods": ["GET"], "path": "/client/v4/zones",
+         "operation": {"id": "zones-get", "summary": "List Zones", "class": "read", "category": "Zone"}},
+        {"methods": ["DELETE"], "path": "/client/v4/zones/*", "refuse": true,
+         "operation": {"id": "zones-0-delete", "summary": "Delete Zone", "class": "guarded", "category": "Zone"}},
+        {"methods": ["POST"], "prefix": "/client/v4/accounts", "refuse": true}
+      ]
+    }
+  ]
+}

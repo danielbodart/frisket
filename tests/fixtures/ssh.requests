@@ -1,0 +1,24 @@
+ssh server greet world
+ssh server greet
+ssh server touch a b
+ssh server rm -rf /
+ssh server cat ~/.ssh/id_ed25519
+ssh server ls -la .ssh
+ssh server ls -la
+ssh server LANG=C ls
+ssh server FOO=1 ls
+ssh server env LC_ALL=C ls
+ssh server cd /etc && ls
+ssh server cd /etc && rm x
+ssh server echo $(id)
+ssh server systemctl status foo
+ssh server systemctl restart foo
+ssh server less +F log
+ssh server less log
+ssh server unknown cmd
+ssh wrongkey greet x
+ssh wrongkey other
+ssh pw greet x
+ssh modem xdslctl info --show
+ssh modem xdslctl stop
+ssh modem xdslctl info; reboot

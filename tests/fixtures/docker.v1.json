@@ -1,0 +1,1955 @@
+{
+  "allow": [
+    "docker.frisket.internal",
+    "metadata.google.internal"
+  ],
+  "name": "docker",
+  "routes": [
+    {
+      "docker": {
+        "address": "127.101.170.171",
+        "apiVersions": {
+          "max": "1.56",
+          "min": "1.55",
+          "unversioned": [
+            "/_ping"
+          ]
+        },
+        "bodies": {
+          "ContainerCreate": {
+            "ArgsEscaped": "zero",
+            "AttachStderr": "any",
+            "AttachStdin": "any",
+            "AttachStdout": "any",
+            "Cmd": "any",
+            "Domainname": "any",
+            "Entrypoint": "any",
+            "Env": "any",
+            "ExposedPorts": "map/port",
+            "ExposedPorts.*": "zero",
+            "Healthcheck": "struct",
+            "Healthcheck.Interval": "any",
+            "Healthcheck.Retries": "any",
+            "Healthcheck.StartInterval": "any",
+            "Healthcheck.StartPeriod": "any",
+            "Healthcheck.Test": "any",
+            "Healthcheck.Timeout": "any",
+            "HostConfig": "struct",
+            "HostConfig.Annotations": "zero",
+            "HostConfig.AutoRemove": "any",
+            "HostConfig.Binds": "binds",
+            "HostConfig.BlkioDeviceReadBps": "zero",
+            "HostConfig.BlkioDeviceReadIOps": "zero",
+            "HostConfig.BlkioDeviceWriteBps": "zero",
+            "HostConfig.BlkioDeviceWriteIOps": "zero",
+            "HostConfig.BlkioWeight": "zero",
+            "HostConfig.BlkioWeightDevice": "zero",
+            "HostConfig.CapAdd": "zero",
+            "HostConfig.CapDrop": "any",
+            "HostConfig.Cgroup": "zero",
+            "HostConfig.CgroupParent": "zero",
+            "HostConfig.CgroupnsMode": "zero",
+            "HostConfig.ConsoleSize": "any",
+            "HostConfig.ContainerIDFile": "zero",
+            "HostConfig.CpuCount": "zero",
+            "HostConfig.CpuPercent": "zero",
+            "HostConfig.CpuPeriod": "zero",
+            "HostConfig.CpuQuota": "zero",
+            "HostConfig.CpuRealtimePeriod": "zero",
+            "HostConfig.CpuRealtimeRuntime": "zero",
+            "HostConfig.CpuShares": "any",
+            "HostConfig.CpusetCpus": "zero",
+            "HostConfig.CpusetMems": "zero",
+            "HostConfig.DeviceCgroupRules": "zero",
+            "HostConfig.DeviceRequests": "zero",
+            "HostConfig.Devices": "zero",
+            "HostConfig.Dns": "zero",
+            "HostConfig.DnsOptions": "zero",
+            "HostConfig.DnsSearch": "zero",
+            "HostConfig.ExtraHosts": "zero",
+            "HostConfig.GroupAdd": "zero",
+            "HostConfig.IOMaximumBandwidth": "zero",
+            "HostConfig.IOMaximumIOps": "zero",
+            "HostConfig.Init": "any",
+            "HostConfig.IpcMode": "zero",
+            "HostConfig.Isolation": "zero",
+            "HostConfig.Links": "zero",
+            "HostConfig.LogConfig": "struct",
+            "HostConfig.LogConfig.Config": "zero",
+            "HostConfig.LogConfig.Type": {
+              "enum": [
+                "",
+                "json-file",
+                "local"
+              ]
+            },
+            "HostConfig.MaskedPaths": "null",
+            "HostConfig.Memory": "any",
+            "HostConfig.MemoryReservation": "any",
+            "HostConfig.MemorySwap": "any",
+            "HostConfig.MemorySwappiness": "zero",
+            "HostConfig.Mounts": "mounts",
+            "HostConfig.NanoCpus": "any",
+            "HostConfig.NetworkMode": "network",
+            "HostConfig.OomKillDisable": "zero",
+            "HostConfig.OomScoreAdj": "zero",
+            "HostConfig.PidMode": "zero",
+            "HostConfig.PidsLimit": "any",
+            "HostConfig.PortBindings": "portBindings",
+            "HostConfig.Privileged": "zero",
+            "HostConfig.PublishAllPorts": "zero",
+            "HostConfig.ReadonlyPaths": "null",
+            "HostConfig.ReadonlyRootfs": "any",
+            "HostConfig.RestartPolicy": "struct",
+            "HostConfig.RestartPolicy.MaximumRetryCount": "any",
+            "HostConfig.RestartPolicy.Name": {
+              "enum": [
+                "",
+                "no",
+                "on-failure"
+              ]
+            },
+            "HostConfig.Runtime": "zero",
+            "HostConfig.SecurityOpt": "zero",
+            "HostConfig.ShmSize": "any",
+            "HostConfig.StorageOpt": "zero",
+            "HostConfig.Sysctls": "zero",
+            "HostConfig.Tmpfs": "map/absPath",
+            "HostConfig.Tmpfs.*": "zero",
+            "HostConfig.UTSMode": "zero",
+            "HostConfig.Ulimits": "zero",
+            "HostConfig.Umask": "zero",
+            "HostConfig.UsernsMode": "zero",
+            "HostConfig.VolumeDriver": "zero",
+            "HostConfig.VolumesFrom": "zero",
+            "Hostname": "any",
+            "Image": "image",
+            "Labels": "labels",
+            "NetworkDisabled": "any",
+            "NetworkingConfig": "struct",
+            "NetworkingConfig.EndpointsConfig": "map/network",
+            "NetworkingConfig.EndpointsConfig.*": "struct",
+            "NetworkingConfig.EndpointsConfig.*.Aliases": "any",
+            "NetworkingConfig.EndpointsConfig.*.DNSNames": "any",
+            "NetworkingConfig.EndpointsConfig.*.DriverOpts": "zero",
+            "NetworkingConfig.EndpointsConfig.*.EndpointID": "zero",
+            "NetworkingConfig.EndpointsConfig.*.Gateway": "zero",
+            "NetworkingConfig.EndpointsConfig.*.GlobalIPv6Address": "zero",
+            "NetworkingConfig.EndpointsConfig.*.GlobalIPv6PrefixLen": "zero",
+            "NetworkingConfig.EndpointsConfig.*.GwPriority": "zero",
+            "NetworkingConfig.EndpointsConfig.*.IPAMConfig": "zero",
+            "NetworkingConfig.EndpointsConfig.*.IPAddress": "zero",
+            "NetworkingConfig.EndpointsConfig.*.IPPrefixLen": "zero",
+            "NetworkingConfig.EndpointsConfig.*.IPv6Gateway": "zero",
+            "NetworkingConfig.EndpointsConfig.*.Links": "zero",
+            "NetworkingConfig.EndpointsConfig.*.MacAddress": "zero",
+            "NetworkingConfig.EndpointsConfig.*.NetworkID": "zero",
+            "OnBuild": "zero",
+            "OpenStdin": "any",
+            "Shell": "zero",
+            "StdinOnce": "any",
+            "StopSignal": "any",
+            "StopTimeout": "any",
+            "Tty": "any",
+            "User": "any",
+            "Volumes": "map/absPath",
+            "Volumes.*": "zero",
+            "WorkingDir": "any"
+          },
+          "ExecCreate": {
+            "AttachStderr": "any",
+            "AttachStdin": "any",
+            "AttachStdout": "any",
+            "Cmd": "any",
+            "ConsoleSize": "any",
+            "DetachKeys": "any",
+            "Env": "any",
+            "Privileged": "zero",
+            "Tty": "any",
+            "User": "any",
+            "WorkingDir": "any"
+          },
+          "ExecStart": {
+            "ConsoleSize": "any",
+            "Detach": "any",
+            "Tty": "any"
+          },
+          "NetworkCreate": {
+            "Attachable": "zero",
+            "ConfigFrom": "zero",
+            "ConfigOnly": "zero",
+            "Driver": {
+              "enum": [
+                "",
+                "bridge"
+              ]
+            },
+            "EnableIPv4": "any",
+            "EnableIPv6": "any",
+            "IPAM": "zero",
+            "Ingress": "zero",
+            "Internal": "any",
+            "Labels": "labels",
+            "Name": "objectName",
+            "Options": "zero",
+            "Scope": {
+              "enum": [
+                "",
+                "local"
+              ]
+            }
+          },
+          "VolumeCreate": {
+            "ClusterVolumeSpec": "zero",
+            "Driver": {
+              "enum": [
+                "",
+                "local"
+              ]
+            },
+            "DriverOpts": "zero",
+            "Labels": "labels",
+            "Name": "objectName"
+          }
+        },
+        "images": [
+          "postgres:18",
+          "library/postgres:18",
+          "docker.io/postgres:18",
+          "docker.io/library/postgres:18"
+        ],
+        "maxBody": 262144,
+        "names": [
+          "shop.example.internal"
+        ],
+        "ports": [
+          64320
+        ],
+        "project": "example/shop"
+      },
+      "host": "docker.frisket.internal",
+      "name": "docker",
+      "paths": [
+        {
+          "docker": {
+            "owned": "none"
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "System",
+            "class": "read",
+            "description": "This is a dummy endpoint you can use to test if the server is accessible.",
+            "id": "SystemPing",
+            "summary": "Ping"
+          },
+          "path": "/_ping"
+        },
+        {
+          "docker": {
+            "owned": "none"
+          },
+          "methods": [
+            "HEAD"
+          ],
+          "operation": {
+            "category": "System",
+            "class": "read",
+            "description": "This is a dummy endpoint you can use to test if the server is accessible.",
+            "id": "SystemPingHead",
+            "summary": "Ping"
+          },
+          "path": "/_ping"
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "System",
+            "class": "write",
+            "description": "Validate credentials for a registry and, if available, get an identity\ntoken for accessing the registry without password.\n",
+            "id": "SystemAuth",
+            "summary": "Check auth configuration"
+          },
+          "path": "/auth",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "write",
+            "description": "Build an image from a tar archive with a `Dockerfile` in it.\n\nThe `Dockerfile` specifies how the image is built from the tar archive. It is typically in the archive's root, but can be at a different path or have a different name by specifying the `dockerfile` parameter. [See the `Dockerfile` reference for more information](https://docs.docker.com/engine/reference/builder/).\n\nThe Docker daemon performs a preliminary validation of the `Dockerfile` before starting the build, and returns an error if the syntax is incorrect. After that, each instruction is run one-by-one until the ID of the new image is output.\n\nThe build is canceled if the client drops the connection by quitting or being killed.\n",
+            "id": "ImageBuild",
+            "summary": "Build an image"
+          },
+          "path": "/build",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "write",
+            "id": "BuildPrune",
+            "summary": "Delete builder cache"
+          },
+          "path": "/build/prune",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "write",
+            "id": "ImageCommit",
+            "summary": "Create a new image from a container"
+          },
+          "path": "/commit",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Config",
+            "class": "read",
+            "id": "ConfigList",
+            "summary": "List configs"
+          },
+          "path": "/configs",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Config",
+            "class": "guarded",
+            "id": "ConfigDelete",
+            "summary": "Delete a config"
+          },
+          "path": "/configs/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Config",
+            "class": "read",
+            "id": "ConfigInspect",
+            "summary": "Inspect a config"
+          },
+          "path": "/configs/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Config",
+            "class": "write",
+            "id": "ConfigUpdate",
+            "summary": "Update a Config"
+          },
+          "path": "/configs/*/update",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Config",
+            "class": "write",
+            "id": "ConfigCreate",
+            "summary": "Create a config"
+          },
+          "path": "/configs/create",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "force": "bool",
+              "v": "bool"
+            }
+          },
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "guarded",
+            "id": "ContainerDelete",
+            "summary": "Remove a container"
+          },
+          "path": "/containers/*"
+        },
+        {
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "Get a tar archive of a resource in the filesystem of container id.",
+            "id": "ContainerArchive",
+            "summary": "Get an archive of a filesystem resource in a container"
+          },
+          "path": "/containers/*/archive",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "A response header `X-Docker-Container-Path-Stat` is returned, containing\na base64 - encoded JSON object with some filesystem header information\nabout the path.\n",
+            "id": "ContainerArchiveInfo",
+            "summary": "Get information about files in a container"
+          },
+          "path": "/containers/*/archive",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "PUT"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "description": "Upload a tar archive to be extracted to a path in the filesystem of container id.\n`path` parameter is asserted to be a directory. If it exists as a file, 400 error\nwill be returned with message \"not a directory\".\n",
+            "id": "PutContainerArchive",
+            "summary": "Extract an archive of files or folders to a directory in a container"
+          },
+          "path": "/containers/*/archive",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "detachKeys": "any",
+              "logs": "bool",
+              "stderr": "bool",
+              "stdin": "bool",
+              "stdout": "bool",
+              "stream": "bool"
+            },
+            "upgrade": "tcp"
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "description": "Attach to a container to read its output or send it input. You can attach\nto the same container multiple times and you can reattach to containers\nthat have been detached.\n\nEither the `stream` or `logs` parameter must be `true` for this endpoint\nto do anything.\n\nSee the [documentation for the `docker attach` command](https://docs.docker.com/engine/reference/commandline/attach/)\nfor more details.\n\n### Hijacking\n\nThis endpoint hijacks the HTTP connection to transport `stdin`, `stdout`,\nand `stderr` on the same socket.\n\nThis is the response from the daemon for an attach request:\n\n```\nHTTP/1.1 200 OK\nContent-Type: application/vnd.docker.raw-stream\n\n[STREAM]\n```\n\nAfter the headers and two new lines, the TCP connection can now be used\nfor raw, bidirectional communication between the client and server.\n\nTo hint potential proxies about connection hijacking, the Docker client\ncan also optionally send connection upgrade headers.\n\nFor example, the client sends this request to upgrade the connection:\n\n```\nPOST /containers/16253994b7c4/attach?stream=1&stdout=1 HTTP/1.1\nUpgrade: tcp\nConnection: Upgrade\n```\n\nThe Docker daemon will respond with a `101 UPGRADED` response, and will\nsimilarly follow with the raw stream:\n\n```\nHTTP/1.1 101 UPGRADED\nContent-Type: application/vnd.docker.raw-stream\nConnection: Upgrade\nUpgrade: tcp\n\n[STREAM]\n```\n\n### Stream format\n\nWhen the TTY setting is disabled in [`POST /containers/create`](#operation/ContainerCreate),\nthe HTTP Content-Type header is set to application/vnd.docker.multiplexed-stream\nand the stream over the hijacked connected is multiplexed to separate out\n`stdout` and `stderr`. The stream consists of a series of frames, each\ncontaining a header and a payload.\n\nThe header contains the information which the stream writes (`stdout` or\n`stderr`). It also contains the size of the associated frame encoded in\nthe last four bytes (`uint32`).\n\nIt is encoded on the first eight bytes like this:\n\n```go\nheader := [8]byte{STREAM_TYPE, 0, 0, 0, SIZE1, SIZE2, SIZE3, SIZE4}\n```\n\n`STREAM_TYPE` can be:\n\n- 0: `stdin` (is written on `stdout`)\n- 1: `stdout`\n- 2: `stderr`\n\n`SIZE1, SIZE2, SIZE3, SIZE4` are the four bytes of the `uint32` size\nencoded as big endian.\n\nFollowing the header is the payload, which is the specified number of\nbytes of `STREAM_TYPE`.\n\nThe simplest way to implement this protocol is the following:\n\n1. Read 8 bytes.\n2. Choose `stdout` or `stderr` depending on the first byte.\n3. Extract the frame size from the last four bytes.\n4. Read the extracted size and output it on the correct output.\n5. Goto 1.\n\n### Stream format when using a TTY\n\nWhen the TTY setting is enabled in [`POST /containers/create`](#operation/ContainerCreate),\nthe stream is not multiplexed. The data exchanged over the hijacked\nconnection is simply the raw data from the process PTY and client's\n`stdin`.\n",
+            "id": "ContainerAttach",
+            "summary": "Attach to a container"
+          },
+          "path": "/containers/*/attach"
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "id": "ContainerAttachWebsocket",
+            "summary": "Attach to a container via a websocket"
+          },
+          "path": "/containers/*/attach/ws",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "Returns which files in a container's filesystem have been added, deleted,\nor modified. The `Kind` of modification can be one of:\n\n- `0`: Modified (\"C\")\n- `1`: Added (\"A\")\n- `2`: Deleted (\"D\")\n",
+            "id": "ContainerChanges",
+            "summary": "Get changes on a container\u2019s filesystem"
+          },
+          "path": "/containers/*/changes",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "body": "ExecCreate",
+            "owned": "container",
+            "param": 1
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Exec",
+            "class": "write",
+            "description": "Run a command inside a running container.",
+            "id": "ContainerExec",
+            "summary": "Create an exec instance"
+          },
+          "path": "/containers/*/exec"
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "Export the contents of a container as a tarball.",
+            "id": "ContainerExport",
+            "summary": "Export a container"
+          },
+          "path": "/containers/*/export",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "size": "bool"
+            }
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "Return low-level information about a container.",
+            "id": "ContainerInspect",
+            "summary": "Inspect a container"
+          },
+          "path": "/containers/*/json"
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "signal": "any"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "description": "Send a POSIX signal to a container, defaulting to killing to the\ncontainer.\n",
+            "id": "ContainerKill",
+            "summary": "Kill a container"
+          },
+          "path": "/containers/*/kill"
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "follow": "bool",
+              "since": "any",
+              "stderr": "bool",
+              "stdout": "bool",
+              "tail": "any",
+              "timestamps": "bool",
+              "until": "any"
+            }
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "Get `stdout` and `stderr` logs from a container.\n\nNote: This endpoint works only for containers with the `json-file` or\n`journald` logging driver.\n",
+            "id": "ContainerLogs",
+            "summary": "Get container logs"
+          },
+          "path": "/containers/*/logs"
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "description": "Use the freezer cgroup to suspend all processes in a container.\n\nTraditionally, when suspending a process the `SIGSTOP` signal is used,\nwhich is observable by the process being suspended. With the freezer\ncgroup the process is unaware, and unable to capture, that it is being\nsuspended, and subsequently resumed.\n",
+            "id": "ContainerPause",
+            "summary": "Pause a container"
+          },
+          "path": "/containers/*/pause",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "name": "containerName"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "id": "ContainerRename",
+            "summary": "Rename a container"
+          },
+          "path": "/containers/*/rename"
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "h": "int",
+              "w": "int"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "description": "Resize the TTY for a container.",
+            "id": "ContainerResize",
+            "summary": "Resize a container TTY"
+          },
+          "path": "/containers/*/resize"
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "signal": "any",
+              "t": "int"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "id": "ContainerRestart",
+            "summary": "Restart a container"
+          },
+          "path": "/containers/*/restart"
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "detachKeys": "any"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "id": "ContainerStart",
+            "summary": "Start a container"
+          },
+          "path": "/containers/*/start"
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "This endpoint returns a live stream of a container\u2019s resource usage\nstatistics.\n\nThe `precpu_stats` is the CPU statistic of the *previous* read, and is\nused to calculate the CPU usage percentage. It is not an exact copy\nof the `cpu_stats` field.\n\nIf either `precpu_stats.online_cpus` or `cpu_stats.online_cpus` is\nnil then for compatibility with older daemons the length of the\ncorresponding `cpu_usage.percpu_usage` array should be used.\n\nOn a cgroup v2 host, the following fields are not set\n* `blkio_stats`: all fields other than `io_service_bytes_recursive`\n* `cpu_stats`: `cpu_usage.percpu_usage`\n* `memory_stats`: `max_usage` and `failcnt`\nAlso, `memory_stats.stats` fields are incompatible with cgroup v1.\n\nTo calculate the values shown by the `stats` command of the docker cli tool\nthe following formulas can be used:\n* used_memory = `memory_stats.usage - memory_stats.stats.cache` (cgroups v1)\n* used_memory = `memory_stats.usage - memory_stats.stats.inactive_file` (cgroups v2)\n* available_memory = `memory_stats.limit`\n* Memory usage % = `(used_memory / available_memory) * 100.0`\n* cpu_delta = `cpu_stats.cpu_usage.total_usage - precpu_stats.cpu_usage.total_usage`\n* system_cpu_delta = `cpu_stats.system_cpu_usage - precpu_stats.system_cpu_usage`\n* number_cpus = `length(cpu_stats.cpu_usage.percpu_usage)` or `cpu_stats.online_cpus`\n* CPU usage % = `(cpu_delta / system_cpu_delta) * number_cpus * 100.0`\n",
+            "id": "ContainerStats",
+            "summary": "Get container stats based on resource usage"
+          },
+          "path": "/containers/*/stats",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "signal": "any",
+              "t": "int"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "id": "ContainerStop",
+            "summary": "Stop a container"
+          },
+          "path": "/containers/*/stop"
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "On Unix systems, this is done by running the `ps` command. This endpoint\nis not supported on Windows.\n",
+            "id": "ContainerTop",
+            "summary": "List processes running inside a container"
+          },
+          "path": "/containers/*/top",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "description": "Resume a container which has been paused.",
+            "id": "ContainerUnpause",
+            "summary": "Unpause a container"
+          },
+          "path": "/containers/*/unpause",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "description": "Change various configuration options of a container without having to\nrecreate it.\n",
+            "id": "ContainerUpdate",
+            "summary": "Update a container"
+          },
+          "path": "/containers/*/update",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "container",
+            "param": 1,
+            "query": {
+              "condition": {
+                "enum": [
+                  "not-running",
+                  "next-exit",
+                  "removed"
+                ]
+              }
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "description": "Block until a container stops, then returns the exit code.",
+            "id": "ContainerWait",
+            "summary": "Wait for a container"
+          },
+          "path": "/containers/*/wait"
+        },
+        {
+          "docker": {
+            "body": "ContainerCreate",
+            "owned": "createContainer",
+            "query": {
+              "name": "containerName",
+              "platform": "any"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "id": "ContainerCreate",
+            "summary": "Create a container"
+          },
+          "path": "/containers/create"
+        },
+        {
+          "docker": {
+            "owned": "list",
+            "query": {
+              "all": "bool",
+              "filters": {
+                "filters": [
+                  "label",
+                  "name",
+                  "id",
+                  "status",
+                  "health",
+                  "exited"
+                ]
+              },
+              "limit": "int",
+              "size": "bool"
+            }
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "read",
+            "description": "Returns a list of containers. For details on the format, see the\n[inspect endpoint](#operation/ContainerInspect).\n\nNote that it uses a different, smaller representation of a container\nthan inspecting a single container. For example, the list of linked\ncontainers is not propagated .\n",
+            "id": "ContainerList",
+            "summary": "List containers"
+          },
+          "path": "/containers/json"
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Container",
+            "class": "write",
+            "id": "ContainerPrune",
+            "summary": "Delete stopped containers"
+          },
+          "path": "/containers/prune",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Distribution",
+            "class": "read",
+            "description": "Return image digest and platform information by contacting the registry.\n",
+            "id": "DistributionInspect",
+            "summary": "Get image information from the registry"
+          },
+          "path": "/distribution/*/json",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "list",
+            "query": {
+              "filters": {
+                "filters": [
+                  "label",
+                  "type",
+                  "event",
+                  "container"
+                ]
+              },
+              "since": "any",
+              "until": "any"
+            }
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "System",
+            "class": "read",
+            "description": "Stream real-time events from the server.\n\nVarious objects within Docker report events when something happens to them.\n\nContainers report these events: `attach`, `commit`, `copy`, `create`, `destroy`, `detach`, `die`, `exec_create`, `exec_detach`, `exec_start`, `exec_die`, `export`, `health_status`, `kill`, `oom`, `pause`, `rename`, `resize`, `restart`, `start`, `stop`, `top`, `unpause`, `update`, and `prune`\n\nImages report these events: `create`, `delete`, `import`, `load`, `pull`, `push`, `save`, `tag`, `untag`, and `prune`\n\nVolumes report these events: `create`, `mount`, `unmount`, `destroy`, and `prune`\n\nNetworks report these events: `create`, `connect`, `disconnect`, `destroy`, `update`, `remove`, and `prune`\n\nThe Docker daemon reports these events: `reload`\n\nServices report these events: `create`, `update`, and `remove`\n\nNodes report these events: `create`, `update`, and `remove`\n\nSecrets report these events: `create`, `update`, and `remove`\n\nConfigs report these events: `create`, `update`, and `remove`\n\nThe Builder reports `prune` events\n",
+            "id": "SystemEvents",
+            "summary": "Monitor events"
+          },
+          "path": "/events"
+        },
+        {
+          "docker": {
+            "owned": "exec",
+            "param": 1
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Exec",
+            "class": "read",
+            "description": "Return low-level information about an exec instance.",
+            "id": "ExecInspect",
+            "summary": "Inspect an exec instance"
+          },
+          "path": "/exec/*/json"
+        },
+        {
+          "docker": {
+            "owned": "exec",
+            "param": 1,
+            "query": {
+              "h": "int",
+              "w": "int"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Exec",
+            "class": "write",
+            "description": "Resize the TTY session used by an exec instance. This endpoint only works\nif `tty` was specified as part of creating and starting the exec instance.\n",
+            "id": "ExecResize",
+            "summary": "Resize an exec instance"
+          },
+          "path": "/exec/*/resize"
+        },
+        {
+          "docker": {
+            "body": "ExecStart",
+            "owned": "exec",
+            "param": 1,
+            "upgrade": "tcp"
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Exec",
+            "class": "write",
+            "description": "Starts a previously set up exec instance. If detach is true, this endpoint\nreturns immediately after starting the command. Otherwise, it sets up an\ninteractive session with the command.\n",
+            "id": "ExecStart",
+            "summary": "Start an exec instance"
+          },
+          "path": "/exec/*/start"
+        },
+        {
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "guarded",
+            "description": "Remove an image, along with any untagged parent images that were\nreferenced by that image.\n\nImages can't be removed if they have descendant images, are being\nused by a running container or are being used by a build.\n",
+            "id": "ImageDelete",
+            "summary": "Remove an image"
+          },
+          "path": "/images/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "read",
+            "description": "Return the in-toto attestation statements attached to the image for the\ngiven platform. The daemon locates the attestation manifest(s) that\nreference the matching platform image manifest, reads their statement\nlayers, and returns the verbatim statement JSON together with layer\nmetadata.\n\nIf the image has no attestations an empty array is returned.\n",
+            "id": "ImageAttestations",
+            "summary": "Get attestation statements for an image"
+          },
+          "path": "/images/*/attestations",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "read",
+            "description": "Get a tarball containing all images and metadata for a repository.\n\nIf `name` is a specific name and tag (e.g. `ubuntu:latest`), then only that image (and its parents) are returned. If `name` is an image ID, similarly only that image (and its parents) are returned, but with the exclusion of the `repositories` file in the tarball, as there were no image names referenced.\n\n### Image tarball format\n\nAn image tarball contains [Content as defined in the OCI Image Layout Specification](https://github.com/opencontainers/image-spec/blob/v1.1.1/image-layout.md#content).\n\nAdditionally, includes the manifest.json file associated with a backwards compatible docker save format.\n\nIf the tarball defines a repository, the tarball should also include a `repositories` file at the root that contains a list of repository and tag names mapped to layer IDs.\n\n```json\n{\n  \"hello-world\": {\n    \"latest\": \"565a9d68a73f6706862bfe8409a7f659776d4d60a8d096eb4a3cbce6999cc2a1\"\n  }\n}\n```\n",
+            "id": "ImageGet",
+            "summary": "Export an image"
+          },
+          "path": "/images/*/get",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "read",
+            "description": "Return parent layers of an image.",
+            "id": "ImageHistory",
+            "summary": "Get the history of an image"
+          },
+          "path": "/images/*/history",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "image",
+            "param": 1,
+            "query": {
+              "manifests": "bool"
+            }
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "read",
+            "description": "Return low-level information about an image.",
+            "id": "ImageInspect",
+            "summary": "Inspect an image"
+          },
+          "path": "/images/*/json"
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "write",
+            "description": "Push an image to a registry.\n\nIf you wish to push an image on to a private registry, that image must\nalready have a tag which references the registry. For example,\n`registry.example.com/myimage:latest`.\n\nThe push is cancelled if the HTTP connection is closed.\n",
+            "id": "ImagePush",
+            "summary": "Push an image"
+          },
+          "path": "/images/*/push",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "write",
+            "description": "Create a tag that refers to a source image.\n\nThis creates an additional reference (tag) to the source image. The tag\ncan include a different repository name and/or tag. If the repository\nor tag already exists, it will be overwritten.\n",
+            "id": "ImageTag",
+            "summary": "Tag an image"
+          },
+          "path": "/images/*/tag",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "imagePull",
+            "query": {
+              "fromImage": "imageName",
+              "platform": "any",
+              "tag": "imageTag"
+            }
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "write",
+            "description": "Pull or import an image.",
+            "id": "ImageCreate",
+            "summary": "Create an image"
+          },
+          "path": "/images/create"
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "read",
+            "description": "Get a tarball containing all images and metadata for several image\nrepositories.\n\nFor each value of the `names` parameter: if it is a specific name and\ntag (e.g. `ubuntu:latest`), then only that image (and its parents) are\nreturned; if it is an image ID, similarly only that image (and its parents)\nare returned and there would be no names referenced in the 'repositories'\nfile for this image ID.\n\nFor details on the format, see the [export image endpoint](#operation/ImageGet).\n",
+            "id": "ImageGetAll",
+            "summary": "Export several images"
+          },
+          "path": "/images/get",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "read",
+            "description": "Returns a list of images on the server. Note that it uses a different, smaller representation of an image than inspecting a single image.",
+            "id": "ImageList",
+            "summary": "List Images"
+          },
+          "path": "/images/json",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "write",
+            "description": "Load a set of images and tags into a repository.\n\nFor details on the format, see the [export image endpoint](#operation/ImageGet).\n",
+            "id": "ImageLoad",
+            "summary": "Import images"
+          },
+          "path": "/images/load",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "write",
+            "id": "ImagePrune",
+            "summary": "Delete unused images"
+          },
+          "path": "/images/prune",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Image",
+            "class": "read",
+            "description": "Search for an image on Docker Hub.",
+            "id": "ImageSearch",
+            "summary": "Search images"
+          },
+          "path": "/images/search",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "System",
+            "class": "read",
+            "id": "SystemInfo",
+            "summary": "Get system information"
+          },
+          "path": "/info",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "list",
+            "query": {
+              "filters": {
+                "filters": [
+                  "label",
+                  "name",
+                  "id",
+                  "driver",
+                  "type",
+                  "scope",
+                  "dangling"
+                ]
+              }
+            }
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Network",
+            "class": "read",
+            "description": "Returns a list of networks. For details on the format, see the\n[network inspect endpoint](#operation/NetworkInspect).\n\nNote that it uses a different, smaller representation of a network than\ninspecting a single network. For example, the list of containers attached\nto the network is not propagated in API versions 1.28 and up.\n",
+            "id": "NetworkList",
+            "summary": "List networks"
+          },
+          "path": "/networks"
+        },
+        {
+          "docker": {
+            "owned": "network",
+            "param": 1
+          },
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Network",
+            "class": "guarded",
+            "id": "NetworkDelete",
+            "summary": "Remove a network"
+          },
+          "path": "/networks/*"
+        },
+        {
+          "docker": {
+            "owned": "network",
+            "param": 1,
+            "query": {
+              "scope": "any",
+              "verbose": "bool"
+            }
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Network",
+            "class": "read",
+            "id": "NetworkInspect",
+            "summary": "Inspect a network"
+          },
+          "path": "/networks/*"
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Network",
+            "class": "write",
+            "description": "The network must be either a local-scoped network or a swarm-scoped network with the `attachable` option set. A network cannot be re-attached to a running container",
+            "id": "NetworkConnect",
+            "summary": "Connect a container to a network"
+          },
+          "path": "/networks/*/connect",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Network",
+            "class": "write",
+            "id": "NetworkDisconnect",
+            "summary": "Disconnect a container from a network"
+          },
+          "path": "/networks/*/disconnect",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "body": "NetworkCreate",
+            "owned": "createNetwork"
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Network",
+            "class": "write",
+            "id": "NetworkCreate",
+            "summary": "Create a network"
+          },
+          "path": "/networks/create"
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Network",
+            "class": "write",
+            "id": "NetworkPrune",
+            "summary": "Delete unused networks"
+          },
+          "path": "/networks/prune",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Node",
+            "class": "read",
+            "id": "NodeList",
+            "summary": "List nodes"
+          },
+          "path": "/nodes",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Node",
+            "class": "guarded",
+            "id": "NodeDelete",
+            "summary": "Delete a node"
+          },
+          "path": "/nodes/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Node",
+            "class": "read",
+            "id": "NodeInspect",
+            "summary": "Inspect a node"
+          },
+          "path": "/nodes/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Node",
+            "class": "write",
+            "id": "NodeUpdate",
+            "summary": "Update a node"
+          },
+          "path": "/nodes/*/update",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "read",
+            "description": "Returns information about installed plugins.",
+            "id": "PluginList",
+            "summary": "List plugins"
+          },
+          "path": "/plugins",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "guarded",
+            "id": "PluginDelete",
+            "summary": "Remove a plugin"
+          },
+          "path": "/plugins/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "write",
+            "id": "PluginDisable",
+            "summary": "Disable a plugin"
+          },
+          "path": "/plugins/*/disable",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "write",
+            "id": "PluginEnable",
+            "summary": "Enable a plugin"
+          },
+          "path": "/plugins/*/enable",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "read",
+            "id": "PluginInspect",
+            "summary": "Inspect a plugin"
+          },
+          "path": "/plugins/*/json",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "write",
+            "description": "Push a plugin to the registry.\n",
+            "id": "PluginPush",
+            "summary": "Push a plugin"
+          },
+          "path": "/plugins/*/push",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "write",
+            "id": "PluginSet",
+            "summary": "Configure a plugin"
+          },
+          "path": "/plugins/*/set",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "write",
+            "id": "PluginUpgrade",
+            "summary": "Upgrade a plugin"
+          },
+          "path": "/plugins/*/upgrade",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "write",
+            "id": "PluginCreate",
+            "summary": "Create a plugin"
+          },
+          "path": "/plugins/create",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "read",
+            "id": "GetPluginPrivileges",
+            "summary": "Get plugin privileges"
+          },
+          "path": "/plugins/privileges",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Plugin",
+            "class": "write",
+            "description": "Pulls and installs a plugin. After the plugin is installed, it can be\nenabled using the [`POST /plugins/{name}/enable` endpoint](#operation/PostPluginsEnable).\n",
+            "id": "PluginPull",
+            "summary": "Install a plugin"
+          },
+          "path": "/plugins/pull",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Secret",
+            "class": "read",
+            "id": "SecretList",
+            "summary": "List secrets"
+          },
+          "path": "/secrets",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Secret",
+            "class": "guarded",
+            "id": "SecretDelete",
+            "summary": "Delete a secret"
+          },
+          "path": "/secrets/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Secret",
+            "class": "read",
+            "id": "SecretInspect",
+            "summary": "Inspect a secret"
+          },
+          "path": "/secrets/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Secret",
+            "class": "write",
+            "id": "SecretUpdate",
+            "summary": "Update a Secret"
+          },
+          "path": "/secrets/*/update",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Secret",
+            "class": "write",
+            "id": "SecretCreate",
+            "summary": "Create a secret"
+          },
+          "path": "/secrets/create",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Service",
+            "class": "read",
+            "id": "ServiceList",
+            "summary": "List services"
+          },
+          "path": "/services",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Service",
+            "class": "guarded",
+            "id": "ServiceDelete",
+            "summary": "Delete a service"
+          },
+          "path": "/services/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Service",
+            "class": "read",
+            "id": "ServiceInspect",
+            "summary": "Inspect a service"
+          },
+          "path": "/services/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Service",
+            "class": "read",
+            "description": "Get `stdout` and `stderr` logs from a service. See also\n[`/containers/{id}/logs`](#operation/ContainerLogs).\n\n**Note**: This endpoint works only for services with the `local`,\n`json-file` or `journald` logging drivers.\n",
+            "id": "ServiceLogs",
+            "summary": "Get service logs"
+          },
+          "path": "/services/*/logs",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Service",
+            "class": "write",
+            "id": "ServiceUpdate",
+            "summary": "Update a service"
+          },
+          "path": "/services/*/update",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Service",
+            "class": "write",
+            "id": "ServiceCreate",
+            "summary": "Create a service"
+          },
+          "path": "/services/create",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Session",
+            "class": "write",
+            "description": "Start a new interactive session with a server. Session allows server to\ncall back to the client for advanced capabilities.\n\n> **Deprecated**: This endpoint is deprecated and will be removed in a future version.\n> Server should support gRPC directly on the listening socket.\n\n### Hijacking\n\nThis endpoint hijacks the HTTP connection to HTTP2 transport that allows\nthe client to expose gPRC services on that connection.\n\nFor example, the client sends this request to upgrade the connection:\n\n```\nPOST /session HTTP/1.1\nUpgrade: h2c\nConnection: Upgrade\n```\n\nThe Docker daemon responds with a `101 UPGRADED` response follow with\nthe raw stream:\n\n```\nHTTP/1.1 101 UPGRADED\nConnection: Upgrade\nUpgrade: h2c\n```\n",
+            "id": "Session",
+            "summary": "Initialize interactive session"
+          },
+          "path": "/session",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Swarm",
+            "class": "read",
+            "id": "SwarmInspect",
+            "summary": "Inspect swarm"
+          },
+          "path": "/swarm",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Swarm",
+            "class": "write",
+            "id": "SwarmInit",
+            "summary": "Initialize a new swarm"
+          },
+          "path": "/swarm/init",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Swarm",
+            "class": "write",
+            "id": "SwarmJoin",
+            "summary": "Join an existing swarm"
+          },
+          "path": "/swarm/join",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Swarm",
+            "class": "write",
+            "id": "SwarmLeave",
+            "summary": "Leave a swarm"
+          },
+          "path": "/swarm/leave",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Swarm",
+            "class": "write",
+            "id": "SwarmUnlock",
+            "summary": "Unlock a locked manager"
+          },
+          "path": "/swarm/unlock",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Swarm",
+            "class": "read",
+            "id": "SwarmUnlockkey",
+            "summary": "Get the unlock key"
+          },
+          "path": "/swarm/unlockkey",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Swarm",
+            "class": "write",
+            "id": "SwarmUpdate",
+            "summary": "Update a swarm"
+          },
+          "path": "/swarm/update",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "System",
+            "class": "read",
+            "id": "SystemDataUsage",
+            "summary": "Get data usage information"
+          },
+          "path": "/system/df",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Task",
+            "class": "read",
+            "id": "TaskList",
+            "summary": "List tasks"
+          },
+          "path": "/tasks",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Task",
+            "class": "read",
+            "id": "TaskInspect",
+            "summary": "Inspect a task"
+          },
+          "path": "/tasks/*",
+          "refuse": true
+        },
+        {
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "operation": {
+            "category": "Task",
+            "class": "read",
+            "description": "Get `stdout` and `stderr` logs from a task.\nSee also [`/containers/{id}/logs`](#operation/ContainerLogs).\n\n**Note**: This endpoint works only for services with the `local`,\n`json-file` or `journald` logging drivers.\n",
+            "id": "TaskLogs",
+            "summary": "Get task logs"
+          },
+          "path": "/tasks/*/logs",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "owned": "none"
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "System",
+            "class": "read",
+            "description": "Returns the version of Docker that is running and various information about the system that Docker is running on.",
+            "id": "SystemVersion",
+            "summary": "Get version"
+          },
+          "path": "/version"
+        },
+        {
+          "docker": {
+            "owned": "list",
+            "query": {
+              "filters": {
+                "filters": [
+                  "label",
+                  "name",
+                  "dangling",
+                  "driver"
+                ]
+              }
+            }
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Volume",
+            "class": "read",
+            "id": "VolumeList",
+            "summary": "List volumes"
+          },
+          "path": "/volumes"
+        },
+        {
+          "docker": {
+            "owned": "volume",
+            "param": 1,
+            "query": {
+              "force": "bool"
+            }
+          },
+          "methods": [
+            "DELETE"
+          ],
+          "operation": {
+            "category": "Volume",
+            "class": "guarded",
+            "description": "Instruct the driver to remove the volume.",
+            "id": "VolumeDelete",
+            "summary": "Remove a volume"
+          },
+          "path": "/volumes/*"
+        },
+        {
+          "docker": {
+            "owned": "volume",
+            "param": 1
+          },
+          "methods": [
+            "GET"
+          ],
+          "operation": {
+            "category": "Volume",
+            "class": "read",
+            "id": "VolumeInspect",
+            "summary": "Inspect a volume"
+          },
+          "path": "/volumes/*"
+        },
+        {
+          "methods": [
+            "PUT"
+          ],
+          "operation": {
+            "category": "Volume",
+            "class": "write",
+            "id": "VolumeUpdate",
+            "summary": "\"Update a volume. Valid only for Swarm cluster volumes\"\n"
+          },
+          "path": "/volumes/*",
+          "refuse": true
+        },
+        {
+          "docker": {
+            "body": "VolumeCreate",
+            "owned": "createVolume"
+          },
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Volume",
+            "class": "write",
+            "id": "VolumeCreate",
+            "summary": "Create a volume"
+          },
+          "path": "/volumes/create"
+        },
+        {
+          "methods": [
+            "POST"
+          ],
+          "operation": {
+            "category": "Volume",
+            "class": "write",
+            "id": "VolumePrune",
+            "summary": "Delete unused volumes"
+          },
+          "path": "/volumes/prune",
+          "refuse": true
+        }
+      ],
+      "refusal": {
+        "body": "{\"message\":\"{{message}}\"}",
+        "contentType": "application/json"
+      },
+      "unmatched": "refuse",
+      "upstream": "unix:///run/user/1000/docker.sock"
+    },
+    {
+      "host": "metadata.google.internal",
+      "name": "metadata",
+      "paths": [
+        {
+          "methods": [
+            "GET"
+          ],
+          "prefix": "/"
+        }
+      ],
+      "upstream": "https://metadata.google.internal"
+    }
+  ]
+}

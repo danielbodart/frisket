@@ -136,7 +136,7 @@ func TestTheSchemaMatchesTheConfig(t *testing.T) {
 	if want := keys(reflect.TypeFor[gitSigningConfig]()); !slices.Equal(git, want) {
 		t.Errorf("schema's gitSigning has %v, config's has %v", git, want)
 	}
-	if err := runSchema(nil); err == nil {
-		t.Error("schema with no -config was accepted")
+	if err := runSchema([]string{"policy"}); err == nil {
+		t.Error("schema with an argument was accepted")
 	}
 }

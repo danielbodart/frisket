@@ -1,0 +1,36 @@
+name secretmanager.googleapis.com
+name a.b.googleapis.com
+name googleapis.com
+name iam.mtls.googleapis.com
+name accounts.google.com
+http google GET /v1/projects/p/secrets/s/versions/1
+http google GET /v1/projects/p/secrets/s/versions/1:access
+http google GET /v1/projects/p/secrets/s/versions/1:ACCESS
+http google GET /v1/projects/p/secrets/s/versions/1%3Aaccess
+http google GET /v1/projects/p/secrets/s/versions/1%253Aaccess
+http google GET /v1/projects/p/secrets/s/versions/1:access;x
+http google GET /v1/projects/p/secrets/s/versions/1:access.
+http google GET /v1/projects/p/secrets/s/versions/1:access/
+http google GET /v1/projects/p/secrets/s/versions/:access
+http google GET /v1/projects/p/secrets/s/versions/1:accessx
+http google GET /v1/projects/p/secrets/s/versions/1%2F2:access
+http google GET /v1/projects/p/secrets/s/versions/latest:access
+http google GET /v1/projects/p/secrets/s/versions/latest%3Aaccess
+http google GET /v1/projects/p/secrets/s/versions/latest
+http google GET /v1/projects/p/secrets/s
+http google GET /v1/projects/p/secrets/s:getIamPolicy
+http google GET /v1/projects/p/secrets/s%3AgetIamPolicy
+http google GET /v1/projects/p/secrets/s:getiampolicy
+http google POST /v1/projects/p/secrets/s:addVersion
+http google POST /v1/projects/p/secrets/s%3AaddVersion
+http google POST /v1/projects/p/secrets/:addVersion
+http google GET /v1/projects/p/locations/l:list
+http google GET /v1/projects/p/locations/l:list/more
+http google GET /v1/projects/p/locations/l:lister
+http google GET /storage/v1/b/bucket/o/a%2Fb%2Fc
+http google GET /storage/v1/b/bucket/o/a
+http google GET /storage/v1/b/bucket/o/%2F%2F
+http google DELETE /storage/v1/b/bucket/o/a
+http google-mtls GET /anything
+http google-mtls POST /v1/x
+http google-mtls OPTIONS /v1/x

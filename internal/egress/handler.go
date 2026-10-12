@@ -46,8 +46,11 @@ type Policy struct {
 type LAN struct {
 	Resolved *Resolved
 	// Ports are each name's ports: empty for every port. A name not here
-	// is no LAN name.
+	// is no LAN name, unless Match says it is.
 	Ports map[string][]uint16
+	// Match is a version 2 document's lan patterns: the ports of the one
+	// that decides name, and whether one does. Nil for none.
+	Match func(name string) ([]uint16, bool)
 }
 
 // ReasonLAN is the reason on an egress line for a connection admitted to
@@ -109,6 +112,9 @@ func (p *Policy) DecideLAN(dst netip.AddrPort, d Decision) Decision {
 		return d
 	}
 	ports, named := p.LAN.Ports[e.Name]
+	if !named && p.LAN.Match != nil {
+		ports, named = p.LAN.Match(e.Name)
+	}
 	if !named || len(ports) > 0 && !slices.Contains(ports, dst.Port()) {
 		return d
 	}

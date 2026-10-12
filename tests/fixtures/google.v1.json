@@ -1,0 +1,39 @@
+{
+  "name": "google",
+  "allow": ["*.googleapis.com", "accounts.google.com"],
+  "routes": [
+    {
+      "name": "google",
+      "host": "*.googleapis.com",
+      "upstream": "https://*.googleapis.com",
+      "credentialFile": "/run/secrets/gcp-token.json",
+      "credentialJSON": {"token": "access_token", "expiresMillis": "expiry"},
+      "placeholder": "proxy-injected",
+      "unmatched": "ask",
+      "paths": [
+        {"methods": ["GET"], "path": "/v1/projects/*/secrets/*/versions/*",
+         "operation": {"id": "get", "summary": "Get a version", "class": "read", "category": "versions"}},
+        {"methods": ["GET"], "path": "/v1/projects/*/secrets/*/versions/*:access", "refuse": true,
+         "operation": {"id": "access", "summary": "Access a version", "class": "guarded", "category": "versions"}},
+        {"methods": ["GET"], "path": "/v1/projects/*/secrets/*/versions/latest:access", "ask": true,
+         "operation": {"id": "latest", "summary": "Access the latest version", "class": "guarded", "category": "versions"}},
+        {"methods": ["POST"], "path": "/v1/projects/*/secrets/*:addVersion", "ask": true,
+         "operation": {"id": "add", "summary": "Add a version", "class": "write", "category": "secrets"}},
+        {"methods": ["GET"], "prefix": "/v1/projects/*/locations/*:list",
+         "operation": {"id": "locations", "summary": "List locations", "class": "read", "category": "locations"}},
+        {"methods": ["GET"], "path": "/v1/projects/*/secrets/*", "ask": true,
+         "operation": {"id": "secret", "summary": "Get a secret", "class": "read", "category": "secrets"}},
+        {"methods": ["GET"], "path": "/v1/projects/*/secrets/*:getIamPolicy",
+         "operation": {"id": "policy", "summary": "Get a secret's policy", "class": "read", "category": "secrets"}},
+        {"methods": ["GET"], "path": "/storage/v1/b/*/o/*", "encodedSlashes": true,
+         "operation": {"id": "objects-get", "summary": "Get an object", "class": "read", "category": "objects"}}
+      ]
+    },
+    {
+      "name": "google-mtls",
+      "host": "*.mtls.googleapis.com",
+      "upstream": "https://*.mtls.googleapis.com",
+      "paths": [{"methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], "prefix": "/", "refuse": true}]
+    }
+  ]
+}

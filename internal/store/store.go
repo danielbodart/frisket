@@ -16,14 +16,17 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"github.com/danielbodart/frisket/policy"
 	"io"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"os"
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/danielbodart/frisket/hostpattern"
+	"github.com/danielbodart/frisket/policy"
 
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/credential"
@@ -65,7 +68,8 @@ func interceptHosts(p policy.Policy) ([]string, error) {
 }
 
 // allowCovers is whether every name host stands for is allowed: a name by
-// matching, and "*.suffix" by "*", or by a wildcard at or above suffix.
+// matching, and "*.suffix" by "*", or by a wildcard at or above suffix, or
+// by a version 2 pattern that matches every name below suffix.
 func allowCovers(allow *dns.Matcher, host string) bool {
 	suffix, wild := strings.CutPrefix(host, "*.")
 	if !wild {
@@ -73,6 +77,11 @@ func allowCovers(allow *dns.Matcher, host string) bool {
 	}
 	for _, p := range allow.Patterns() {
 		if p.Any || p.Wildcard && (p.Name == suffix || strings.HasSuffix(suffix, "."+p.Name)) {
+			return true
+		}
+	}
+	for _, p := range allow.HostPatterns() {
+		if p.CoversBelow(suffix) {
 			return true
 		}
 	}
@@ -171,11 +180,11 @@ func (s *Store) Open(path string) (serve.Policy, func(), error) {
 	}
 	e := s.built[key]
 	if e == nil {
-		var doc policy.Document
-		if err := policy.Decode(b, &doc); err != nil {
+		doc, err := policy.Load(b)
+		if err != nil {
 			return nil, nil, fmt.Errorf("policy %s: %w", path, err)
 		}
-		p, closers, err := build(doc.Name, doc.Policy, s.deps, s.up)
+		p, closers, err := build(doc, s.deps, s.up)
 		if err != nil {
 			return nil, nil, fmt.Errorf("policy %s: %w", path, err)
 		}
@@ -231,6 +240,23 @@ func Check(path string, d Deps) error {
 	}
 	release()
 	return nil
+}
+
+// CheckDocument builds a document from its bytes and closes it again, as
+// Check does a file's: a merged layer, which is in no file.
+func CheckDocument(b []byte, d Deps) error {
+	d.checking = true
+	s, err := NewStore(&Config{}, d)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	doc, err := policy.Load(b)
+	if err != nil {
+		return err
+	}
+	_, closers, err := build(doc, s.deps, s.up)
+	return errors.Join(err, closeAll(closers))
 }
 
 // underRoots is whether path is inside one of roots, or roots is empty.
@@ -290,7 +316,8 @@ func closeAll(closers []func() error) error {
 
 // build builds one policy and everything behind it, returning what closes
 // it. Nothing is left running if it fails.
-func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Policy, closers []func() error, err error) {
+func build(doc *policy.Lowered, d Deps, up dns.Exchanger) (_ serve.Policy, closers []func() error, err error) {
+	name, p := doc.Name, doc.Policy
 	defer func() {
 		if err != nil {
 			_ = closeAll(closers)
@@ -302,6 +329,9 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 	}
 	allow, err := dns.NewMatcher(p.Allow...)
 	if err != nil {
+		return nil, closers, fmt.Errorf("allow: %w", err)
+	}
+	if err := allow.AddHostPatterns(doc.AllowPatterns...); err != nil {
 		return nil, closers, fmt.Errorf("allow: %w", err)
 	}
 	hosts, err := interceptHosts(p)
@@ -325,6 +355,13 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 	if err != nil {
 		return nil, closers, err
 	}
+	lanPats, err := lanPatterns(doc.LANPatterns, p, hosts)
+	if err != nil {
+		return nil, closers, err
+	}
+	if lanPats != nil && lanPorts == nil {
+		lanPorts = map[string][]uint16{}
+	}
 
 	rec, err := recorder(name, p.Record, d)
 	if err != nil {
@@ -336,7 +373,7 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 
 	routes := make([]intercept.Route, 0, len(p.Routes))
 	for _, r := range p.Routes {
-		ir, closer, err := route(r, d)
+		ir, closer, err := route(r, doc.Scopes[r.Name], d)
 		if err != nil {
 			return nil, closers, fmt.Errorf("route %s: %w", r.Name, err)
 		}
@@ -426,6 +463,10 @@ func build(name string, p policy.Policy, d Deps, up dns.Exchanger) (_ serve.Poli
 				dc.LAN[n] = true
 			}
 			eg.Policy.LAN = &egress.LAN{Resolved: lan, Ports: lanPorts}
+			if lanPats != nil {
+				dc.LANPatterns = lanPats.patterns()
+				eg.Policy.LAN.Match = lanPats.match
+			}
 		}
 		if rec != nil {
 			// A set of the session's own, apart from resolved: what the
@@ -528,6 +569,79 @@ func lanHosts(p policy.Policy, allow, icpt *dns.Matcher) (map[string][]uint16, e
 	}
 	for n := range every {
 		out[n] = nil
+	}
+	return out, nil
+}
+
+// lanSet is a version 2 document's lan patterns, each with its ports.
+type lanSet []lanPattern
+
+type lanPattern struct {
+	p     hostpattern.Pattern
+	ports []uint16
+}
+
+func (s lanSet) patterns() []hostpattern.Pattern {
+	out := make([]hostpattern.Pattern, len(s))
+	for i, l := range s {
+		out[i] = l.p
+	}
+	return out
+}
+
+// match is the ports of the pattern that decides name, the narrowest.
+func (s lanSet) match(name string) ([]uint16, bool) {
+	keys := make([]string, len(s))
+	for i, l := range s {
+		keys[i] = l.p.String()
+	}
+	k := hostpattern.Best(keys, name, nil)
+	for _, l := range s {
+		if l.p.String() == k && k != "" {
+			return l.ports, true
+		}
+	}
+	return nil, false
+}
+
+// lanPatterns are a version 2 document's lan keys that are patterns: each
+// with a literal label, since one with none is every name of some depth,
+// and anybody's to give any address; matching no route's host and no
+// Docker name exactly. A name one matches reaches the local network only
+// if the allowlist allows it too, as the session's DNS answers nothing
+// else.
+func lanPatterns(keys map[string][]int, p policy.Policy, hosts []string) (lanSet, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	var projectNames []string
+	if dr := p.DockerRoute(); dr != nil {
+		projectNames = dr.Names
+	}
+	var out lanSet
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		pat, err := dns.CheckHostPattern(k)
+		if err != nil {
+			return nil, fmt.Errorf("lan: %w", err)
+		}
+		if !slices.ContainsFunc(strings.Split(k, "."), func(l string) bool { return !strings.Contains(l, "*") }) {
+			return nil, fmt.Errorf("lan %q: a pattern with no literal label is every name of its depth, and anybody's to give any address", k)
+		}
+		for _, n := range append(slices.Clone(hosts), projectNames...) {
+			if pat.Match(dns.Normalize(n)) {
+				return nil, fmt.Errorf("lan %q matches %s, which the session's DNS answers with an address of frisket's or the project's", k, n)
+			}
+		}
+		l := lanPattern{p: pat}
+		for _, port := range keys[k] {
+			if port < 1 || port > 65535 {
+				return nil, fmt.Errorf("lan %s: port %d: 1 to 65535", k, port)
+			}
+			if !slices.Contains(l.ports, uint16(port)) {
+				l.ports = append(l.ports, uint16(port))
+			}
+		}
+		out = append(out, l)
 	}
 	return out, nil
 }
@@ -693,37 +807,34 @@ func sessionCA(hosts []string, authority []byte) (*intercept.CA, []byte, error) 
 	return ca, b, err
 }
 
-// route builds one route and the watcher behind its credential, if it has one.
-func route(r policy.Route, d Deps) (intercept.Route, func() error, error) {
+// route builds one route and the watcher behind its credential, if it has
+// one. v2 is what a version 2 route says beyond its Paths, its endpoint
+// patterns; nil for a version 1 route.
+func route(r policy.Route, v2 *policy.ScopeV2, d Deps) (intercept.Route, func() error, error) {
 	out := intercept.Route{Name: r.Name, Host: r.Host, Upstream: r.Upstream}
 	if rf := r.Refusal; rf != nil {
 		out.Refusal = &intercept.Refusal{ContentType: rf.ContentType, Body: rf.Body}
 	}
-	switch r.Unmatched {
-	case "", "refuse":
-		if len(r.Paths) == 0 && r.Git == nil && len(r.GraphQL) == 0 {
-			return intercept.Route{}, nil, errors.New("no paths, no git and no graphql: a route with no scope admits nothing")
-		}
-	case "ask":
-		out.Scope.Unmatched = intercept.UnmatchedAsk
-	default:
-		return intercept.Route{}, nil, fmt.Errorf("unmatched %q: refuse or ask", r.Unmatched)
-	}
-	for _, p := range r.Paths {
-		rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, EncodedSlashes: p.EncodedSlashes, Ask: p.Ask, Refuse: p.Refuse}
-		o, err := operation(p.Operation)
-		if err != nil {
+	if v2 != nil {
+		if err := scopeV2(&out.Scope, r, *v2); err != nil {
 			return intercept.Route{}, nil, err
 		}
-		rule.Operation = o
-		if d := p.Docker; d != nil {
-			rule.Docker = &intercept.DockerRule{Owned: d.Owned, Param: d.Param, Body: d.Body, Upgrade: d.Upgrade}
-			if d.Query != nil {
-				rule.Docker.Query = map[string]intercept.QueryCheck{}
-				for k, c := range d.Query {
-					rule.Docker.Query[k] = intercept.QueryCheck{Check: c.Check, Filters: c.Filters, Enum: c.Enum}
-				}
+	} else {
+		switch r.Unmatched {
+		case "", "refuse":
+			if len(r.Paths) == 0 && r.Git == nil && len(r.GraphQL) == 0 {
+				return intercept.Route{}, nil, errors.New("no paths, no git and no graphql: a route with no scope admits nothing")
 			}
+		case "ask":
+			out.Scope.Unmatched = intercept.UnmatchedAsk
+		default:
+			return intercept.Route{}, nil, fmt.Errorf("unmatched %q: refuse or ask", r.Unmatched)
+		}
+	}
+	for _, p := range r.Paths {
+		rule, err := pathRule(p)
+		if err != nil {
+			return intercept.Route{}, nil, err
 		}
 		out.Scope.Paths = append(out.Scope.Paths, rule)
 	}
@@ -857,6 +968,70 @@ func dockerRoute(r policy.Route, out intercept.Route) (intercept.Route, func() e
 		Bodies:      bodies,
 	}
 	return out, func() error { return nil }, nil
+}
+
+// pathRule is a document's path rule as interception's.
+func pathRule(p policy.PathRule) (intercept.PathRule, error) {
+	rule := intercept.PathRule{Methods: p.Methods, Prefix: p.Prefix, Path: p.Path, EncodedSlashes: p.EncodedSlashes, Ask: p.Ask, Refuse: p.Refuse}
+	o, err := operation(p.Operation)
+	if err != nil {
+		return intercept.PathRule{}, err
+	}
+	rule.Operation = o
+	if d := p.Docker; d != nil {
+		rule.Docker = &intercept.DockerRule{Owned: d.Owned, Param: d.Param, Body: d.Body, Upgrade: d.Upgrade}
+		if d.Query != nil {
+			rule.Docker.Query = map[string]intercept.QueryCheck{}
+			for k, c := range d.Query {
+				rule.Docker.Query[k] = intercept.QueryCheck{Check: c.Check, Filters: c.Filters, Enum: c.Enum}
+			}
+		}
+	}
+	return rule, nil
+}
+
+// outcomes are a version 2 document's answers as interception's outcomes.
+var outcomes = map[string]intercept.Outcome{"allow": intercept.Admit, "ask": intercept.Ask, "refuse": intercept.Refuse}
+
+// scopeV2 sets a version 2 route's operations, ceiling and unmatched on
+// its scope, which decides by them at each request.
+func scopeV2(s *intercept.Scope, r policy.Route, v2 policy.ScopeV2) error {
+	s.V2 = true
+	switch v2.Unmatched {
+	case "allow":
+		s.Unmatched = intercept.UnmatchedAdmit
+	case "ask":
+		s.Unmatched = intercept.UnmatchedAsk
+	case "refuse":
+		s.Unmatched = intercept.UnmatchedRefuse
+	default:
+		return fmt.Errorf("unmatched %q: allow, ask or refuse", v2.Unmatched)
+	}
+	for _, e := range v2.Operations {
+		rule, err := pathRule(e.PathRule)
+		if err != nil {
+			return err
+		}
+		o, ok := outcomes[e.Answer]
+		if !ok {
+			return fmt.Errorf("operation %s: answer %q", rule.Operation.ID, e.Answer)
+		}
+		s.Operations = append(s.Operations, intercept.Endpoint{PathRule: rule, Outcome: o, Named: e.Named})
+	}
+	for class, a := range v2.Ceiling {
+		o, ok := outcomes[a]
+		if !ok {
+			return fmt.Errorf("ceiling %q: answer %q", class, a)
+		}
+		if s.Ceiling == nil {
+			s.Ceiling = map[string]intercept.Outcome{}
+		}
+		s.Ceiling[class] = o
+	}
+	if len(r.Paths) == 0 && len(v2.Operations) == 0 && r.Git == nil && len(r.GraphQL) == 0 && s.Unmatched == intercept.UnmatchedRefuse {
+		return errors.New("no paths, no operations, no git and no graphql, and unmatched refuses: a route with no scope admits nothing")
+	}
+	return nil
 }
 
 // operation is a rule's operation, its class one of the three.
@@ -1016,4 +1191,21 @@ func Dialer() (*egress.Classifier, *egress.Dialer, error) {
 	// choice, resolved as the host resolves it, and Control checks whatever
 	// address that gives.
 	return c, &egress.Dialer{Classifier: c}, nil
+}
+
+// RouteScope is the scope a document's route of that name is built with,
+// as a session opening the document would build it, credentials aside:
+// what intercept.Answer answers requests by.
+func RouteScope(doc *policy.Lowered, name string) (intercept.Scope, error) {
+	d := Deps{checking: true, Log: slog.New(slog.NewJSONHandler(io.Discard, nil))}
+	for _, r := range doc.Policy.Routes {
+		if r.Name == name {
+			ir, _, err := route(r, doc.Scopes[r.Name], d)
+			if err != nil {
+				return intercept.Scope{}, fmt.Errorf("route %s: %w", name, err)
+			}
+			return ir.Scope, nil
+		}
+	}
+	return intercept.Scope{}, fmt.Errorf("no route %q", name)
 }

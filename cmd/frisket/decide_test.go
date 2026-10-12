@@ -66,3 +66,48 @@ func TestCheckExecRefusesARouteTheDocumentDoesNotHave(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 }
+
+// check -http answers each request line as the route's scope does, and
+// says what a body still decides.
+func TestCheckHTTPAnswersEachRequest(t *testing.T) {
+	var out bytes.Buffer
+	in := strings.NewReader("POST /repos/o/r/pulls\nDELETE /repos/o/r/\nPOST /graphql\nPUT /x\n")
+	if err := decideRequests("../../tests/fixtures/github.v2.json", "api", in, &out); err != nil {
+		t.Fatal(err)
+	}
+	want := "allow\tpath\tpulls/create\n" +
+		"refuse\trefused by rule\trepos/delete\n" +
+		"refuse\tgraphql body unread\t-\tgraphql decides\n" +
+		"ask\tunmatched\t-\n"
+	if out.String() != want {
+		t.Errorf("got\n%s\nwant\n%s", out.String(), want)
+	}
+}
+
+// check -layer project merges a project's layer over its base and checks
+// both: the section chase.json keeps it under, and a host field refused.
+func TestCheckLayerProject(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, s string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	base := "../../tests/fixtures/github.v2.json"
+	good := write("chase.json", `{"frisket": {"routes": {"api": {"operations": {"repos/delete": "ask"}}}}, "flong": {}}`)
+	if err := checkLayer("project", base, "frisket", good, checkDeps); err != nil {
+		t.Errorf("a project's answer: %v", err)
+	}
+	bad := write("bad.json", `{"routes": {"api": {"upstream": "https://elsewhere.test"}}}`)
+	if err := checkLayer("project", base, "", bad, checkDeps); err == nil || !strings.Contains(err.Error(), "x-scope host") {
+		t.Errorf("a host field: %v", err)
+	}
+	if err := checkLayer("project", "", "", good, checkDeps); err == nil {
+		t.Error("no base was accepted")
+	}
+	if err := checkLayer("tier", base, "", good, checkDeps); err == nil {
+		t.Error("a tier layer was accepted")
+	}
+}

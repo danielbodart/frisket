@@ -1,0 +1,52 @@
+{
+  "version": 2,
+  "name": "github",
+  "allow": {"github.com": true, "api.github.com": true},
+  "routes": {
+    "github": {
+      "host": "github.com",
+      "upstream": "https://github.com",
+      "credentialFile": "/run/secrets/gh-token",
+      "placeholder": "proxy-injected",
+      "basicUser": "x-access-token",
+      "git": {"repos": {"owner/repo": true, "other/thing": true}},
+      "operations": {"GET,HEAD /**": "allow", "git-receive-pack": "ask"}
+    },
+    "api": {
+      "host": "api.github.com",
+      "upstream": "https://api.github.com",
+      "credentialFile": "/run/secrets/gh-token",
+      "placeholder": "proxy-injected",
+      "unmatched": "ask",
+      "paths": {
+        "POST /repos/*/*/pulls": {"operation": {"id": "pulls/create", "summary": "Create a pull request", "class": "write", "category": "pulls"}},
+        "PATCH /repos/*/*/pulls/*": {"operation": {"id": "pulls/update", "summary": "Update a pull request", "class": "write", "category": "pulls"}},
+        "DELETE /repos/*/*": {"operation": {"id": "repos/delete", "summary": "Delete a repository", "class": "guarded", "category": "repos"}},
+        "POST /repos/*/*/issues": {"operation": {"id": "issues/create", "summary": "Create an issue", "class": "write", "category": "issues"}}
+      },
+      "graphql": {
+        "/graphql": {
+          "query": {"operation": {"id": "graphql-query", "summary": "A GraphQL query", "class": "read"}},
+          "mutations": {
+            "closePullRequest": {"operation": {"id": "closePullRequest", "summary": "Close a pull request.", "class": "write", "category": "pulls"}},
+            "deleteRepository": {},
+            "addStar": {}
+          },
+          "unmatched": "ask"
+        }
+      },
+      "operations": {
+        "GET,HEAD /**": "allow",
+        "GET /user/keys/**": "refuse",
+        "POST /repos/me/app/dispatches": "ask",
+        "pulls/create": "allow",
+        "pulls/update": "ask",
+        "repos/delete": "refuse",
+        "issues/create": "ask",
+        "closePullRequest": "ask",
+        "deleteRepository": "refuse",
+        "addStar": "allow"
+      }
+    }
+  }
+}

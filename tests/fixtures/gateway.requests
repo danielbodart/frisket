@@ -1,0 +1,28 @@
+name allowed.test
+name api.test
+name x.wild.test
+name a.b.wild.test
+name wild.test
+name other.test
+http api GET /v1/things
+http api GET /v1/things/x?y=1
+http api GET /v1
+http api GET /v1/
+http api GET /V1/things
+http api DELETE /v1/things/yes
+http api DELETE /v1/things/yes/
+http api DELETE /V1/Things/x
+http api DELETE /v1/things/a%2Fb
+http api DELETE /v1/things
+http api POST /v1/things
+http api GET /v2
+http api GET /v1/../etc
+http wild GET /v1/projects/p/secrets/s/versions/1:access
+http wild GET /v1/projects/p/secrets/s/versions/1%3Aaccess
+http wild GET /v1/projects/p/secrets/s/versions/1:ACCESS
+http wild GET /v1/projects/p/secrets/s/versions/1
+http wild GET /storage/v1/b/bucket/o/a%2Fb
+http wild GET /storage/v1/b/bucket/o/a
+http wild GET /storage/v1/b/bucket/o/%2F
+http wild GET /storage/v2/x
+http wild POST /v1/x

@@ -13,7 +13,10 @@ package dns
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+
+	"github.com/danielbodart/frisket/hostpattern"
 )
 
 // maxName is the longest name in presentation form without the trailing dot:
@@ -191,6 +194,55 @@ type Matcher struct {
 	// "google.com" as a suffix, but not as a suffix that starts after a dot.
 	wild     map[string]struct{}
 	patterns []Pattern
+	// hosts are a version 2 document's keys that none of the three shapes
+	// says: hostpattern's, a label at a time.
+	hosts []hostpattern.Pattern
+}
+
+// AddHostPatterns adds keys in hostpattern's grammar -- "*.example.com"
+// for one label below it, "*-ap.lan" for a run of one -- each of lower-case
+// name bytes and *, so that it can match a name Match would consider. It
+// is how a version 2 document's allowlist says what ParsePattern's three
+// shapes cannot; a key one of them says is refused, to be said that way.
+func (m *Matcher) AddHostPatterns(keys ...string) error {
+	for _, k := range keys {
+		p, err := CheckHostPattern(k)
+		if err != nil {
+			return err
+		}
+		m.hosts = append(m.hosts, p)
+	}
+	return nil
+}
+
+// CheckHostPattern compiles a version 2 key that is a pattern, refusing
+// one no name Match considers could match: a byte that is not a name's or
+// *, upper case, which a name is normalised out of, or a label longer
+// than 63 bytes.
+func CheckHostPattern(k string) (hostpattern.Pattern, error) {
+	p, err := hostpattern.Compile(k)
+	if err != nil {
+		return p, err
+	}
+	for label := range strings.SplitSeq(k, ".") {
+		if len(label) > 63 {
+			return p, fmt.Errorf("pattern %q: label of %d bytes, longer than 63", k, len(label))
+		}
+		for i := 0; i < len(label); i++ {
+			if c := label[i]; c != '*' && !nameByte(c) || 'A' <= c && c <= 'Z' {
+				return p, fmt.Errorf("pattern %q: %q is in no name it could match: lower-case letters, digits, - and _", k, c)
+			}
+		}
+	}
+	return p, nil
+}
+
+// HostPatterns are the keys AddHostPatterns added.
+func (m *Matcher) HostPatterns() []hostpattern.Pattern {
+	if m == nil {
+		return nil
+	}
+	return slices.Clone(m.hosts)
 }
 
 // NewMatcher validates every pattern and fails on the first bad one, naming
@@ -260,6 +312,11 @@ func (m *Matcher) Match(name string) bool {
 			if _, ok := m.wild[n[i+1:]]; ok {
 				return true
 			}
+		}
+	}
+	for _, p := range m.hosts {
+		if p.Match(n) {
+			return true
 		}
 	}
 	return false

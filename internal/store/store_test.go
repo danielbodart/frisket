@@ -365,7 +365,7 @@ func TestARouteReadsItsCredentialFromJSON(t *testing.T) {
 		"paths":[{"methods":["POST"],"prefix":"/v1"}]}]}`), &doc); err != nil {
 		t.Fatal(err)
 	}
-	r, closer, err := route(doc.Routes[0], Deps{Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
+	r, closer, err := route(doc.Routes[0], nil, Deps{Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestARuleCarriesEncodedSlashesToItsScope(t *testing.T) {
 		"paths":[{"methods":["GET"],"path":"/storage/v1/b/*/o/*","encodedSlashes":true},{"methods":["GET"],"path":"/storage/v1/b/*"}]}]}`), &doc); err != nil {
 		t.Fatal(err)
 	}
-	r, _, err := route(doc.Routes[0], Deps{Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
+	r, _, err := route(doc.Routes[0], nil, Deps{Log: slog.New(slog.NewJSONHandler(&journal{}, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
