@@ -37,8 +37,37 @@ type Scope struct {
 	// Unmatched is what happens to a request nothing above decides: refused,
 	// the default, or asked about. Ask is how a route is secure by default
 	// without being closed by default -- an endpoint nobody has classified is
-	// not refused, it is put to a person.
+	// not refused, it is put to a person. Admitting is a version 2
+	// scope's alone.
 	Unmatched Unmatched
+
+	// V2 is a version 2 document's scope: Paths are its answers by endpoint
+	// pattern, Operations what its requests are, and Ceiling the most
+	// lenient a pattern may answer each class. See decideV2.
+	V2 bool
+	// Operations are what a version 2 route's requests are, each an
+	// endpoint and the operation it is, with what it is answered: by its
+	// id or category, Named, which no pattern overrules, or else by its
+	// class, which a pattern in Paths that matches the request does.
+	Operations []Endpoint
+	// Ceiling is, by operation class -- "write" or "guarded", and "" for a
+	// request no operation describes -- the most lenient answer a pattern
+	// in Paths may give a request of that class. An Endpoint's Outcome and
+	// Unmatched are clamped already, by whoever built them.
+	Ceiling map[string]Outcome
+}
+
+// Endpoint is one operation of a version 2 route: the methods and path a
+// PathRule matches, the operation they are and any Docker checks, and
+// what the operation is answered with.
+type Endpoint struct {
+	PathRule
+	// Outcome is the operation's answer: by its id or category if Named,
+	// else by its class.
+	Outcome Outcome
+	// Named is an answer by the operation's id or category, which beats
+	// every endpoint pattern.
+	Named bool
 }
 
 // Unmatched is a scope's answer to a request no rule matches.
@@ -47,6 +76,8 @@ type Unmatched int
 const (
 	UnmatchedRefuse Unmatched = iota
 	UnmatchedAsk
+	// UnmatchedAdmit is a version 2 scope's alone.
+	UnmatchedAdmit
 )
 
 // PathRule decides the listed methods at a path: exactly Path, or Prefix and
@@ -263,7 +294,26 @@ type compiled struct {
 	graphql   []compiledGraphQL
 	api       *GitHubAPIScope
 	unmatched Unmatched
+
+	// v2 is a version 2 scope: ops are its operations, paths its answers
+	// by endpoint pattern, and ceiling the most lenient a pattern may give
+	// each class.
+	v2      bool
+	ops     []compiledPath
+	ceiling map[string]Outcome
+
+	// twin is a test's: the same scope as version 2 would say it, decided
+	// beside this one and held to the same answers (see twinOf).
+	twin *compiled
 }
+
+// twinOf and checkTwin are set by the package's tests alone, to decide
+// every request every test makes under a version 1 scope under its
+// version 2 equivalent as well, and fail any that differ.
+var (
+	twinOf    func(Scope) Scope
+	checkTwin func(method string, u *url.URL, v1, v2 Verdict)
+)
 
 type compiledPath struct {
 	methods []string
@@ -277,6 +327,8 @@ type compiledPath struct {
 	operation      *Operation
 	// docker is an admitting rule's deferred checks, on a Docker route.
 	docker *dockerRule
+	// named is a version 2 operation answered by its id or category.
+	named bool
 }
 
 // strictness orders outcomes: admitting, then asking, then refusing.
@@ -305,10 +357,42 @@ func (p *compiledPath) verdict() Verdict {
 }
 
 func compileScope(s Scope) (*compiled, error) {
-	c := &compiled{unmatched: s.Unmatched}
-	if s.Unmatched != UnmatchedRefuse && s.Unmatched != UnmatchedAsk {
+	c := &compiled{unmatched: s.Unmatched, v2: s.V2}
+	switch {
+	case s.Unmatched == UnmatchedRefuse, s.Unmatched == UnmatchedAsk:
+	case s.Unmatched == UnmatchedAdmit && s.V2:
+	default:
 		return nil, fmt.Errorf("unmatched %d is neither refuse nor ask", s.Unmatched)
 	}
+	if !s.V2 && (len(s.Operations) > 0 || s.Ceiling != nil) {
+		return nil, errors.New("operations and a ceiling are a version 2 scope's")
+	}
+	for _, e := range s.Operations {
+		if e.Ask || e.Refuse {
+			return nil, errors.New("an operation is answered by its Outcome, never by ask or refuse")
+		}
+		if e.Operation == nil {
+			return nil, fmt.Errorf("operation at %s%s: no operation", e.Path, e.Prefix)
+		}
+		if !validOutcome(e.Outcome) {
+			return nil, fmt.Errorf("operation %s: outcome %d is not refuse, ask or admit", e.Operation.ID, e.Outcome)
+		}
+		cp, err := compilePath(e.PathRule)
+		if err != nil {
+			return nil, err
+		}
+		cp.outcome, cp.named = e.Outcome, e.Named
+		if d := e.Docker; d != nil {
+			cp.docker = &dockerRule{DockerRule: *d, operation: e.Operation}
+		}
+		c.ops = append(c.ops, cp)
+	}
+	for class, o := range s.Ceiling {
+		if !validOutcome(o) {
+			return nil, fmt.Errorf("ceiling for %q: outcome %d is not refuse, ask or admit", class, o)
+		}
+	}
+	c.ceiling = s.Ceiling
 	for _, p := range s.Paths {
 		cp, err := compilePath(p)
 		if err != nil {
@@ -355,8 +439,15 @@ func compileScope(s Scope) (*compiled, error) {
 		a := GitHubAPIScope{Repos: s.GitHubAPI.Repos, Methods: upper(s.GitHubAPI.Methods)}
 		c.api = &a
 	}
-	if len(c.paths) == 0 && c.git == nil && len(c.graphql) == 0 && c.api == nil && c.unmatched == UnmatchedRefuse {
+	if len(c.paths) == 0 && len(c.ops) == 0 && c.git == nil && len(c.graphql) == 0 && c.api == nil && c.unmatched == UnmatchedRefuse {
 		return nil, errors.New("scope admits nothing")
+	}
+	if twinOf != nil && !s.V2 {
+		twin, err := compileScope(twinOf(s))
+		if err != nil {
+			return nil, fmt.Errorf("version 2 twin: %w", err)
+		}
+		c.twin = twin
 	}
 	return c, nil
 }
@@ -470,6 +561,14 @@ func upper(ms []string) []string {
 // person about a request that could mean two different paths is asking them
 // to approve whichever one the upstream picks.
 func (c *compiled) decide(method string, u *url.URL) Verdict {
+	v := c.decided(method, u)
+	if c.twin != nil && checkTwin != nil {
+		checkTwin(method, u, v, c.twin.decided(method, u))
+	}
+	return v
+}
+
+func (c *compiled) decided(method string, u *url.URL) Verdict {
 	escaped := u.EscapedPath()
 	segs, err := splitPath(escaped)
 	if err != nil {
@@ -495,6 +594,9 @@ func (c *compiled) decide(method string, u *url.URL) Verdict {
 				return Verdict{Outcome: Refuse, Reason: "graphql body unread", deferred: g}
 			}
 		}
+	}
+	if c.v2 {
+		return c.decideV2(method, segs, raw)
 	}
 	if best := c.best(method, segs, raw, true); best != nil {
 		return c.verdict(method, segs, best)

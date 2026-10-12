@@ -312,9 +312,20 @@ func New(cfg Config) (*Interceptor, error) {
 			// egress dialer, is never asked to reach it.
 			rt.docker = newDockerRoute(*r.Docker, up.Path)
 			rt.tr = rt.docker.tr
-			for i := range sc.paths {
-				if d := sc.paths[i].docker; d != nil {
-					d.route = rt.docker
+			for _, rules := range [][]compiledPath{sc.paths, sc.ops} {
+				for i := range rules {
+					if d := rules[i].docker; d != nil {
+						d.route = rt.docker
+					}
+				}
+			}
+			if sc.twin != nil {
+				for _, rules := range [][]compiledPath{sc.twin.paths, sc.twin.ops} {
+					for i := range rules {
+						if d := rules[i].docker; d != nil {
+							d.route = rt.docker
+						}
+					}
 				}
 			}
 			modify = rt.docker.modify
