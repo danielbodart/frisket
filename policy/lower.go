@@ -552,16 +552,6 @@ func lowerRoute(name string, r RouteV2, d DocumentV2) (Route, *ScopeV2, error) {
 	return out, sc, nil
 }
 
-// RuleName splits an exec rule's key, as execrule names a rule: a command
-// pattern, a pattern and "[arg GLOB]", or "[arg GLOB]" alone.
-func RuleName(key string) (command, arg string) {
-	i := strings.Index(key, "[arg ")
-	if i < 0 || !strings.HasSuffix(key, "]") || i > 0 && key[i-1] != ' ' {
-		return key, ""
-	}
-	return strings.TrimSuffix(key[:i], " "), key[i+len("[arg ") : len(key)-1]
-}
-
 // sshHostOnly is whether an SSH entry sets anything only a machine has.
 func sshHostOnly(r SSHRouteV2) bool {
 	return r.Address != "" || r.User != "" || len(r.HostKeys) > 0 || r.Agent != "" || r.KeyFile != "" ||
@@ -645,7 +635,7 @@ func lowerSSH(d DocumentV2) ([]SSHRoute, error) {
 			keys[k] = true
 		}
 		for _, key := range slices.Sorted(maps.Keys(keys)) {
-			command, arg := RuleName(key)
+			command, arg := execrule.RuleName(key)
 			var op *Operation
 			class := ""
 			if o, ok := own.Commands[key]; ok {

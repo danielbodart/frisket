@@ -73,6 +73,35 @@ in
 {
   imports = [ self.nixosModules.default ];
 
+  # Beside the launchers rather than among them: services.frisket.flong is
+  # keyed by the launcher's name, and a launcher may be called anything,
+  # `protect` included.
+  options.services.frisket.protect = mkOption {
+    type = types.listOf (types.strMatching "/.*");
+    default = [ ];
+    example = [ "/run/quoin-sudo" "/run/galley-ask" ];
+    description = ''
+      Host paths no session any `services.frisket.flong` launcher starts
+      may reach: each is added to every such launcher's
+      `flong.<name>.protect`, so a bind that is, holds or lies inside one
+      fails the launch -- refused by flong check where it is written in the
+      declaration, and by the launcher's own canonical check where a hook
+      names it at launch.
+
+      Beside these, the adapter always protects the paths frisket itself is
+      given and serves or dials as the person: the control socket's
+      directory, `gitSigning.agent`'s, and `always.signer`'s and
+      `always.courier`'s. Every other socket on the host that answers as the
+      person is the deployer's to list here, because this module reads no
+      other module's options. A host that runs quoin beside frisket lists
+      quoin's sudo gate's directory, `/run/quoin-sudo`, whose socket would
+      run sudo as the person; galley's services directory,
+      `/run/galley-ask`, whose asker would put the session's own questions
+      to the person; and, if it gives quoin's signer to nothing of
+      frisket's, the signer's, `/run/quoin-signer`.
+    '';
+  };
+
   options.services.frisket.flong = mkOption {
     default = { };
     description = ''
@@ -142,14 +171,18 @@ in
           # The control socket's directory is the one way into a session from
           # outside, and no bind may reach it: a workload that could open the
           # socket would steer sessions, its own included. Nor may one reach
-          # the directories of quoin's signer and courier sockets that Always
-          # is given: a workload with the signer's would ask it as itself, and
-          # one with the courier's would read and write the person's project
-          # files. The rest of quoin's sockets, and galley's, are the
-          # deployer's to protect, in flong.<launcher>.protect: this adapter
-          # knows only the paths frisket is given.
-          protect = [ (dirOf cfg.controlSocket) ]
-            ++ map dirOf (lib.filter (p: p != null) [ cfg.always.signer cfg.always.courier ]);
+          # the directory of any socket frisket is given that answers as the
+          # person: the signer behind gitSigning.agent, which a workload
+          # could ask as itself for any sign the git-only socket in front of
+          # it refuses, and Always's signer and courier, the courier reading
+          # and writing the person's project files. Each is protected
+          # whenever it is set, whether or not anything uses it yet: a path
+          # left set is a socket someone meant to run. The rest of the host's
+          # such sockets are services.frisket.protect's, which every
+          # launcher gets, since this module reads no other's options.
+          protect = lib.unique ([ (dirOf cfg.controlSocket) ]
+            ++ map dirOf (lib.filter (p: p != null) [ cfg.gitSigning.agent cfg.always.signer cfg.always.courier ])
+            ++ cfg.protect);
           # Listeners, handed over, the rules, and the session's CA in its
           # mount namespace. A failure here ends the session: flong ends a
           # session whose hook exits non-zero.

@@ -267,6 +267,7 @@ A route can do more than add a bearer token. Each is in
 | `services.frisket.flong.<launcher>.policyFile` | `null` | A policy file of the launcher's own instead; `{machine}` in the path is the session's name. |
 | `services.frisket.flong.<launcher>.set` | `all` | `all` or `service`. See [Modes](#modes). |
 | `services.frisket.flong.<launcher>.params` | `{ }` | Recorded with each session, for a policy that reads them. |
+| `services.frisket.protect` | `[ ]` | Host paths no session of any of those launchers may reach, beside the ones the adapter always protects. See [frisket and quoin](#frisket-and-quoin). |
 
 Each policy is written to `/etc/frisket/policies/<name>.json` and checked with
 `frisket check` when the system builds. The daemon's own settings -- `dns`,
@@ -331,6 +332,23 @@ none of their options. A host running both lists `frisket.service` in
 logins unasked, and, for Always, in `services.quoin.signer.policySigners`
 and `services.quoin.policy.courier.peers`, and gives frisket the sockets'
 paths in `services.frisket.always`.
+
+The flong adapter keeps every session from the directories of the sockets
+frisket itself is given: the control socket's, `gitSigning.agent`'s and
+Always's signer's and courier's, whenever they are set. It knows no other,
+so a host running quoin, or galley, beside frisket must list theirs in
+`services.frisket.protect`, which every launcher's sessions are kept from:
+
+```nix
+services.frisket.protect = [
+  "/run/quoin-sudo"    # the sudo gate: sudo as you
+  "/run/galley-ask"    # galley's services: questions put to you
+  "/run/quoin-signer"  # the signer, if neither gitSigning nor Always is given it
+];
+```
+
+A bind that is, holds or lies inside one fails the launch, whether it is
+written in the launcher's declaration or named by a hook as it starts.
 
 ## Development
 

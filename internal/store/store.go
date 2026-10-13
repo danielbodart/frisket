@@ -1048,7 +1048,9 @@ func scopeV2(s *intercept.Scope, r policy.Route, v2 policy.ScopeV2) error {
 	return nil
 }
 
-// operation is a rule's operation, its class one of the three.
+// operation is a rule's operation, its class one of the three: a copy, the
+// one type policy and intercept both alias, so the route holds nothing of
+// the document it was read from.
 func operation(o *policy.Operation) (*intercept.Operation, error) {
 	if o == nil {
 		return nil, nil
@@ -1058,7 +1060,8 @@ func operation(o *policy.Operation) (*intercept.Operation, error) {
 	default:
 		return nil, fmt.Errorf("operation %s: class %q: read, write or guarded", o.ID, o.Class)
 	}
-	return &intercept.Operation{ID: o.ID, Summary: o.Summary, Description: o.Description, Class: o.Class, Category: o.Category}, nil
+	c := *o
+	return &c, nil
 }
 
 // graphqlScope reads a GraphQL endpoint's rules.

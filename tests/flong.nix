@@ -434,6 +434,8 @@ in
       # user as chase writes its own.
       "d /srv/policies/sessions 0755 alice users -"
       "d /srv/engine 0755 root root -"
+      "d /run/guarded 0700 alice users -"
+      "f /run/guarded/secret 0600 alice users - not-for-a-session"
     ];
 
     # The fake Engine, as her, on her runtime directory's socket: there as
@@ -729,6 +731,21 @@ in
       postStart = mark;
     };
     services.frisket.flong.signing.policy = "trusted";
+
+    # A directory of the host's that answers as alice, as a gatekeeper's
+    # socket directory would, which services.frisket.protect keeps from every
+    # session, and a launcher whose hook binds it in anyway: named at launch,
+    # where only the launcher's canonical check can see it.
+    services.frisket.protect = [ "/run/guarded" ];
+    flong.guarded = {
+      container = "strict";
+      user = "alice";
+      inherit workspace;
+      command = [ "bash" "-c" ];
+      binds = hook "guarded-dir" "echo /run/guarded";
+      postStart = mark;
+    };
+    services.frisket.flong.guarded.policy = "test";
   };
 
   testScript = { nodes, ... }:
@@ -743,6 +760,7 @@ in
       forwarded = lib.getExe nodes.machine.flong.forwarded.launcher;
       sshLauncher = lib.getExe nodes.machine.flong.ssh.launcher;
       recordLauncher = lib.getExe nodes.machine.flong.record.launcher;
+      guarded = lib.getExe nodes.machine.flong.guarded.launcher;
       sshAddr = nodes.upstream.networking.primaryIPAddress;
       frisket = lib.getExe nodes.machine.services.frisket.package;
       roots = nodes.machine.security.pki.caBundle;
@@ -1053,9 +1071,12 @@ in
           # TCP, both families. A datagram's ICMP error fails a connected
           # client as fast (measured), but dig does not act on one -- it waits
           # out its own timeout either way -- so it proves nothing here.
+          # Refused is curl failing on anything but its own -m deadline, 28:
+          # what a drop gives, below. How long the refusal took is not asked,
+          # being as much the machine's speed as frisket's.
           for cmd in ["curl -sS -m 5 ${url4}", "curl -sS -m 5 -g '${url6}'"]:
               status, out, took = timed(as_workload(leader, cmd))
-              assert status != 0 and status != 28 and took < 2, (cmd, status, out, took)
+              assert status != 0 and status != 28, (cmd, status, out, took)
           # And with the rejects made drops, the client hangs: the proof that
           # it is the rejects, and not the missing socket, that fail it fast.
           for pattern in [r"reject with tcp reset", r"reject with icmpx"]:
@@ -1762,6 +1783,12 @@ in
               assert bad not in lines, out
           # And it is still steered afterwards.
           assert "upstream-body" in out, out
+
+      with subtest("a path services.frisket.protect lists is reached by no session, even one a hook binds at launch"):
+          machine.succeed("test -s /run/guarded/secret")
+          out = machine.succeed(as_user("${guarded} 'cat /run/guarded/secret; echo ran' 2>&1; echo rc=$?"))
+          assert "which no session may reach" in out and "/run/guarded" in out, out
+          assert "ran" not in out.split() and "not-for-a-session" not in out and out.split()[-1] != "rc=0", out
 
       with subtest("a recording session admits what its policy would not, and writes each subject down"):
           doc = json.loads(machine.succeed("cat /etc/frisket/policies/test.json"))

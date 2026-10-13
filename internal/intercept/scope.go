@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // Scope is what a route's credential may be used for. A request is admitted,
@@ -123,18 +125,14 @@ type PathRule struct {
 
 // Operation is one of an API's operations as its own description names it.
 // It is the only prose a question carries: everything else in a question is
-// the request, shown as the request.
-type Operation struct {
-	ID          string `json:"id"`
-	Summary     string `json:"summary"`
-	Description string `json:"description,omitempty"`
-	// Class is what kind of operation the consumer judged it -- "read",
-	// "write" or "guarded" -- and Category is the API's own grouping of it.
-	// Carried to the person being asked and never matched on: the rule's
-	// outcome is what decides.
-	Class    string `json:"class,omitempty"`
-	Category string `json:"category,omitempty"`
-}
+// the request, shown as the request. It is quoin's execrule.Operation itself,
+// not a copy of its fields: a policy's rule, an SSH route's decision and an
+// HTTP route's question carry the one type, its Class -- "read", "write" or
+// "guarded", what the consumer judged it -- and Category -- the API's own
+// grouping -- shown to the person asked and never matched on, so a field
+// quoin gives it is one every route here has at once, and no conversion
+// between two lists of the same fields can fall out of step.
+type Operation = execrule.Operation
 
 // GitScope admits git over HTTPS as GitHub serves it: /{owner}/{repo}[.git]
 // followed by info/refs, git-upload-pack or git-receive-pack, and nothing

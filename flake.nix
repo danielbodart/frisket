@@ -160,12 +160,14 @@
                 always = eval.config.services.frisket.always.enable;
               });
 
-          # Every flong session is kept from the control socket's directory,
-          # and, where Always is given quoin's signer and courier, from
-          # theirs, and only then.
+          # Every flong session is kept from the control socket's directory;
+          # from the signer's behind gitSigning.agent, with Always off, and
+          # from Always's signer's and courier's, where they are set and only
+          # then; and from every path services.frisket.protect lists, once
+          # each, however many of these name the same directory.
           flong-protect =
             let
-              protect = always: (nixpkgs.lib.nixosSystem {
+              protect = frisket: (nixpkgs.lib.nixosSystem {
                 inherit system;
                 modules = [
                   flong.nixosModules.default
@@ -173,20 +175,31 @@
                   {
                     boot.isContainer = true;
                     system.stateVersion = "26.05";
-                    services.frisket.flong.box.policy = "p";
-                    services.frisket.always = always;
+                    services.frisket = frisket // { flong.box.policy = "p"; };
                   }
                 ];
               }).config.flong.box.protect;
-              want = { off = [ "/run/frisket" ]; on = [ "/run/frisket" "/run/quoin-signer" "/run/quoin-courier" ]; };
+              always = {
+                enable = true;
+                signer = "/run/quoin-signer/agent";
+                courier = "/run/quoin-courier/sock";
+                allowedSigners = "/etc/quoin/allowed_signers";
+                fileName = "chase.json";
+              };
+              want = {
+                off = [ "/run/frisket" ];
+                always = [ "/run/frisket" "/run/quoin-signer" "/run/quoin-courier" ];
+                gitSigning = [ "/run/frisket" "/run/quoin-signer" ];
+                listed = [ "/run/frisket" "/run/quoin-signer" "/run/quoin-courier" "/run/quoin-sudo" "/run/galley-ask" ];
+              };
               got = {
                 off = protect { };
-                on = protect {
-                  enable = true;
-                  signer = "/run/quoin-signer/agent";
-                  courier = "/run/quoin-courier/sock";
-                  allowedSigners = "/etc/quoin/allowed_signers";
-                  fileName = "chase.json";
+                always = protect { inherit always; };
+                gitSigning = protect { gitSigning.agent = "/run/quoin-signer/agent"; };
+                listed = protect {
+                  inherit always;
+                  gitSigning.agent = "/run/quoin-signer/agent";
+                  protect = [ "/run/quoin-sudo" "/run/galley-ask" "/run/quoin-signer" ];
                 };
               };
             in
@@ -300,7 +313,7 @@
                 ++ builtins.filter takes (builtins.attrNames bad);
             in
             assert nixpkgs.lib.assertMsg (wrong == [ ]) "policyFile judged wrongly: ${toString wrong}";
-            pkgs.writeText "frisket-policyfile-template" "ok";
+            pkgs.writeText "frisket-launcher-policyfile" "ok";
 
           # Formatting as a gate rather than a habit: this is one repository
           # with one formatter and no argument to have about it.

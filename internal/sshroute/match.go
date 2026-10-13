@@ -29,12 +29,7 @@ func decision(d execrule.Decision) Decision {
 	if d.Rule == execrule.RuleUnmatched {
 		out.Rule = intercept.RuleUnmatched
 	}
-	if d.Operation != nil {
-		out.Operation = (*intercept.Operation)(d.Operation)
-	}
-	for _, o := range d.Operations {
-		out.Operations = append(out.Operations, (*intercept.Operation)(o))
-	}
+	out.Operation, out.Operations = d.Operation, d.Operations
 	return out
 }
 

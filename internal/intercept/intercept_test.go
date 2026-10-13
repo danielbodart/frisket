@@ -760,7 +760,6 @@ func TestStreamsArriveIncrementally(t *testing.T) {
 				f := newFixture(t, j, apiRoute(up, cred))
 				c := f.client(t, h2)
 
-				start := time.Now()
 				res, err := c.Do(newRequest(t, "GET", "https://"+apiHost+"/v1/stream", nil))
 				if err != nil {
 					t.Fatal(err)
@@ -771,19 +770,18 @@ func TestStreamsArriveIncrementally(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				firstAt := time.Now()
 				close(release)
 				if first != "data: one\n" {
 					t.Fatalf("first line %q", first)
 				}
-				// The timing assertion: the first event arrived while the
-				// upstream was still holding the stream open, and well within
-				// the upstream's own ten-second give-up.
+				// The ordering assertion: the first event arrived while the
+				// upstream was still holding the stream open. A buffered
+				// stream gives it only once the upstream lets go, which with
+				// no release is its own ten-second give-up, so this needs no
+				// bound on how long the event took, which would measure the
+				// machine the test runs on as much as the proxy.
 				if released.Load() != 0 {
 					t.Fatal("the first event arrived only after the upstream finished: the stream was buffered")
-				}
-				if d := firstAt.Sub(start); d > 5*time.Second {
-					t.Fatalf("the first event took %v", d)
 				}
 				rest, err := io.ReadAll(br)
 				if err != nil {
