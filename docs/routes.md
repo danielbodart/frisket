@@ -320,9 +320,11 @@ refusal = {
 A version 2 route or SSH machine marked `"always": true` -- a field only the
 host sets, for a route whose answers a project's file is merged into, which
 chase marks and strict's tiers never are -- offers Always on its questions,
-when frisket's settings name the signer and the courier (`always` in
-`/etc/frisket/config.json`, which the module fills in when both are on). The
-question then also has:
+when frisket's settings name [quoin](https://github.com/danielbodart/quoin)'s
+signer and courier (`always` in `/etc/frisket/config.json`, which the module
+fills in from `services.frisket.always`: `enable`, and the `signer`,
+`courier`, `allowedSigners` and `fileName` it needs). The question then also
+has:
 
 ```json
 {"always": true,
@@ -335,7 +337,7 @@ The rule is the specific one asked about: the request's operation id, or
 failing one its `METHOD /exact/path`, under `frisket.routes.<route>.operations`;
 an SSH command's literal words, under `frisket.ssh.<machine>.exec`, for a
 command that is one simple command of plain words. It is offered only where
-it would stand: the session's workspace's file (`services.frisket.policy.fileName`)
+it would stand: the session's workspace's file (`services.frisket.always.fileName`)
 is absent or verifies and is canonical, with no `chase.jsonc`-style commented
 form beside an absent one; the rule merged over the session's document by
 `frisket check -layer project`'s own check admits the request, so no ceiling
@@ -349,10 +351,12 @@ be answered so. galley shows both and prints it: `jq -c .diff | galley
 `systemd-run --user --pipe` passes on where a file in frisket's private
 `/tmp` would not reach. The request is admitted, and the rule admits what it
 names for the rest of the session at once, logged with rule `always`.
-Meanwhile frisket's main process has frisket-signer's `policy-sign@frisket`
+Meanwhile frisket's main process has quoin-signer's `policy-sign@quoin`
 sign the new file, approved -- the answer was the approval, so the signer asks
-nothing more, and takes approved from no one else -- and the courier writes it
-and its `.sig` over the file as read; the next launch merges it. A sign or
+nothing more, and takes approved only from a unit its `policySigners` names,
+which a host running both makes `frisket.service` -- and quoin-courier, which
+takes `frisket.service` as a peer, writes it and its `.sig` over the file as
+read; the next launch merges it. A sign or
 write that fails (the file changed meanwhile, say) leaves the request
 admitted for the session, logs `always` with `outcome` `not saved`, and puts a
 notice to the asker: `{"kind": "notice", "text": "…"}`, said rather than
@@ -442,7 +446,7 @@ route's, else the document's. `encodedSlashes` names the path templates --
 or single endpoints, `"GET /storage/v1/b/*/o/*"` -- whose `*` takes a segment
 holding an encoded slash.
 
-An SSH route answers in `exec`, keyed by the rule as execrule names one:
+An SSH route answers in `exec`, keyed by the rule as quoin's execrule names one:
 `"systemctl status *"`, `"less ** [arg +*]"`, `"[arg .ssh]"` for every
 command; an arg rule answered `allow` is no rule, since one only tightens.
 `commands`, by the same key, is what each rule is, and a rule there that
@@ -456,8 +460,8 @@ readable command no rule matches and refuses what cannot be read.
 layer says otherwise and clamped by `ceiling.interactive`; a route has none
 ([docs/ssh.md](ssh.md#interactive-shells)).
 
-Hosts: `allow` and `lan` keys are names or host patterns, the signer's grammar
-(hostpattern): `*` one label, `*` within a label a run of it (`*-ap.lan`),
+Hosts: `allow` and `lan` keys are names or host patterns, quoin's signer's
+grammar (its package hostpattern, which frisket imports): `*` one label, `*` within a label a run of it (`*-ap.lan`),
 and `**` as the first label one or more -- so version 1's `*.example.com` is
 `**.example.com` here, and `*` is `**`. A route's `host` is a name or
 `**.suffix`, its `upstream` `https://**.suffix` to match. A lan pattern needs

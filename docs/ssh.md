@@ -120,10 +120,14 @@ so a document is checked where neither exists. `frisket check -exec <name>
 that route decides it -- `allow`, `ask` or `refuse`, a tab, and the rule --
 so a route's rules are tested as commands, by frisket's own reading of them.
 A Go program that writes rules can do the same in process: the public
-package `github.com/danielbodart/frisket/execrule` is the reading itself --
-`execrule.Compile(route)` checks a route's `exec`, `env` and `unmatched` as
-frisket does, and `Decide(command)` answers as the route would -- which is
-how chase tests its catalogue, with no copy of the grammar to drift.
+package `github.com/danielbodart/quoin/execrule`, which frisket imports, is
+the reading itself -- `execrule.Compile(route.Spec)` checks a route's `exec`,
+`env` and `unmatched` as frisket does, and `Decide(command)` answers as the
+route would -- which is how chase tests its catalogue, with no copy of the
+grammar to drift. A route's `shell`, `exec`, `env` and `unmatched` are
+execrule's `Spec`, embedded in `policy.SSHRoute`, and an exec rule is its
+`Rule`: one definition, in quoin
+([github.com/danielbodart/quoin](https://github.com/danielbodart/quoin)).
 
 ## Commands
 

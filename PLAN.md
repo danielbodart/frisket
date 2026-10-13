@@ -1194,7 +1194,11 @@ is shaped so is below.
   package `execrule`, beside `policy` and `docker`: `Compile(route)` and
   `Rules.Decide(command)`, what frisket decides by. chase tests its
   catalogue of commands with it, rather than with a copy that could drift
-  or through `frisket check -exec` alone.
+  or through `frisket check -exec` alone. (It now lives in
+  [quoin](https://github.com/danielbodart/quoin), as
+  `github.com/danielbodart/quoin/execrule`, with its own `Spec`, `Rule` and
+  `Operation`, which frisket's `policy` embeds and aliases; frisket imports
+  it.)
 
 ### Recording (decided; phase 1 built)
 

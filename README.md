@@ -248,8 +248,10 @@ A route can do more than add a bearer token. Each is in
 | `services.frisket.user` / `group` | `frisket` | Who the daemon runs as: the owner of the credential files. |
 | `services.frisket.policies.<name>.allow` | `[ ]` | Names a sandbox may resolve: `name`, `*.name` (any depth below) or `*`. |
 | `services.frisket.policies.<name>.routes.<route>` | `{ }` | An intercepted host: `host`, `upstream`, `credentialFile`, `placeholder`, `paths`, … See [docs/routes.md](docs/routes.md). |
-| `services.frisket.policies.<name>.gitSigning` | `false` | Serve `/run/frisket-sign/<name>/agent`, which signs git commits through `gitSigning.agent` and nothing else. See [docs/signer.md](docs/signer.md#commit-signing-from-a-sandbox). |
-| `services.frisket.gitSigning.agent` | `null` | The agent those sockets pass git signs on to, such as `/run/frisket-signer/agent`. |
+| `services.frisket.policies.<name>.gitSigning` | `false` | Serve `/run/frisket-sign/<name>/agent`, which signs git commits through `gitSigning.agent` and nothing else. See [Commit signing from a sandbox](#commit-signing-from-a-sandbox). |
+| `services.frisket.gitSigning.agent` | `null` | The agent those sockets pass git signs on to, such as quoin's `/run/quoin-signer/agent`. |
+| `services.frisket.always.enable` | `false` | Offer Always on a question a version 2 route or machine marked `always` asks: the rule signed into the workspace's project file. See [docs/routes.md](docs/routes.md#always). |
+| `services.frisket.always.signer` / `courier` / `allowedSigners` / `fileName` | `null` | What Always needs: quoin's signer and courier sockets, its allowed signers and the project file's name, such as `/run/quoin-signer/agent`, `/run/quoin-courier/sock`, `/etc/quoin/allowed_signers` and `chase.json`. |
 | `services.frisket.asker` | `null` | The program a question goes to; `null` refuses every question. |
 | `services.frisket.askerConcurrent` / `askerPerSession` | `1` / `1` | Questions open at once, and per session; a recording session's wait rather than being refused. |
 | `services.frisket.dns` | host's `resolv.conf` | Where frisket resolves allowed names. |
@@ -269,7 +271,7 @@ A route can do more than add a bearer token. Each is in
 Each policy is written to `/etc/frisket/policies/<name>.json` and checked with
 `frisket check` when the system builds. The daemon's own settings -- `dns`,
 `logLevel`, `controlSocket`, `policyRoots`, `asker`, `askerConcurrent`,
-`askerPerSession`, `maxConnections`, `gitSigning` and the module's
+`askerPerSession`, `maxConnections`, `gitSigning`, `always` and the module's
 `recordDir` -- are written to `/etc/frisket/config.json`, keys named as the
 options are, checked with `frisket check -config` when the system builds and
 read strictly by `frisket serve -config`, default that path: a key it does not
@@ -278,11 +280,57 @@ prints the file's JSON Schema. A policy document may also be version 2, the
 shape a session's layers are merged in, whose routes answer operations by id,
 category, endpoint pattern and class under a ceiling
 ([docs/routes.md](docs/routes.md#version-2)); `frisket schema` prints its
-schema. A project's own signed policy file, its
-allowed signers and the courier that carries it from your home are in
-[docs/policy.md](docs/policy.md). Not using flong? See
+schema. A project's own signed policy file, what frisket reads of it,
+and how a session's layers merge are in [docs/policy.md](docs/policy.md);
+the file's format, its allowed signers, the signer that signs it and the
+courier that carries it from your home are
+[quoin](https://github.com/danielbodart/quoin)'s. Not using flong? See
 [docs/launchers.md](docs/launchers.md). The design, and what was measured and
 rejected, is in [PLAN.md](PLAN.md).
+
+## Commit signing from a sandbox
+
+frisket serves a policy's sandboxes an agent socket that only signs git
+commits:
+
+```nix
+services.frisket = {
+  gitSigning.agent = "/run/quoin-signer/agent";
+  policies.strict.gitSigning = true;
+};
+```
+
+```
+$ ls -l /run/frisket-sign/strict
+srw------- 1 alice users 0 ... agent
+```
+
+Bind `/run/frisket-sign/<policy>` into the sandbox at the same path and set
+`SSH_AUTH_SOCK=/run/frisket-sign/<policy>/agent`. The socket lists the
+upstream agent's keys and passes on a sign whose data is an SSHSIG in the
+`git` namespace, which [quoin](https://github.com/danielbodart/quoin)'s
+signer, as the upstream, makes under its `sshsig.git`. Every other sign,
+key management, lock and every extension, `session-bind` and
+`policy-sign@quoin` among them, is refused. Only `services.frisket.user`
+may connect, from any user namespace. The directory is kept across a
+restart of frisket, so a bind of it stays good. Each request is one
+`decision` line in frisket's journal, with the policy, the peer's pid, the
+namespace and the outcome.
+
+## frisket and quoin
+
+The host's gatekeepers -- the TPM-backed SSH signer, the sudo gate and the
+courier that carries a project's signed policy file -- were written here
+and are now [quoin](https://github.com/danielbodart/quoin), a repository of
+their own. frisket imports quoin's public Go packages (`projpolicy`,
+`execrule`, `hostpattern`, `policysign`, `courier`, `peer`, `sdnotify`)
+rather than copies, so the two read a project's file, a command pattern and
+each other's wire the same way; it deploys none of quoin's modules and reads
+none of their options. A host running both lists `frisket.service` in
+`services.quoin.signer.loginSigners`, so the signer signs an SSH route's
+logins unasked, and, for Always, in `services.quoin.signer.policySigners`
+and `services.quoin.policy.courier.peers`, and gives frisket the sockets'
+paths in `services.frisket.always`.
 
 ## Development
 
