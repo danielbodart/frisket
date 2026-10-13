@@ -16,8 +16,8 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"github.com/danielbodart/frisket/hostpattern"
 	"github.com/danielbodart/frisket/internal/steer"
+	"github.com/danielbodart/quoin/hostpattern"
 )
 
 // Defaults for the knobs on Config.

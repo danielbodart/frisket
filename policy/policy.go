@@ -24,6 +24,7 @@ import (
 	"net/netip"
 
 	"github.com/danielbodart/frisket/project"
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // Document is a policy as its file holds it: the policy, and a name for the
@@ -149,27 +150,20 @@ type SSHRoute struct {
 	// where an agent holds several and a server counts every one it is
 	// offered against its limit. Never with PasswordFile.
 	Identity string `json:"identity,omitempty"`
-	// Shell is for a device whose login shell ignores the command an exec
-	// carries -- a router's or a modem's CLI. frisket opens that shell on a
-	// terminal instead, types the command into it, and gives back what it
-	// printed. Only a single simple command of plain words is readable on
-	// such a route, since the device's shell is no shell frisket knows the
-	// grammar of, and none of the command's stdin is sent.
-	Shell bool `json:"shell,omitempty"`
-	// Exec decides each simple command in a command by the most literal
-	// pattern it matches, made stricter by every arg rule that matches it;
-	// the strictest of them decides the command.
-	Exec []ExecRule `json:"exec,omitempty"`
-	// Env are the variables a command may set for itself -- `LANG=C ls`,
-	// `env LC_ALL=C ls` -- and still be decided as the command it runs: each
-	// a name, or a name's start and a trailing "*", as "LC_*". A command
-	// setting any other is unreadable. A name that changes what any command
-	// runs -- PATH, LD_*, BASH_ENV and their kin -- is refused.
-	Env []string `json:"env,omitempty"`
-	// Unmatched is "ask", the default here, unlike a route's, or "refuse":
-	// for a simple command no rule matches, and every command a shell would
-	// read as anything but its words.
-	Unmatched string `json:"unmatched,omitempty"`
+	// Spec is how the route decides a command, in execrule's own type, so
+	// that what decides and what a document says are one definition: Shell,
+	// for a device whose login shell ignores the command an exec carries --
+	// a router's or a modem's CLI -- which frisket opens on a terminal
+	// instead, types the command into, and gives back what it printed, with
+	// none of the command's stdin sent; Exec, the rules each simple command
+	// is decided by, the most literal pattern it matches made stricter by
+	// every arg rule that matches it; Env, the variables a command may set
+	// for itself and still be decided as the command it runs; and
+	// Unmatched, "ask", the default here, unlike a route's, or "refuse", for
+	// a simple command no rule matches and every command a shell would read
+	// as anything but its words. Its fields are the route's own JSON keys,
+	// as they always were.
+	execrule.Spec
 	// Interactive is "allow", "ask" or "refuse", and "" is refuse: whether
 	// the sandbox may open an interactive shell on the machine, which
 	// frisket then relays as it is, deciding nothing typed into it. Only a
@@ -179,24 +173,9 @@ type SSHRoute struct {
 }
 
 // ExecRule decides the simple commands Command matches: admitted, asked
-// about, or refused. With Arg, it only tightens: it asks about or refuses
-// those of them with an argument Arg matches, or, with no Command, every
-// simple command with one.
-type ExecRule struct {
-	// Command is words separated by single spaces: each literal, "*" for
-	// exactly one word, or, last, "**" for any number of them. Optional
-	// with Arg.
-	Command string `json:"command,omitempty"`
-	// Arg is a glob whose "*" is any run of characters but "/", matched
-	// against each argument whole, what follows its first "=", and each
-	// "/"-separated part of either. A rule with one must ask or refuse.
-	Arg    string `json:"arg,omitempty"`
-	Ask    bool   `json:"ask,omitempty"`
-	Refuse bool   `json:"refuse,omitempty"`
-	// Operation is what the rule is, as a path rule's is: shown to the
-	// person asked and logged, never matched on.
-	Operation *Operation `json:"operation,omitempty"`
-}
+// about, or refused. It is execrule's Rule, the one definition the rules
+// are compiled from and a document written with.
+type ExecRule = execrule.Rule
 
 // Route is one intercepted host, as data: a bearer token, Basic with a fixed
 // user, or a bare header, from a file -- the whole of it, or a field of its
@@ -483,16 +462,11 @@ type PathRule struct {
 }
 
 // Operation is what a rule is, in its API's own words: what a person is shown
-// when they are asked about a request that matched it.
-type Operation struct {
-	ID          string `json:"id"`
-	Summary     string `json:"summary"`
-	Description string `json:"description,omitempty"`
-	// Class is "read", "write" or "guarded", and Category the API's own
-	// grouping: shown to the person asked, never matched on.
-	Class    string `json:"class,omitempty"`
-	Category string `json:"category,omitempty"`
-}
+// when they are asked about a request that matched it. It is execrule's, so
+// an SSH rule's and a path rule's are the one type: an id and a summary,
+// and a description, a class ("read", "write" or "guarded") and the API's
+// own category, shown to the person asked and never matched on.
+type Operation = execrule.Operation
 
 // Decode refuses any field it does not know, and anything after the one
 // value: a misspelt key in a policy is a rule that silently does not apply.

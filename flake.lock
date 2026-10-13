@@ -36,10 +36,31 @@
         "type": "github"
       }
     },
+    "quoin": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791885017,
+        "narHash": "sha256-2No/Zulq7u1qi9T41pCcxVdJc3m/mgd9E7etMIDOJgw=",
+        "owner": "danielbodart",
+        "repo": "quoin",
+        "rev": "3c8b14beb8c6a99957849cb4ed140368df37569c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "danielbodart",
+        "repo": "quoin",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flong": "flong",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "quoin": "quoin"
       }
     }
   },

@@ -27,18 +27,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/danielbodart/frisket/internal/agentsrv"
 	"github.com/danielbodart/frisket/internal/always"
 	"github.com/danielbodart/frisket/internal/ask"
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/dns"
 	"github.com/danielbodart/frisket/internal/egress"
+	"github.com/danielbodart/frisket/internal/gitsign"
 	"github.com/danielbodart/frisket/internal/nsnet"
-	"github.com/danielbodart/frisket/internal/sdnotify"
 	"github.com/danielbodart/frisket/internal/serve"
 	"github.com/danielbodart/frisket/internal/steering"
 	"github.com/danielbodart/frisket/internal/store"
 	"github.com/danielbodart/frisket/policy"
+	"github.com/danielbodart/quoin/sdnotify"
 )
 
 // version is stamped at build time. scripts/version.sh derives the real one
@@ -142,29 +142,6 @@ const usage = `frisket -- credentials on the wire, never in the sandbox
         passed to it; otherwise on -listen (default 127.0.0.153:53), UDP and
         TCP.
 
-  frisket policy verify [-allowed-signers FILE] [-home DIR] POLICY
-        Verify POLICY.sig over POLICY's exact bytes, in the namespace of
-        POLICY's directory, frisket-policy:~/rel under DIR (default $HOME)
-        and frisket-policy:/abs/path elsewhere, against the allowed signers
-        (default ` + defaultAllowedSigners + `). Exits 0 when it verifies,
-        else says why not.
-
-  frisket policy fmt [-check] POLICY
-        Rewrite POLICY in the canonical form a policy is signed in: keys
-        sorted, two-space indent, a newline at the end, integers only. With
-        -check, only say whether it already is.
-
-  frisket policy signers FILE
-        Read an allowed signers file as verify would, and list its lines.
-
-  frisket policy sign [-agent SOCKET] [-old FILE] POLICY
-        Have the signer sign POLICY, already canonical, in its directory's
-        namespace: galley shows the change and asks, and on Allow POLICY.sig
-        is written. The change is shown against the bytes POLICY.sig was
-        made over, -old FILE or else git's HEAD of POLICY, when the signature
-        verifies over them; otherwise against nothing. -agent defaults to
-        $SSH_AUTH_SOCK.
-
   frisket sessions        What the daemon holds, one JSON object per line.
   frisket steering FILE   Check a steering file and print what it will do.
 
@@ -198,8 +175,6 @@ func main() {
 		err = runSchema(args)
 	case "dns":
 		err = runDNS(args)
-	case "policy":
-		err = runPolicy(args, os.Stdout)
 	case "helper":
 		err = nsnet.RunHelper(args, os.Stderr, steering.Serve)
 	case "version":
@@ -294,7 +269,7 @@ func runServe(argv []string) error {
 		if err != nil {
 			return err
 		}
-		g := &agentsrv.Git{Policy: name, UID: os.Getuid(), Upstream: c.GitSigning.Agent, Log: log}
+		g := &gitsign.Server{Policy: name, UID: os.Getuid(), Upstream: c.GitSigning.Agent, Log: log}
 		go func() { log.Error("git signing socket", "policy", name, "err", g.Serve(ln).Error()) }()
 	}
 	policies, err := store.NewStore(cfg, deps)

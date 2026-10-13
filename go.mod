@@ -8,10 +8,9 @@ module github.com/danielbodart/frisket
 go 1.26.0
 
 require (
-	github.com/danielbodart/galley v0.29.21-0.20261012161250-a79ebab9952e
-	github.com/foxboron/go-tpm-keyfiles v0.0.0-20260427185012-515ba073c4c1
+	github.com/danielbodart/galley v0.30.22-0.20261013085913-4f8859f2327b
+	github.com/danielbodart/quoin v0.0.0-20261013095017-3c8b14beb8c6
 	github.com/go-jose/go-jose/v4 v4.1.5
-	github.com/google/go-tpm v0.9.9-0.20260124013517-8f8f42cba0de
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0

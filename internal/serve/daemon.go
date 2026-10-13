@@ -15,8 +15,8 @@ import (
 
 	"github.com/danielbodart/frisket/internal/control"
 	"github.com/danielbodart/frisket/internal/nsnet"
-	"github.com/danielbodart/frisket/internal/peer"
-	"github.com/danielbodart/frisket/internal/sdnotify"
+	"github.com/danielbodart/quoin/peer"
+	"github.com/danielbodart/quoin/sdnotify"
 	"golang.org/x/sys/unix"
 )
 

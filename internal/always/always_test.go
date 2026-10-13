@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielbodart/frisket/internal/agentsrv"
 	"github.com/danielbodart/frisket/internal/always"
 	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/internal/store"
 	"github.com/danielbodart/frisket/policy"
-	"github.com/danielbodart/frisket/projpolicy"
+	"github.com/danielbodart/quoin/policysign"
+	"github.com/danielbodart/quoin/projpolicy"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -33,7 +33,7 @@ type fixture struct {
 	w        *always.Writer
 	log      *bytes.Buffer
 	mu       sync.Mutex
-	signed   []agentsrv.PolicySignRequest
+	signed   []policysign.Request
 	notices  []intercept.Question
 	failSign error
 }
@@ -48,7 +48,7 @@ func newFixture(t *testing.T) *fixture {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	signer, _ := ssh.NewSignerFromKey(priv)
 	signers := filepath.Join(home, "allowed_signers")
-	line := `dan namespaces="frisket-policy:*" ` + string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
+	line := `dan namespaces="quoin-policy:*" ` + string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
 	if err := os.WriteFile(signers, []byte(line), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	return l.f.log.Write(p)
 }
 
-func (f *fixture) sign(_ context.Context, req agentsrv.PolicySignRequest) ([]byte, error) {
+func (f *fixture) sign(_ context.Context, req policysign.Request) ([]byte, error) {
 	f.mu.Lock()
 	f.signed = append(f.signed, req)
 	fail := f.failSign
@@ -113,7 +113,7 @@ func (f *fixture) file(body string, signed bool) {
 	}
 	os.Remove(path + projpolicy.SigSuffix)
 	if signed {
-		sig, err := projpolicy.Sign(rand.Reader, f.signer, "frisket-policy:~/Projects/foo", []byte(body))
+		sig, err := projpolicy.Sign(rand.Reader, f.signer, "quoin-policy:~/Projects/foo", []byte(body))
 		if err != nil {
 			f.t.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func TestAlwaysOffersTheRuleAndWritesIt(t *testing.T) {
 		t.Errorf("file %q", got)
 	}
 	signers, _ := projpolicy.ReadAllowedSigners(filepath.Join(f.home, "allowed_signers"))
-	if _, err := projpolicy.Verify([]byte(got), sig, "frisket-policy:~/Projects/foo", signers, "dan", time.Now()); err != nil {
+	if _, err := projpolicy.Verify([]byte(got), sig, "quoin-policy:~/Projects/foo", signers, "dan", time.Now()); err != nil {
 		t.Error(err)
 	}
 	if len(f.signed) != 1 || !f.signed[0].Approved || f.signed[0].Root != f.ws || f.signed[0].Name != "chase.json" {

@@ -29,6 +29,7 @@ import (
 	"github.com/danielbodart/frisket/internal/record"
 	"github.com/danielbodart/frisket/internal/steer"
 	"github.com/danielbodart/frisket/policy"
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // routeAddr is where the sandbox believes the machine is. Nothing listens
@@ -421,7 +422,7 @@ func newFixture(t *testing.T, o options) *fixture {
 		User:     "dan",
 		HostKeys: []string{authorized(hostKeys[len(hostKeys)-1].PublicKey())},
 		Agent:    keyring(t, userKey),
-		Exec: []policy.ExecRule{
+		Spec: execrule.Spec{Exec: []policy.ExecRule{
 			{Command: "echo **"},
 			{Command: "cat"},
 			{Command: "fail *"},
@@ -429,7 +430,7 @@ func newFixture(t *testing.T, o options) *fixture {
 			{Command: "both *"},
 			{Command: "echo secret **", Refuse: true},
 			{Command: "sudo **", Ask: true},
-		},
+		}},
 	}
 	if o.route != nil {
 		o.route(&pr)

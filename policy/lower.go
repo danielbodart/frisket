@@ -7,7 +7,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/danielbodart/frisket/hostpattern"
+	"github.com/danielbodart/quoin/execrule"
+	"github.com/danielbodart/quoin/hostpattern"
 )
 
 // Lowered is a document of either version as the gateway builds it: in
@@ -628,7 +629,7 @@ func lowerSSH(d DocumentV2) ([]SSHRoute, error) {
 		c := chain{answers: append(answers, &d.Answers), ceilings: append(ceilings, d.Ceiling), unmatched: builtinSSHUnmatched}
 		r := SSHRoute{
 			Name: name, Address: own.Address, User: own.User, HostKeys: own.HostKeys, Agent: own.Agent,
-			KeyFile: own.KeyFile, PasswordFile: own.PasswordFile, Identity: own.Identity, Shell: own.Shell,
+			KeyFile: own.KeyFile, PasswordFile: own.PasswordFile, Identity: own.Identity, Spec: execrule.Spec{Shell: own.Shell},
 			Interactive: c.clamp(c.answer("interactive"), "interactive"),
 		}
 		for _, e := range slices.Sorted(maps.Keys(eff.Env)) {

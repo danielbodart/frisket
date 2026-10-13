@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/danielbodart/frisket/execrule"
 	"github.com/danielbodart/frisket/policy"
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // Route is one SSH route, checked: where it goes, who it logs in as and
@@ -182,7 +182,7 @@ func compile(pr policy.SSHRoute, reserved Reserved) (*Route, error) {
 		return nil, fmt.Errorf("identity %q: a key's fingerprint, SHA256: and 43 characters of base64, as ssh-keygen -l prints it", pr.Identity)
 	}
 	r.identity = pr.Identity
-	if r.rules, err = execrule.Compile(pr); err != nil {
+	if r.rules, err = execrule.Compile(pr.Spec); err != nil {
 		return nil, err
 	}
 	return r, nil

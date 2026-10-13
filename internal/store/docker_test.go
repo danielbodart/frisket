@@ -343,7 +343,7 @@ func linesOf(t *testing.T, j *journal, msg string) []map[string]any {
 // A session without one has no relay, and loopback that reached it anyway
 // goes to egress, which refuses it.
 func TestADockerSessionRelaysThroughItsRoutesSocket(t *testing.T) {
-	dir, err := os.MkdirTemp("", "frisket-policy-")
+	dir, err := os.MkdirTemp("", "frisket-document-")
 	if err != nil {
 		t.Fatal(err)
 	}

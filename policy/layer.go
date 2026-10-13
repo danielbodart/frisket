@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/danielbodart/frisket/hostpattern"
-	"github.com/danielbodart/frisket/projpolicy"
+	"github.com/danielbodart/quoin/hostpattern"
+	"github.com/danielbodart/quoin/projpolicy"
 )
 
 // CheckProjectLayer holds a project's layer -- the frisket section of its

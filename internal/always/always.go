@@ -14,7 +14,7 @@
 // request's operation id, else its method and exact path; the SSH
 // command's literal words.
 //
-// What is written is signed by frisket-signer's policy-sign@frisket, asked
+// What is written is signed by quoin-signer's policy-sign@quoin, asked
 // by frisket's main process as approved -- the person's answer in this
 // question is the approval, so the signer asks nothing more -- and written
 // by the courier, whose write takes the old digest, since frisket itself
@@ -35,21 +35,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/danielbodart/frisket/execrule"
-	"github.com/danielbodart/frisket/internal/agentsrv"
-	"github.com/danielbodart/frisket/internal/courier"
 	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/policy"
-	"github.com/danielbodart/frisket/projpolicy"
 	"github.com/danielbodart/galley/wire"
+	"github.com/danielbodart/quoin/courier"
+	"github.com/danielbodart/quoin/execrule"
+	"github.com/danielbodart/quoin/policysign"
+	"github.com/danielbodart/quoin/projpolicy"
 )
 
 // Config is where Always signs and writes, daemon-wide.
 type Config struct {
-	// Signer is frisket-signer's agent socket, whose policy-sign@frisket
+	// Signer is quoin-signer's agent socket, whose policy-sign@quoin
 	// signs the new file.
 	Signer string
-	// Courier is frisket-policy's socket, whose write replaces the file.
+	// Courier is quoin-courier's socket, whose write replaces the file.
 	Courier string
 	// AllowedSigners is what a file must verify against.
 	AllowedSigners string
@@ -67,7 +67,7 @@ type Writer struct {
 	notify func(ctx context.Context, q intercept.Question) error
 
 	// For tests: what signs and writes.
-	sign  func(ctx context.Context, req agentsrv.PolicySignRequest) ([]byte, error)
+	sign  func(ctx context.Context, req policysign.Request) ([]byte, error)
 	write func(ctx context.Context, root, oldDigest string, b, sig []byte) error
 	now   func() time.Time
 }
@@ -78,8 +78,8 @@ const timeout = 10 * time.Second
 func New(cfg Config, log *slog.Logger, notify func(ctx context.Context, q intercept.Question) error) *Writer {
 	return &Writer{
 		cfg: cfg, log: log, notify: notify,
-		sign: func(ctx context.Context, req agentsrv.PolicySignRequest) ([]byte, error) {
-			return agentsrv.PolicySign(ctx, cfg.Signer, req)
+		sign: func(ctx context.Context, req policysign.Request) ([]byte, error) {
+			return policysign.Sign(ctx, cfg.Signer, req)
 		},
 		write: func(ctx context.Context, root, old string, b, sig []byte) error {
 			_, err := courier.Write(ctx, cfg.Courier, root, old, b, sig)
@@ -259,7 +259,7 @@ func (s *Session) stands(rule intercept.AlwaysRule, layer any) string {
 			if r.Name != rule.Route {
 				continue
 			}
-			rules, err := execrule.Compile(r)
+			rules, err := execrule.Compile(r.Spec)
 			if err != nil {
 				return err.Error()
 			}
@@ -304,7 +304,7 @@ func (s *Session) write(rule intercept.AlwaysRule, o *offer) {
 		"old", o.old, "digest", projpolicy.Digest(o.new)}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	sig, err := w.sign(ctx, agentsrv.PolicySignRequest{
+	sig, err := w.sign(ctx, policysign.Request{
 		Root: o.root, Name: w.cfg.FileName, New: o.new, Approved: true,
 	})
 	if err == nil {

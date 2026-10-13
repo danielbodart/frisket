@@ -25,9 +25,9 @@ func TestAConfigReadsEverySetting(t *testing.T) {
 		"policyRoots": ["/etc/frisket/policies", "/run/user/1000/chase"],
 		"asker": "/nix/store/x-ask", "askerConcurrent": 4, "askerPerSession": 2,
 		"recordDir": "/var/lib/frisket/records", "maxConnections": 64,
-		"gitSigning": {"agent": "/run/frisket-signer/agent", "policies": ["trusted", "work"]},
-		"always": {"signer": "/run/frisket-signer/agent", "courier": "/run/frisket-policy/sock",
-			"allowedSigners": "/etc/frisket/allowed_signers", "fileName": "chase.json", "home": "/home/dan"}
+		"gitSigning": {"agent": "/run/quoin-signer/agent", "policies": ["trusted", "work"]},
+		"always": {"signer": "/run/quoin-signer/agent", "courier": "/run/quoin-courier/sock",
+			"allowedSigners": "/etc/quoin/allowed_signers", "fileName": "chase.json", "home": "/home/dan"}
 	}`)
 	c, err := loadConfig(path)
 	if err != nil {
@@ -38,9 +38,9 @@ func TestAConfigReadsEverySetting(t *testing.T) {
 		PolicyRoots: []string{"/etc/frisket/policies", "/run/user/1000/chase"},
 		Asker:       "/nix/store/x-ask", AskerConcurrent: 4, AskerPerSession: 2,
 		RecordDir: "/var/lib/frisket/records", MaxConnections: 64,
-		GitSigning: gitSigningConfig{Agent: "/run/frisket-signer/agent", Policies: []string{"trusted", "work"}},
-		Always: &alwaysConfig{Signer: "/run/frisket-signer/agent", Courier: "/run/frisket-policy/sock",
-			AllowedSigners: "/etc/frisket/allowed_signers", FileName: "chase.json", Home: "/home/dan"},
+		GitSigning: gitSigningConfig{Agent: "/run/quoin-signer/agent", Policies: []string{"trusted", "work"}},
+		Always: &alwaysConfig{Signer: "/run/quoin-signer/agent", Courier: "/run/quoin-courier/sock",
+			AllowedSigners: "/etc/quoin/allowed_signers", FileName: "chase.json", Home: "/home/dan"},
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("got %+v", c)

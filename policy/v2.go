@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/danielbodart/frisket/projpolicy"
+	"github.com/danielbodart/quoin/projpolicy"
 )
 
 // DocumentV2 is a version 2 policy document: the shape every layer of a

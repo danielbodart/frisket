@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/danielbodart/frisket/execrule"
 	"github.com/danielbodart/frisket/internal/dns"
 	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/policy"
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // fixtures are tests/fixtures: each NAME.v1.json beside NAME.v2.json, the
@@ -146,7 +146,7 @@ func command1(t *testing.T, l *policy.Lowered, route, command string) string {
 	if i < 0 {
 		t.Fatalf("no ssh route %s", route)
 	}
-	rules, err := execrule.Compile(l.Policy.SSH[i])
+	rules, err := execrule.Compile(l.Policy.SSH[i].Spec)
 	if err != nil {
 		t.Fatal(err)
 	}

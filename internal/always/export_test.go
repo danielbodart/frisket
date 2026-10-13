@@ -3,11 +3,11 @@ package always
 import (
 	"context"
 
-	"github.com/danielbodart/frisket/internal/agentsrv"
+	"github.com/danielbodart/quoin/policysign"
 )
 
 // Fake replaces what signs and writes, for a test.
-func (w *Writer) Fake(sign func(context.Context, agentsrv.PolicySignRequest) ([]byte, error),
+func (w *Writer) Fake(sign func(context.Context, policysign.Request) ([]byte, error),
 	write func(ctx context.Context, root, oldDigest string, b, sig []byte) error) {
 	w.sign, w.write = sign, write
 }

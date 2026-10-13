@@ -25,8 +25,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/danielbodart/frisket/hostpattern"
 	"github.com/danielbodart/frisket/policy"
+	"github.com/danielbodart/quoin/hostpattern"
 
 	"github.com/danielbodart/frisket/internal/always"
 	"github.com/danielbodart/frisket/internal/control"

@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/danielbodart/frisket/internal/control"
-	"github.com/danielbodart/frisket/internal/sdnotify"
 	"github.com/danielbodart/frisket/internal/steer"
 	"github.com/danielbodart/frisket/project"
+	"github.com/danielbodart/quoin/sdnotify"
 	"golang.org/x/sys/unix"
 	"pgregory.net/rapid"
 )

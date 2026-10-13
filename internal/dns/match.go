@@ -16,7 +16,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/danielbodart/frisket/hostpattern"
+	"github.com/danielbodart/quoin/hostpattern"
 )
 
 // maxName is the longest name in presentation form without the trailing dot:

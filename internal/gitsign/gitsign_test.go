@@ -1,6 +1,7 @@
-package agentsrv
+package gitsign
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
@@ -10,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/danielbodart/quoin/policysign"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/sys/unix"
@@ -31,7 +34,7 @@ type gitHarness struct {
 
 func newGitHarness(t *testing.T) *gitHarness {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "agentsrv-git")
+	dir, err := os.MkdirTemp("", "gitsign")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +67,7 @@ func newGitHarness(t *testing.T) *gitHarness {
 		}
 	}()
 
-	g := &Git{
+	g := &Server{
 		Policy: "strict", UID: uid, Upstream: h.upstream,
 		Log:  slog.New(slog.NewJSONHandler(h.log, nil)),
 		cred: func(*net.UnixConn) (*unix.Ucred, error) { return &unix.Ucred{Pid: 4242, Uid: h.peerUID.Load()}, nil },
@@ -168,6 +171,12 @@ func TestGitRefusesKeyManagementAndExtensions(t *testing.T) {
 	if _, err := c.Extension("query", nil); err == nil {
 		t.Error("query succeeded")
 	}
+	if _, err := c.Extension(policysign.Extension, []byte(`{"root":"/home/dan/Projects/foo","name":"chase.json","new":"e30K","approved":true}`)); err == nil {
+		t.Error("policy-sign succeeded")
+	}
+	if !strings.Contains(h.log.String(), `"op":"extension policy-sign@quoin","namespace":"","outcome":"refuse"`) {
+		t.Errorf("logged:\n%s", h.log.String())
+	}
 	if keys, err := c.List(); err != nil || len(keys) != 1 {
 		t.Errorf("the upstream's keys changed: %v, %v", keys, err)
 	}
@@ -181,6 +190,15 @@ func TestGitRefusesAPeerWithAnotherUID(t *testing.T) {
 	}
 	if !strings.Contains(h.log.String(), "peer uid 0 is not 1000") {
 		t.Errorf("logged:\n%s", h.log.String())
+	}
+}
+
+func TestCleanEscapesWhatWouldRewriteTheLine(t *testing.T) {
+	if got := clean("a\nb\u202ec\u2028"); got != `a\u000ab\u202ec\u2028` {
+		t.Errorf("got %q", got)
+	}
+	if got := clean(strings.Repeat("x", maxText+5)); len(got) != maxText {
+		t.Errorf("cut to %d", len(got))
 	}
 }
 
@@ -241,4 +259,96 @@ func TestGitFailsTheSignWhenTheUpstreamHangsUp(t *testing.T) {
 	if !strings.Contains(h.log.String(), `"outcome":"fail"`) {
 		t.Errorf("logged:\n%s", h.log.String())
 	}
+}
+
+const uid = 1000
+
+const (
+	msgUserauthRequest = 50
+	methodPublickey    = "publickey"
+	methodHostbound    = "publickey-hostbound-v00@openssh.com"
+)
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+type client struct {
+	agent.ExtendedAgent
+	c net.Conn
+}
+
+func (c *client) signAsync(key ssh.PublicKey, data []byte) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.SignWithFlags(key, data, 0)
+		done <- err
+	}()
+	return done
+}
+
+func wait(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sign never finished")
+		return nil
+	}
+}
+
+func hostKey(t *testing.T) ssh.Signer {
+	t.Helper()
+	_, k, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// bindMsg is session-bind@openssh.com's contents.
+func bindMsg(host ssh.PublicKey, sid, sig []byte, fwd bool) []byte {
+	return ssh.Marshal(struct {
+		Key, Sid, Sig []byte
+		Fwd           bool
+	}{host.Marshal(), sid, sig, fwd})
+}
+
+// userauthData is what ssh asks an agent to sign for a login: not an
+// SSHSIG, so never signed here.
+func userauthData(sid []byte, key, host ssh.PublicKey) []byte {
+	method := methodPublickey
+	if host != nil {
+		method = methodHostbound
+	}
+	b := ssh.Marshal(struct {
+		Sid                   []byte
+		Msg                   byte
+		User, Service, Method string
+		Sig                   bool
+		Alg                   string
+		Pub                   []byte
+	}{sid, msgUserauthRequest, "dan", "ssh-connection", method, true, key.Type(), key.Marshal()})
+	if host != nil {
+		b = append(b, ssh.Marshal(struct{ K []byte }{host.Marshal()})...)
+	}
+	return b
 }

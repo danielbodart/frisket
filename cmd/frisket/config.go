@@ -216,9 +216,9 @@ const schema = `{
       "additionalProperties": false,
       "required": ["signer", "courier", "allowedSigners", "fileName", "home"],
       "properties": {
-        "signer": { "description": "frisket-signer's agent socket, whose policy-sign@frisket signs the file.", "$ref": "#/$defs/path" },
-        "courier": { "description": "frisket-policy's socket, whose write replaces the file.", "$ref": "#/$defs/path" },
-        "allowedSigners": { "description": "What the file must verify against.", "$ref": "#/$defs/path" },
+        "signer": { "description": "quoin-signer's agent socket, whose policy-sign@quoin signs the file, approved.", "$ref": "#/$defs/path" },
+        "courier": { "description": "quoin-courier's socket, whose write replaces the file.", "$ref": "#/$defs/path" },
+        "allowedSigners": { "description": "The allowed signers file the file must verify against, quoin's, as the signer and the courier read it.", "$ref": "#/$defs/path" },
         "fileName": { "description": "The project file's name.", "type": "string", "pattern": "^[^/]+$" },
         "home": { "description": "The home a project's namespace is named from.", "$ref": "#/$defs/path" }
       }

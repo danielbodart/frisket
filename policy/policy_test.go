@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // A misspelt key is a rule that silently does not apply, so Decode refuses
@@ -75,22 +77,22 @@ func TestAnSSHRouteRoundTrips(t *testing.T) {
 			HostKeys: []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKk7kU0dW1lSbm8W7xQ2uZVXvVq2zDQm0V6Zg7I4pYQb host"},
 			Agent:    "/run/user/1000/gcr/ssh",
 			Identity: "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
-			Exec: []ExecRule{
+			Spec: execrule.Spec{Exec: []ExecRule{
 				{Command: "systemctl status *", Operation: &Operation{ID: "systemctl-status", Summary: "Show a unit's status", Class: "read", Category: "services"}},
 				{Command: "sudo **", Ask: true},
 				{Command: "rm **", Refuse: true},
 				{Arg: ".ssh", Refuse: true},
 				{Command: "less **", Arg: "+*", Ask: true},
 			},
-			Unmatched: "refuse",
+				Unmatched: "refuse",
+			},
 		}, {
 			Name:         "modem",
 			Address:      "192.168.1.1",
 			User:         "admin",
 			HostKeys:     []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKk7kU0dW1lSbm8W7xQ2uZVXvVq2zDQm0V6Zg7I4pYQb modem"},
 			PasswordFile: "/run/secrets/modem-password",
-			Shell:        true,
-			Exec:         []ExecRule{{Command: "xdslctl info **"}},
+			Spec:         execrule.Spec{Shell: true, Exec: []ExecRule{{Command: "xdslctl info **"}}},
 		}},
 	}}
 	b, err := json.Marshal(want)

@@ -9,11 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/danielbodart/frisket/execrule"
 	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/internal/sshroute"
 	"github.com/danielbodart/frisket/internal/store"
 	"github.com/danielbodart/frisket/policy"
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // decideCommands answers each line of in, a command, as the document's SSH
@@ -45,7 +45,7 @@ func decideCommands(path, name string, in io.Reader, out io.Writer) error {
 			// Compiled again, by execrule alone: what this answers is what
 			// a consumer importing it is answered, as well as what the
 			// route decides.
-			if rules, err = execrule.Compile(doc.Policy.SSH[i]); err != nil {
+			if rules, err = execrule.Compile(doc.Policy.SSH[i].Spec); err != nil {
 				return fmt.Errorf("policy %s: ssh route %s: %w", path, name, err)
 			}
 		}

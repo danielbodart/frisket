@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/danielbodart/frisket/execrule"
 	"github.com/danielbodart/frisket/internal/dns"
 	"github.com/danielbodart/frisket/internal/intercept"
 	"github.com/danielbodart/frisket/internal/store"
 	"github.com/danielbodart/frisket/policy"
-	"github.com/danielbodart/frisket/projpolicy"
+	"github.com/danielbodart/quoin/execrule"
+	"github.com/danielbodart/quoin/projpolicy"
 )
 
 func lowered(t *testing.T, doc string) *policy.Lowered {
@@ -230,7 +230,7 @@ func TestHostPatternsInAllowLanAndSSH(t *testing.T) {
 	if len(l.Policy.SSH) != 1 {
 		t.Fatalf("ssh routes %+v", l.Policy.SSH)
 	}
-	rules, err := execrule.Compile(l.Policy.SSH[0])
+	rules, err := execrule.Compile(l.Policy.SSH[0].Spec)
 	if err != nil {
 		t.Fatal(err)
 	}

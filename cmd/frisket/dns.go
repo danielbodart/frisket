@@ -13,8 +13,8 @@ import (
 	"syscall"
 
 	"github.com/danielbodart/frisket/internal/dns"
-	"github.com/danielbodart/frisket/internal/sdnotify"
 	"github.com/danielbodart/frisket/project"
+	"github.com/danielbodart/quoin/sdnotify"
 )
 
 // runDNS is `frisket dns`: a project's name under .internal answered on the

@@ -3,8 +3,8 @@ package sshroute
 import (
 	"strings"
 
-	"github.com/danielbodart/frisket/execrule"
 	"github.com/danielbodart/frisket/internal/intercept"
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // Decision is what a route's rules say about one command, in the terms the

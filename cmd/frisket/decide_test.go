@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/danielbodart/frisket/policy"
+	"github.com/danielbodart/quoin/execrule"
 )
 
 func sshDocument(t *testing.T) string {
@@ -28,13 +29,15 @@ func sshDocument(t *testing.T) string {
 	doc := policy.Document{Name: "t", Policy: policy.Policy{Allow: []string{}, SSH: []policy.SSHRoute{{
 		Name: "server", Address: "192.168.1.10", User: "ops", Agent: "/run/agent",
 		HostKeys: []string{strings.TrimSpace(string(ssh.MarshalAuthorizedKey(k)))},
-		Exec: []policy.ExecRule{
-			{Command: "ls **"},
-			{Command: "rm **", Refuse: true},
-			{Arg: ".ssh", Refuse: true},
+		Spec: execrule.Spec{
+			Exec: []policy.ExecRule{
+				{Command: "ls **"},
+				{Command: "rm **", Refuse: true},
+				{Arg: ".ssh", Refuse: true},
+			},
+			Env:       []string{"LANG"},
+			Unmatched: "ask",
 		},
-		Env:       []string{"LANG"},
-		Unmatched: "ask",
 	}}}}
 	b, err := json.Marshal(doc)
 	if err != nil {

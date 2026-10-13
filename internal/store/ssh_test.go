@@ -18,6 +18,7 @@ import (
 	"github.com/danielbodart/frisket/internal/serve"
 	"github.com/danielbodart/frisket/internal/steer"
 	"github.com/danielbodart/frisket/policy"
+	"github.com/danielbodart/quoin/execrule"
 )
 
 // hostKey is a machine's public key as a document pins it.
@@ -45,7 +46,7 @@ func withSSH(t *testing.T) policy.Policy {
 		User:     "core",
 		HostKeys: []string{hostKey(t)},
 		Agent:    "/nonexistent/agent.sock",
-		Exec:     []policy.ExecRule{{Command: "uptime"}},
+		Spec:     execrule.Spec{Exec: []policy.ExecRule{{Command: "uptime"}}},
 	}}
 	return p
 }

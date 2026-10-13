@@ -141,11 +141,15 @@ in
         let file = steeringFile name s; in {
           # The control socket's directory is the one way into a session from
           # outside, and no bind may reach it: a workload that could open the
-          # socket would steer sessions, its own included.
+          # socket would steer sessions, its own included. Nor may one reach
+          # the directories of quoin's signer and courier sockets that Always
+          # is given: a workload with the signer's would ask it as itself, and
+          # one with the courier's would read and write the person's project
+          # files. The rest of quoin's sockets, and galley's, are the
+          # deployer's to protect, in flong.<launcher>.protect: this adapter
+          # knows only the paths frisket is given.
           protect = [ (dirOf cfg.controlSocket) ]
-            ++ lib.optionals (cfg.signer.enable or false || cfg.sudoGate.enable or false)
-            [ "/run/frisket-signer" "/run/galley-ask" "/run/frisket-sudo" ]
-            ++ lib.optional (cfg.policy.courier.enable or false) "/run/frisket-policy";
+            ++ map dirOf (lib.filter (p: p != null) [ cfg.always.signer cfg.always.courier ]);
           # Listeners, handed over, the rules, and the session's CA in its
           # mount namespace. A failure here ends the session: flong ends a
           # session whose hook exits non-zero.

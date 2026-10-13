@@ -1,6 +1,9 @@
-# Always on the gateway's questions, end to end: frisket under flong, with
-# frisket-signer over a software TPM and the courier, as nixosModules.flong,
-# .signer and .policy run them. A session's document marks its route
+# Always on the gateway's questions, end to end: frisket under flong, as
+# nixosModules.flong runs it, with quoin's signer over a software TPM and
+# quoin's courier, as quoin's nixosModules.signer and .policy run them,
+# deployed as a host would: the signer trusting frisket.service as a policy
+# signer and a login signer, the courier taking it as a peer, and frisket
+# given their paths. A session's document marks its route
 # `always`; the route asks about deleting a thing; the asker answers always.
 # The session then deletes unasked, the workspace's chase.json and its .sig
 # are written and verify with stock ssh-keygen, and a session launched from
@@ -11,7 +14,7 @@
 # The upstream is a second machine, since frisket refuses the host's own
 # addresses by structure: an HTTPS server under a CA of its own, and the DNS
 # server that names it.
-{ self, flong }:
+{ self, flong, quoin }:
 { lib, hostPkgs, ... }:
 
 let
@@ -126,7 +129,7 @@ in
   };
 
   nodes.machine = { config, ... }: {
-    imports = [ flong.nixosModules.default self.nixosModules.flong self.nixosModules.signer ];
+    imports = [ flong.nixosModules.default self.nixosModules.flong quoin.nixosModules.signer quoin.nixosModules.policy ];
 
     virtualisation.memorySize = 3072;
     virtualisation.diskSize = 4096;
@@ -155,15 +158,31 @@ in
       policies.base.allow = [ "api.test" ];
       policyRoots = [ "/srv/policies" ];
       asker = "${asker}";
-      signer.enable = true;
-      policy = {
+      always = {
+        enable = true;
+        signer = "/run/quoin-signer/agent";
+        courier = "/run/quoin-courier/sock";
+        allowedSigners = "/etc/quoin/allowed_signers";
         fileName = "chase.json";
-        courier.enable = true;
+      };
+    };
+    services.quoin.signer = {
+      enable = true;
+      forUser = "dan";
+      loginSigners = [ "frisket.service" ];
+      policySigners = [ "frisket.service" ];
+    };
+    services.quoin.policy = {
+      fileName = "chase.json";
+      courier = {
+        enable = true;
+        forUser = "dan";
+        peers."frisket.service" = "dan";
       };
     };
     # The key is made in the TPM as the test runs, so its allowed signers
     # are written then.
-    environment.etc."frisket/allowed_signers".source = lib.mkForce "/run/allowed_signers";
+    environment.etc."quoin/allowed_signers".source = lib.mkForce "/run/allowed_signers";
 
     systemd.tmpfiles.rules = [
       "d /srv/secrets 0700 dan users -"
@@ -205,6 +224,7 @@ in
     let
       launchers = builtins.toJSON (lib.genAttrs [ "trusted" "strict" "next" ] (name: lib.getExe nodes.machine.flong.${name}.launcher));
       frisket = lib.getExe nodes.machine.services.frisket.package;
+      quoinBin = "${quoin.packages.${pkgs.stdenv.hostPlatform.system}.quoin}/bin/quoin";
     in
     ''
       import json
@@ -242,8 +262,8 @@ in
       upstream.wait_for_unit("dnsmasq.service")
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("frisket.service")
-      machine.wait_for_unit("frisket-signer.socket")
-      machine.wait_for_unit("frisket-policy.socket")
+      machine.wait_for_unit("quoin-signer.socket")
+      machine.wait_for_unit("quoin-courier.socket")
       machine.wait_for_unit("user@1000.service")
       # The upstream's name, from its DNS server, as frisket resolves it.
       machine.wait_until_succeeds("dig +short +time=1 +tries=1 api.test @${upstream4} | grep -qx ${upstream4}")
@@ -252,24 +272,26 @@ in
       for name in ["trusted", "strict"]:
           machine.succeed(f"install -m 0644 /etc/always-test/{name}.json /srv/policies/{name}.json")
 
-      with subtest("the daemon's settings offer Always through the signer and the courier"):
+      with subtest("the daemon's settings offer Always through quoin's signer and courier"):
           settings = json.loads(machine.succeed("cat /etc/frisket/config.json"))
           assert settings["always"] == {
-              "signer": "/run/frisket-signer/agent", "courier": "/run/frisket-policy/sock",
-              "allowedSigners": "/etc/frisket/allowed_signers", "fileName": "chase.json", "home": "/home/dan",
+              "signer": "/run/quoin-signer/agent", "courier": "/run/quoin-courier/sock",
+              "allowedSigners": "/etc/quoin/allowed_signers", "fileName": "chase.json", "home": "/home/dan",
           }, settings
-          courier = json.loads(machine.succeed("cat /etc/frisket-policy/config.json"))
+          courier = json.loads(machine.succeed("cat /etc/quoin/courier.json"))
           assert courier["peers"]["frisket.service"] == "dan", courier
+          signer = json.loads(machine.succeed("cat /etc/quoin/signer.json"))
+          assert signer["policySigners"] == ["frisket.service"] and signer["loginSigners"] == ["frisket.service"], signer
 
       with subtest("the signer holds a TPM key the allowed signers name for policies"):
           # Started once, so its state directory is there.
-          machine.succeed("systemctl start frisket-signer.service")
+          machine.succeed("systemctl start quoin-signer.service")
           machine.succeed("SSH_ASKPASS_REQUIRE=never ssh-tpm-keygen -f /root/id_ecdsa -C dan@machine </dev/null")
-          machine.succeed("install -o ssh-signer -g ssh-signer -m 0600 /root/id_ecdsa.tpm /var/lib/frisket-signer/")
-          machine.succeed("systemctl restart frisket-signer.service")
+          machine.succeed("install -o ssh-signer -g ssh-signer -m 0600 /root/id_ecdsa.tpm /var/lib/quoin-signer/")
+          machine.succeed("systemctl restart quoin-signer.service")
           key = machine.succeed("cat /root/id_ecdsa.pub").strip()
-          machine.succeed(f"echo 'dan namespaces=\"frisket-policy:*\" {key}' > /run/allowed_signers")
-          machine.succeed("${frisket} policy signers /etc/frisket/allowed_signers")
+          machine.succeed(f"echo 'dan namespaces=\"quoin-policy:*\" {key}' > /run/allowed_signers")
+          machine.succeed("${quoinBin} policy signers /etc/quoin/allowed_signers")
 
       with subtest("answered always, the session deletes unasked, and only what the rule names"):
           codes, name = run("trusted", ["a", "a", "b"])
@@ -288,13 +310,13 @@ in
           machine.wait_until_succeeds("test -s /home/dan/proj/chase.json.sig")
           assert machine.succeed("cat /home/dan/proj/chase.json") == q["diff"]["new"]
           assert machine.succeed("stat -c %U /home/dan/proj/chase.json /home/dan/proj/chase.json.sig").split() == ["dan", "dan"]
-          machine.succeed("ssh-keygen -Y verify -f /etc/frisket/allowed_signers -I dan -n 'frisket-policy:~/proj' "
+          machine.succeed("ssh-keygen -Y verify -f /etc/quoin/allowed_signers -I dan -n 'quoin-policy:~/proj' "
                           "-s /home/dan/proj/chase.json.sig < /home/dan/proj/chase.json")
-          machine.succeed("runuser -u dan -- ${frisket} policy verify /home/dan/proj/chase.json")
+          machine.succeed("runuser -u dan -- ${quoinBin} policy verify /home/dan/proj/chase.json")
           out = machine.succeed("journalctl -u frisket.service -o cat --no-pager")
           [line] = [l for l in map(json.loads, (l for l in out.splitlines() if l.startswith("{"))) if l.get("msg") == "always"]
           assert line["outcome"] == "written" and line["rule"] == "delete-thing" and line["session"] == name, line
-          out = machine.succeed("journalctl -u frisket-signer.service -o cat --no-pager")
+          out = machine.succeed("journalctl -u quoin-signer.service -o cat --no-pager")
           signed = [l for l in map(json.loads, (l for l in out.splitlines() if l.startswith("{")))
                     if l.get("msg") == "decision" and l.get("class") == "policy sign"]
           assert len(signed) == 1 and signed[0]["source"] == "always" and signed[0]["outcome"] == "sign", signed
