@@ -16,9 +16,10 @@
   # and writes through, and frisket imports only quoin's Go packages, never
   # its modules: tests/always.nix runs the whole path against a pinned quoin,
   # deployed as a host would deploy it. Nothing outside `checks` reads this
-  # input, so a consumer never fetches it.
+  # input, so a consumer never fetches it. It is the release go.mod requires,
+  # which the quoin-pin check holds it to and scripts/pin.sh sets in both.
   inputs.quoin = {
-    url = "github:danielbodart/quoin";
+    url = "github:danielbodart/quoin/v0.81.13";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -51,7 +52,7 @@
         # activation code frisket shares with it, and galley's wire, for the
         # most a diff Always shows may hold. vendorHash = null is a nice
         # property and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-8NyrOLJrs2QacaCq6BnVtg8L09wNQZXdLIlLjZO/kPc=";
+        vendorHash = "sha256-bz2Q1w2PBMQudfaLvZx/7F7uSFxaC4to3TtCSMQ4iMA=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has
@@ -137,6 +138,27 @@
           # The build, which is also the unit tests, the property tests and the
           # fuzz corpora.
           inherit (self.packages.${system}) frisket;
+
+          # ONE QUOIN. The binary compiles quoin's packages from the release
+          # go.mod requires and the always test deploys the signer and courier
+          # from the one flake.lock pins; were they two, the test would pass
+          # against a quoin frisket does not build with. Both name the same
+          # release tag, which flake.lock records as the input's ref beside
+          # its commit: a tag quoin's CI cut once its checks passed, and
+          # which never moves. scripts/pin.sh sets both.
+          quoin-pin =
+            let
+              node = (builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.quoin;
+              tag = node.original.ref or "no tag";
+              required = builtins.head (builtins.match ".*\n[[:space:]]*github.com/danielbodart/quoin (v[^[:space:]]+).*" (builtins.readFile ./go.mod));
+            in
+            assert nixpkgs.lib.assertMsg (builtins.match ".*replace[[:space:]].*" (builtins.readFile ./go.mod) == null)
+              "go.mod replaces a module, so what it builds is not what it requires";
+            assert nixpkgs.lib.assertMsg (builtins.match "v[0-9]+\\.[0-9]+\\.[0-9]+" required != null)
+              "go.mod requires quoin ${required}, which is not a release tag: scripts/pin.sh quoin vX.Y.Z";
+            assert nixpkgs.lib.assertMsg (tag == required)
+              "go.mod requires quoin ${required}, but flake.lock pins ${tag}: scripts/pin.sh quoin ${required}";
+            pkgs.writeText "quoin-pin" node.locked.rev;
 
           # Importing the daemon module beside the flong adapter, which imports
           # it too, must evaluate: the key on nixosModules.default is what makes
@@ -441,11 +463,12 @@
             '';
 
           # The version script decides what every release is called, so it is
-          # gated by the same check that gates the release.
+          # gated by the same check that gates the release; pin.sh decides
+          # which quoin it is built and tested against.
           shellcheck = pkgs.runCommand "shellcheck"
             { nativeBuildInputs = [ pkgs.shellcheck ]; }
             ''
-              shellcheck ${./scripts/version.sh}
+              shellcheck ${./scripts/version.sh} ${./scripts/pin.sh}
               touch $out
             '';
         });

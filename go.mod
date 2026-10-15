@@ -9,7 +9,7 @@ go 1.26.0
 
 require (
 	github.com/danielbodart/galley v0.30.22-0.20261013085913-4f8859f2327b
-	github.com/danielbodart/quoin v0.0.0-20261013095017-3c8b14beb8c6
+	github.com/danielbodart/quoin v0.81.13
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.57.0

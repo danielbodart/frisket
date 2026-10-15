@@ -1,7 +1,7 @@
 github.com/danielbodart/galley v0.30.22-0.20261013085913-4f8859f2327b h1:4/zAa1Vy05ez6my4uYlZJ+D+IowpK4gZkAweMLnLBxg=
 github.com/danielbodart/galley v0.30.22-0.20261013085913-4f8859f2327b/go.mod h1:LG67o+3WXE7Kj9BQ0WclOtCq0Fbx46NP3pe6PqrLzs8=
-github.com/danielbodart/quoin v0.0.0-20261013095017-3c8b14beb8c6 h1:SR02qeRbkOB8Ir2kC7FoDDFsrea9TMaU9RInJxAo/I4=
-github.com/danielbodart/quoin v0.0.0-20261013095017-3c8b14beb8c6/go.mod h1:hPDymvRhmcRWqPh2BKLRd3IPHZMsyGAQlSpIhnvPXCE=
+github.com/danielbodart/quoin v0.81.13 h1:CoMgbkhP/lV4E3Fxs+aIL0EKSQ13cln5DNueb1XTkFw=
+github.com/danielbodart/quoin v0.81.13/go.mod h1:hPDymvRhmcRWqPh2BKLRd3IPHZMsyGAQlSpIhnvPXCE=
 github.com/go-jose/go-jose/v4 v4.1.5 h1:RjgjO2LOtWOJKUC5wpwY9LR3B3vwVAz6JS2YHfYU6eA=
 github.com/go-jose/go-jose/v4 v4.1.5/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/vishvananda/netlink v1.3.1 h1:3AEMt62VKqz90r0tmNhog0r/PpWKmrEShJU0wJW6bV0=
