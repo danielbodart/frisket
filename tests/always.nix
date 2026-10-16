@@ -293,18 +293,18 @@ in
           machine.succeed(f"echo 'dan namespaces=\"quoin-policy:*\" {key}' > /run/allowed_signers")
           machine.succeed("${quoinBin} policy signers /etc/quoin/allowed_signers")
 
-      with subtest("answered always, the session deletes unasked, and only what the rule names"):
+      with subtest("answered always, the session deletes that thing unasked, and is asked about another"):
           codes, name = run("trusted", ["a", "a", "b"])
           assert codes == ["200", "200", "200"], codes
           qs = asked(name)
-          assert len(qs) == 1, qs
+          assert len(qs) == 2 and qs[1]["path"] == "/v1/things/b", qs
           q = qs[0]
           assert q["always"] and q["path"] == "/v1/things/a" and q["workspace"] == "/home/dan/proj", q
           assert q["diff"]["path"] == "~/proj/chase.json" and q["diff"]["old"] == "", q
           new = json.loads(q["diff"]["new"])
-          assert new == {"version": 2, "frisket": {"routes": {"api": {"operations": {"delete-thing": "allow"}}}}}, new
+          assert new == {"version": 2, "frisket": {"routes": {"api": {"operations": {"DELETE /v1/things/a": "allow"}}}}}, new
           rules = [(r["path"], r["rule"]) for r in requests(name)]
-          assert rules == [("/v1/things/a", "asked"), ("/v1/things/a", "always"), ("/v1/things/b", "always")], rules
+          assert rules == [("/v1/things/a", "asked"), ("/v1/things/a", "always"), ("/v1/things/b", "asked")], rules
 
       with subtest("chase.json and its .sig are written, and verify with stock ssh-keygen"):
           machine.wait_until_succeeds("test -s /home/dan/proj/chase.json.sig")
@@ -315,7 +315,7 @@ in
           machine.succeed("runuser -u dan -- ${quoinBin} policy verify /home/dan/proj/chase.json")
           out = machine.succeed("journalctl -u frisket.service -o cat --no-pager")
           [line] = [l for l in map(json.loads, (l for l in out.splitlines() if l.startswith("{"))) if l.get("msg") == "always"]
-          assert line["outcome"] == "written" and line["rule"] == "delete-thing" and line["session"] == name, line
+          assert line["outcome"] == "written" and line["rule"] == "DELETE /v1/things/a" and line["session"] == name, line
           out = machine.succeed("journalctl -u quoin-signer.service -o cat --no-pager")
           signed = [l for l in map(json.loads, (l for l in out.splitlines() if l.startswith("{")))
                     if l.get("msg") == "decision" and l.get("class") == "policy sign"]
@@ -327,7 +327,7 @@ in
           doc["name"] = "next"
           doc["routes"]["api"]["operations"] = new["frisket"]["routes"]["api"]["operations"]
           policy("next", doc)
-          codes, name = run("next", ["c"])
+          codes, name = run("next", ["a"])
           assert codes == ["200"], codes
           assert asked(name) == [], asked(name)
           assert [r["rule"] for r in requests(name)] == ["path"], requests(name)

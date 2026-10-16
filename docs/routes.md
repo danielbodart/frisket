@@ -333,8 +333,11 @@ has:
           "new": "<the file with the one rule added>"}}
 ```
 
-The rule is the specific one asked about: the request's operation id, or
-failing one its `METHOD /exact/path`, under `frisket.routes.<route>.operations`;
+The rule is the specific one asked about: the request's `METHOD
+/exact/path`, under `frisket.routes.<route>.operations`, which admits that
+request and nothing beside it -- its operation's id would admit the
+operation on everything it reaches, every worker in an account. A GraphQL
+field and git's push, decided before any path, are their operation's id;
 an SSH command's literal words, under `frisket.ssh.<machine>.exec`, for a
 command that is one simple command of plain words. It is offered only where
 it would stand: the session's workspace's file (`services.frisket.always.fileName`)
@@ -417,11 +420,17 @@ A request is answered by the first of these that says:
 1. `operations` by the **id** of the operation the request is -- the most
    specific `paths` entry that matches it (ranked as path rules are), a
    GraphQL field, or git's push, `git-receive-pack` -- then by
-   **`category:<its category>`**;
+   **`category:<its category>`**, either standing where the operation's own
+   template does among the patterns of 2: a pattern more specific than that
+   template decides instead, or one exactly as specific and stricter;
 2. `operations` by the most specific **endpoint pattern** that matches it,
    `"METHOD[,METHOD] /path"`: `*` is one segment (`*:verb` one ending so), a
    last `**` any number of them, none included (`/a/**` is version 1's
-   prefix `/a`), a literal beats a pattern and an exact path any `**`;
+   prefix `/a`). An exact path beats any `**`; then segments are compared
+   from the left, the first that differs deciding -- a literal beats
+   `*:verb`, that beats `*`, and each beats the end of a prefix -- so an
+   earlier literal outweighs any number of later ones; and between equals,
+   the stricter;
 3. the route's answer for the operation's **class**: `writes` for `write`,
    `guarded` for `guarded`, and `unmatched` for a request no operation
    describes, or one whose operation has no class; a `read` is allowed;
@@ -431,8 +440,11 @@ A request is answered by the first of these that says:
 
 Then it is **clamped**: an answer more lenient than the route's `ceiling` or
 the document's for its class is the ceiling's, `allow` < `ask` < `refuse`, the
-stricter winning. A read has no ceiling. So an id answer decides even where a
-narrower pattern says otherwise, but never past a ceiling, and an operation
+stricter winning. A read has no ceiling. So an id answer is the loosest
+word on its operation: `worker-script-upload-worker-module: allow` admits an
+upload to every worker, a tier's `"PUT,PATCH,POST,DELETE /**": "refuse"` does
+not undo it, and a project's `"PUT /client/v4/accounts/*/workers/scripts/other": "refuse"`
+does, for that worker alone -- and never past a ceiling. An operation
 answered by its class is overruled by any pattern that matches the request,
 however wide. `unmatched` may now be `allow`, and what it admits is still
 held to any stricter operation or pattern a lenient reading of the request

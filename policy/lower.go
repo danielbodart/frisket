@@ -43,8 +43,8 @@ type ScopeV2 struct {
 }
 
 // EndpointAnswer is one operation of a route and its answer: by its id or
-// category if Named, which no endpoint pattern overrules, else by its
-// class. Its Ask and Refuse are never set.
+// category if Named, which stands where its template does among endpoint
+// patterns, else by its class, which any matching pattern overrules. Its Ask and Refuse are never set.
 type EndpointAnswer struct {
 	PathRule
 	Answer string

@@ -30,7 +30,8 @@ A session's question about an HTTP request or an SSH command, on a version 2
 route or machine its document marks `always`, offers Always with the diff of
 its workspace's file -- the workspace frisket was given by flong's hook,
 `$workspace`, which the session cannot choose -- adding the specific rule:
-the operation id or `METHOD /exact/path` under `frisket.routes.<route>.operations`,
+`METHOD /exact/path` under `frisket.routes.<route>.operations` (a GraphQL
+field's or git push's operation id, which no path decides),
 or the command's literal words under `frisket.ssh.<machine>.exec`. It is
 offered when the file is absent or verifies, against the allowed signers in
 the workspace's namespace, and is canonical, and when the rule, merged over

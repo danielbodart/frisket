@@ -204,8 +204,11 @@ func Unreachable(d DocumentV2) []Never {
 					if err != nil || pp != path || pprefix != "" || e.Operation == nil {
 						continue
 					}
-					if !slices.ContainsFunc(methods, func(m string) bool { return !slices.Contains(pm, m) }) && namedAnswer(r, e.Operation) {
-						out = append(out, Never{at, fmt.Sprintf("operation %s is answered by name there, which no pattern overrules", e.Operation.ID)})
+					// At the operation's own template, a pattern ties with an answer by
+					// its name, and decides only by being the stricter.
+					named, ok := namedAnswer(r, e.Operation)
+					if ok && !slices.ContainsFunc(methods, func(m string) bool { return !slices.Contains(pm, m) }) && stricter(r.Operations[k], named) == named {
+						out = append(out, Never{at, fmt.Sprintf("operation %s is answered by name there, %s, which a pattern at its own template overrules only by being stricter", e.Operation.ID, named)})
 					}
 				}
 			}
@@ -229,12 +232,17 @@ func Unreachable(d DocumentV2) []Never {
 	return out
 }
 
-func namedAnswer(r RouteV2, op *Operation) bool {
-	if _, ok := r.Operations[op.ID]; ok {
-		return true
+// namedAnswer is the operation's answer by its id, else its category, and
+// whether it has one.
+func namedAnswer(r RouteV2, op *Operation) (string, bool) {
+	if a, ok := r.Operations[op.ID]; ok {
+		return a, true
 	}
-	_, ok := r.Operations["category:"+op.Category]
-	return ok && op.Category != ""
+	if op.Category == "" {
+		return "", false
+	}
+	a, ok := r.Operations["category:"+op.Category]
+	return a, ok
 }
 
 // neverAName is why a host key can match no name a session's DNS

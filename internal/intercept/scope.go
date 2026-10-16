@@ -49,8 +49,10 @@ type Scope struct {
 	V2 bool
 	// Operations are what a version 2 route's requests are, each an
 	// endpoint and the operation it is, with what it is answered: by its
-	// id or category, Named, which no pattern overrules, or else by its
-	// class, which a pattern in Paths that matches the request does.
+	// id or category, Named, which only a pattern more specific than the
+	// operation's own template overrules, or one as specific and stricter;
+	// or else by its class, which any pattern in Paths that matches the
+	// request overrules.
 	Operations []Endpoint
 	// Ceiling is, by operation class -- "write" or "guarded", and "" for a
 	// request no operation describes -- the most lenient answer a pattern
@@ -67,8 +69,8 @@ type Endpoint struct {
 	// Outcome is the operation's answer: by its id or category if Named,
 	// else by its class.
 	Outcome Outcome
-	// Named is an answer by the operation's id or category, which beats
-	// every endpoint pattern.
+	// Named is an answer by the operation's id or category, which stands
+	// where the operation's template does among endpoint patterns.
 	Named bool
 }
 

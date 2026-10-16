@@ -63,14 +63,17 @@ const github = `{
   }}
 }`
 
-// An id decides before a category, a category before any pattern, the
-// most specific pattern before the operation's class, the route's class
-// answer before the document's, and the document's before the built-in.
+// An id decides before a category, and either where its operation's
+// template does among patterns: over a wider one, under a narrower. The
+// most specific pattern decides before the operation's class, the route's
+// class answer before the document's, and the document's before the
+// built-in.
 func TestAnAnswerIsTheMostSpecificThatSays(t *testing.T) {
 	l := lowered(t, github)
 	for _, c := range []struct{ method, target, want, why string }{
 		{"POST", "/repos/o/r/pulls", "allow", "its id, over the pattern POST /repos/o/**"},
-		{"POST", "/repos/o/r/issues", "refuse", "its category, over the literal pattern"},
+		{"POST", "/repos/o/r/issues", "allow", "the literal pattern, narrower than its category's template"},
+		{"POST", "/repos/x/r/issues", "refuse", "its category, no pattern matching"},
 		{"POST", "/repos/o/r/labels", "allow", "the narrower pattern, over POST /repos/o/**"},
 		{"POST", "/repos/x/r/labels", "ask", "no pattern: the route's writes"},
 		{"PATCH", "/repos/o/r", "ask", "the route's writes"},
@@ -130,11 +133,11 @@ func TestLayersMergeAndANullDeletes(t *testing.T) {
 	}
 	l := lowered(t, string(merged))
 	for _, c := range []struct{ method, target, want string }{
-		{"POST", "/repos/o/r/pulls", "ask"},  // the tier deleted its id: the pattern POST /repos/o/**
-		{"POST", "/repos/x/r/pulls", "ask"},  // and elsewhere the route's writes
-		{"DELETE", "/repos/x/r", "ask"},      // the project deleted the tier's refuse: the document's guarded
-		{"POST", "/repos/x/r/issues", "ask"}, // the category gone, its id
-		{"POST", "/repos/o/r/issues", "ask"}, // the id beats the literal pattern
+		{"POST", "/repos/o/r/pulls", "ask"},    // the tier deleted its id: the pattern POST /repos/o/**
+		{"POST", "/repos/x/r/pulls", "ask"},    // and elsewhere the route's writes
+		{"DELETE", "/repos/x/r", "ask"},        // the project deleted the tier's refuse: the document's guarded
+		{"POST", "/repos/x/r/issues", "ask"},   // the category gone, its id
+		{"POST", "/repos/o/r/issues", "allow"}, // the literal pattern, narrower than the id's template
 	} {
 		if got := ask(t, l, "api", c.method, c.target); got != c.want {
 			t.Errorf("%s %s: %s, want %s", c.method, c.target, got, c.want)
@@ -174,7 +177,7 @@ func TestAProjectLayerSetsNothingOfTheHosts(t *testing.T) {
 		{`{"ssh": {"server": {"exec": {"ls": "allow"}}}}`, "ssh.server: the base defines no such route"},
 		{`{"routes": {"api": {"operashuns": {}}}}`, "routes.api.operashuns: no such field"},
 		{`{"routes": {"api": {"operations": {"GET /a/../b": "allow"}}}}`, "a dot segment"},
-		{`{"routes": {"api": {"operations": {"POST /repos/*/*/pulls": "refuse"}}}}`, "pulls/create is answered by name"},
+		{`{"routes": {"api": {"operations": {"POST /repos/*/*/pulls": "allow"}}}}`, "pulls/create is answered by name"},
 		{`{"routes": {"api": {"operations": {"nosuch/op": "allow"}}}}`, "no such operation"},
 		{`{"allow": {"*-Ap.lan": true}}`, "a capital"},
 		{`{"ssh": {"*-ap": {"exec": {"ls": "allow"}}}}`, "matches no SSH route"},
@@ -187,7 +190,7 @@ func TestAProjectLayerSetsNothingOfTheHosts(t *testing.T) {
 		}
 	}
 	if _, err := policy.CheckProjectLayer([]byte(`{"version": 2, "allow": {"pypi.org": true}, "writes": "allow",
-		"routes": {"api": {"operations": {"GET /repos/o/**": "allow", "repos/delete": "refuse"}, "guarded": "refuse"}}}`), base); err != nil {
+		"routes": {"api": {"operations": {"GET /repos/o/**": "allow", "repos/delete": "refuse", "POST /repos/*/*/pulls": "refuse"}, "guarded": "refuse"}}}`), base); err != nil {
 		t.Errorf("a project's answers: %v", err)
 	}
 }

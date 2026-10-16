@@ -27,8 +27,9 @@ type AlwaysRule struct {
 	Route string
 	// SSH is a command on an SSH route; otherwise an HTTP request.
 	SSH bool
-	// Key is the rule's key: an HTTP request's operation id, or failing
-	// one its "METHOD /path", exactly as sent; an SSH command's words.
+	// Key is the rule's key: an HTTP request's "METHOD /path", exactly as
+	// sent, or a GraphQL field's or git push's operation id; an SSH
+	// command's words.
 	Key string
 	// Command is the SSH command, as sent, to be decided again.
 	Command string
@@ -53,15 +54,19 @@ const RuleAlways = "always"
 const KindNotice = "notice"
 
 // alwaysRule is the rule an Always would write for a request the scope
-// asked about: its operation's id, else its method and exact path; none
-// for a Docker route, whose requests the Engine's rules decide too, or a
-// request holding several operations, which one rule would not admit.
+// asked about: its method and exact path, which admits that request and
+// nothing beside it, where its operation's id would admit the operation on
+// everything it reaches -- every worker in an account, every repository.
+// A GraphQL field and git's push are decided before any path, so their
+// rule is their operation's id. None for a Docker route, whose requests
+// the Engine's rules decide too, or a request holding several operations,
+// which one rule would not admit.
 func alwaysRule(rt *route, r *http.Request, decided *url.URL, v Verdict) (AlwaysRule, bool) {
 	if rt.docker != nil || len(v.Operations) > 1 {
 		return AlwaysRule{}, false
 	}
 	key := r.Method + " " + decided.EscapedPath()
-	if v.Operation != nil && v.Operation.ID != "" {
+	if (v.Reason == "graphql" || v.Reason == "git") && v.Operation != nil && v.Operation.ID != "" {
 		key = v.Operation.ID
 	} else if strings.ContainsAny(decided.EscapedPath(), "*") {
 		// A literal path with a * in it would be read as a pattern.

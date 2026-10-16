@@ -57,9 +57,10 @@ func (s *saying) Ask(_ context.Context, q Question) (recording.Answer, error) {
 	return s.answer(q), nil
 }
 
-// A request answered Always is admitted, its rule offered as the operation
-// it is, or its method and exact path; the same operation or path is then
-// admitted unasked for the rest of the session, and nothing else is.
+// A request answered Always is admitted, its rule offered as its method
+// and exact path, even where it is an operation; the same request is then
+// admitted unasked for the rest of the session, and nothing else is -- not
+// the same operation on another path.
 func TestAlwaysAdmitsTheRuleForTheSession(t *testing.T) {
 	j := &journal{}
 	up := newUpstream(t, nil)
@@ -98,7 +99,7 @@ func TestAlwaysAdmitsTheRuleForTheSession(t *testing.T) {
 	do("POST", "/v2/allowed-once")
 	do("POST", "/v2/other?x=1")
 
-	if n := len(asker.questions); n != 4 {
+	if n := len(asker.questions); n != 5 {
 		t.Fatalf("asked %d: %+v", n, asker.questions)
 	}
 	for _, q := range asker.questions {
@@ -110,7 +111,7 @@ func TestAlwaysAdmitsTheRuleForTheSession(t *testing.T) {
 	for _, r := range alw.offered {
 		keys = append(keys, r.Route+" "+r.Key)
 	}
-	want := []string{"api delete-thing", "api POST /v2/other", "api POST /v2/allowed-once", "api POST /v2/allowed-once"}
+	want := []string{"api DELETE /v1/things/a", "api DELETE /v1/things/b", "api POST /v2/other", "api POST /v2/allowed-once", "api POST /v2/allowed-once"}
 	if len(keys) != len(want) {
 		t.Fatalf("offered %q", keys)
 	}
@@ -123,7 +124,7 @@ func TestAlwaysAdmitsTheRuleForTheSession(t *testing.T) {
 	for _, l := range j.waitLines(t, "request", 7) {
 		rules = append(rules, l["rule"].(string))
 	}
-	wantRules := []string{RuleAsked, RuleAlways, RuleAsked, RuleAlways, RuleAsked, RuleAsked, RuleAlways}
+	wantRules := []string{RuleAsked, RuleAsked, RuleAsked, RuleAlways, RuleAsked, RuleAsked, RuleAlways}
 	for i := range wantRules {
 		if rules[i] != wantRules[i] {
 			t.Errorf("rules %q, want %q", rules, wantRules)
@@ -133,7 +134,7 @@ func TestAlwaysAdmitsTheRuleForTheSession(t *testing.T) {
 
 	// The rule decides the same request again by any scope: refused by
 	// the route's own, which asks, and admitted by one that names it.
-	r := alw.offered[1]
+	r := alw.offered[2]
 	if o, err := r.Decides(Scope{Unmatched: UnmatchedAsk}); err != nil || o != Ask {
 		t.Errorf("by the route's: %v %v", o, err)
 	}
@@ -161,6 +162,29 @@ func TestAlwaysIsNotOfferedForWhatNoRuleCouldName(t *testing.T) {
 	}
 	if _, ok := alwaysRule(&route{Route: Route{Name: "api"}}, req, mustURL(t, "/v2/x"), Verdict{Outcome: Ask, Operations: []*Operation{deleteThing, deleteThing}}); ok {
 		t.Error("a request of several operations is a rule")
+	}
+}
+
+// Always's rule is a request's method and exact path, whatever operation
+// it is; a GraphQL field's and git's push, decided before any path, are
+// their operation's id.
+func TestAlwaysRulesAreExactPathsSaveGraphQLAndGit(t *testing.T) {
+	rt := &route{Route: Route{Name: "api"}}
+	for _, c := range []struct {
+		method, path string
+		v            Verdict
+		want         string
+	}{
+		{"DELETE", "/v1/things/a", Verdict{Outcome: Ask, Reason: "path", Operation: deleteThing}, "DELETE /v1/things/a"},
+		{"POST", "/v2/other", Verdict{Outcome: Ask, Reason: RuleUnmatched}, "POST /v2/other"},
+		{"POST", "/graphql", Verdict{Outcome: Ask, Reason: "graphql", Operation: &Operation{ID: "closePullRequest"}}, "closePullRequest"},
+		{"POST", "/o/r.git/git-receive-pack", Verdict{Outcome: Ask, Reason: "git", Operation: ReceivePack}, "git-receive-pack"},
+	} {
+		req := newRequest(t, c.method, "https://"+apiHost+c.path, nil)
+		r, ok := alwaysRule(rt, req, mustURL(t, c.path), c.v)
+		if !ok || r.Key != c.want {
+			t.Errorf("%s %s: %q %v, want %q", c.method, c.path, r.Key, ok, c.want)
+		}
 	}
 }
 

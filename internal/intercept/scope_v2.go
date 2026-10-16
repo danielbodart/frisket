@@ -10,12 +10,14 @@ import (
 //
 // What a request is comes first: the most specific of the route's
 // operations that matches it, ranked as path rules are. An operation
-// answered by its id or category decides it, and no endpoint pattern can
-// say otherwise. Failing that, the most specific endpoint pattern that
-// matches it decides, no more leniently than the ceiling lets a pattern
-// answer the operation's class, or, matching none, an unmatched request;
-// failing that, the operation's own answer, by its class; and a request
-// that is no operation and matches no pattern is Unmatched's.
+// answered by its id or category stands where its own template does: the
+// most specific endpoint pattern that matches the request overrules it
+// only by being more specific than that template, or as specific and
+// stricter. An operation answered by its class is overruled by any
+// pattern that matches, however wide. A pattern decides no more leniently
+// than the ceiling lets one answer the operation's class, or, matching
+// none, an unmatched request; and a request that is no operation and
+// matches no pattern is Unmatched's.
 //
 // As in version 1, what is admitted never depends on how literally the
 // upstream reads its paths: an operation or a pattern that matches the
@@ -99,15 +101,22 @@ type v2Decision struct {
 // v2Decide is a request's answer by what match matches, or not matched.
 func (c *compiled) v2Decide(method string, n int, match func(*compiledPath) bool) v2Decision {
 	op := bestOf(c.ops, method, n, match)
-	if op != nil && op.named {
-		return v2Decision{matched: true, outcome: op.outcome, decider: op, op: op}
+	class := ""
+	if op != nil && op.operation != nil {
+		class = op.operation.Class
 	}
 	if p := bestOf(c.paths, method, n, match); p != nil {
-		class := ""
-		if op != nil && op.operation != nil {
-			class = op.operation.Class
+		pattern := v2Decision{matched: true, outcome: c.clamp(p.outcome, class), decider: p, op: op}
+		if op == nil || !op.named || outranks(p, op, n) {
+			return pattern
 		}
-		return v2Decision{matched: true, outcome: c.clamp(p.outcome, class), decider: p, op: op}
+		// An operation answered by its id or category stands where its own
+		// template does: a pattern narrower than that template overrules it,
+		// a wider one does not, and between the two equally specific, the
+		// stricter decides.
+		if !outranks(op, p, n) && strictness(pattern.outcome) > strictness(op.outcome) {
+			return pattern
+		}
 	}
 	if op != nil {
 		return v2Decision{matched: true, outcome: op.outcome, decider: op, op: op}

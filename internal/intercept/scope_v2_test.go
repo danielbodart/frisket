@@ -23,19 +23,26 @@ func decideV2Case(t *testing.T, s Scope, method, target string) Verdict {
 	return c.decide(method, u)
 }
 
-// An operation answered by its id or category decides whatever pattern
-// matches; one answered by its class is overruled by any pattern that
-// does, however wide; and a request that is no operation is the pattern's,
-// or Unmatched's.
-func TestAnOperationsNameBeatsAPatternAndAPatternItsClass(t *testing.T) {
+// An operation answered by its id or category stands where its own
+// template does: a pattern narrower than that template overrules it, a
+// wider one does not, and one as specific decides only by being the
+// stricter. One answered by its class is overruled by any pattern that
+// matches, however wide; and a request that is no operation is the
+// pattern's, or Unmatched's.
+func TestAnOperationsNameStandsWhereItsTemplateDoes(t *testing.T) {
 	s := Scope{
 		Operations: []Endpoint{
 			{PathRule: PathRule{Methods: []string{"POST"}, Path: "/repos/*/*/pulls", Operation: v2op("pulls/create", "write")}, Outcome: Admit, Named: true},
 			{PathRule: PathRule{Methods: []string{"POST"}, Path: "/repos/*/*/issues", Operation: v2op("issues/create", "write")}, Outcome: Ask},
+			{PathRule: PathRule{Methods: []string{"PUT"}, Path: "/repos/*/*/labels", Operation: v2op("labels/put", "write")}, Outcome: Ask, Named: true},
+			{PathRule: PathRule{Methods: []string{"PATCH"}, Path: "/repos/*/*/labels", Operation: v2op("labels/patch", "write")}, Outcome: Refuse, Named: true},
 		},
 		Paths: []PathRule{
 			{Methods: []string{"POST"}, Path: "/repos/o/*/pulls", Refuse: true},
 			{Methods: []string{"POST"}, Prefix: "/repos/o", Refuse: true},
+			{Methods: []string{"POST"}, Prefix: "/repos/w", Refuse: true},
+			{Methods: []string{"PUT"}, Path: "/repos/*/*/labels", Refuse: true},
+			{Methods: []string{"PATCH"}, Path: "/repos/*/*/labels"},
 			{Methods: []string{"GET"}, Prefix: "/"},
 		},
 		Unmatched: UnmatchedAsk,
@@ -45,7 +52,11 @@ func TestAnOperationsNameBeatsAPatternAndAPatternItsClass(t *testing.T) {
 		want           Outcome
 		op             string
 	}{
-		{"POST", "/repos/o/r/pulls", Admit, "pulls/create"},    // its id, over a literal pattern
+		{"POST", "/repos/o/r/pulls", Refuse, "pulls/create"},   // a literal pattern, narrower than its id's template
+		{"POST", "/repos/w/r/pulls", Admit, "pulls/create"},    // its id, over a prefix pattern
+		{"POST", "/repos/x/r/pulls", Admit, "pulls/create"},    // its id, no pattern matching
+		{"PUT", "/repos/x/r/labels", Refuse, "labels/put"},     // as specific as its template, and stricter
+		{"PATCH", "/repos/x/r/labels", Refuse, "labels/patch"}, // as specific, and more lenient: its id
 		{"POST", "/repos/x/r/issues", Ask, "issues/create"},    // its class, no pattern matching
 		{"POST", "/repos/o/r/issues", Refuse, "issues/create"}, // the prefix pattern, over its class
 		{"GET", "/anything", Admit, ""},
