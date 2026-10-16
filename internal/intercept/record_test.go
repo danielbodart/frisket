@@ -38,7 +38,8 @@ func newRecordingFixture(t *testing.T, j *journal, def recording.Answer, asker A
 // A recording session with a default admits what its scope refuses or asks
 // about -- a guarded operation too: recording is manual mode -- with the
 // credential on it, since the person recording is driving, and writes each
-// subject down once, with what the scope would have done.
+// subject -- each exact path, the same operation's on another object too --
+// down once, with what the scope would have done.
 func TestARecordingSessionAdmitsWhatItsScopeWouldNotByItsDefault(t *testing.T) {
 	j := &journal{}
 	up := newUpstream(t, nil)
@@ -48,7 +49,7 @@ func TestARecordingSessionAdmitsWhatItsScopeWouldNotByItsDefault(t *testing.T) {
 	for _, r := range []struct{ method, target string }{
 		{"GET", "/v1/things/a"},
 		{"DELETE", "/v1/things/a"},
-		{"DELETE", "/v1/things/b"}, // the same operation: remembered, not written again
+		{"DELETE", "/v1/things/b"}, // the same operation on another object: a line of its own
 		{"PUT", "/v1/things/a"},
 		{"POST", "/v2/other"},
 		{"POST", "/v2/other"},
@@ -66,9 +67,11 @@ func TestARecordingSessionAdmitsWhatItsScopeWouldNotByItsDefault(t *testing.T) {
 			t.Fatalf("%s %s went upstream without the credential", r.Method, r.URL)
 		}
 	}
-	lines := f.journal.waitLines(t, "record", 3)
+	lines := f.journal.waitLines(t, "record", 4)
 	want := []map[string]any{
 		{"kind": "http", "route": "api", "method": "DELETE", "host": apiHost, "path": "/v1/things/a", "operation": "delete-thing",
+			"would": "refuse", "rule": ReasonRefused, "answer": "allow", "source": "default"},
+		{"kind": "http", "method": "DELETE", "path": "/v1/things/b", "operation": "delete-thing",
 			"would": "refuse", "rule": ReasonRefused, "answer": "allow", "source": "default"},
 		{"kind": "http", "method": "PUT", "path": "/v1/things/a", "operation": "put-thing",
 			"would": "ask", "rule": "path", "answer": "allow", "source": "default"},
@@ -128,7 +131,7 @@ func TestARecordingSessionPutsEachSubjectToAPersonOnce(t *testing.T) {
 		status         int
 	}{
 		{"DELETE", "/v1/things/a", http.StatusOK},
-		{"DELETE", "/v1/things/b", http.StatusOK},
+		{"DELETE", "/v1/things/a", http.StatusOK},
 		{"PUT", "/v1/things/a", http.StatusForbidden},
 		{"PUT", "/v1/things/a", http.StatusForbidden},
 		{"POST", "/v2/other", http.StatusOK},
@@ -143,7 +146,7 @@ func TestARecordingSessionPutsEachSubjectToAPersonOnce(t *testing.T) {
 	if len(questions) != 4 {
 		t.Fatalf("asked %d times, want once for each of three subjects and again for the one answered ask", len(questions))
 	}
-	if questions[0].ID != questions[1].ID || questions[1].Path != "/v1/things/b" {
+	if questions[0].ID != questions[1].ID || questions[1].Method != "DELETE" {
 		t.Errorf("the ask's second question %+v", questions[1])
 	}
 	for _, q := range questions {

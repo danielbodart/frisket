@@ -263,8 +263,8 @@ zenity --question --ok-label=Allow --cancel-label=Refuse --extra-button=Ask ...
 prints nothing and exits 0 for Allow, 1 for Refuse, and prints `Ask` and exits
 1 for Ask. Offer the third button when the question has `record` set: one
 from a recording session. Every question has an `id`, the same for a second
-asking of the same subject in a session -- the operation, where a rule named
-one, or the exact path -- and different for any other.
+asking of the same subject in a session -- the method and exact path, and
+for a GraphQL request what it was read as -- and different for any other.
 
 `operation` is absent when nothing matched, and it
 is the only prose in the question: it comes from the configuration, and

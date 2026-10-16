@@ -80,14 +80,15 @@ func RecordAnswer(a recording.Answer, reason string) (recording.Answer, string) 
 	return a, reason
 }
 
-// httpKey names a request's subject within its session: the operation it
-// matched, where a rule matched it, so that a person answering for one
-// operation is not asked again for each object it names; otherwise its exact
-// path. A GraphQL request's is what it was read as, beside either.
+// httpKey names a request's subject within its session: its exact path,
+// whatever operation it matched, so that each object an operation names is
+// a line of its own -- what a grant of exact paths is made from -- and not
+// just the first; a GraphQL request's operations and what it was read as
+// beside it, since every field shares the endpoint's one path.
 func httpKey(route, method, path string, v Verdict) string {
 	what := "path " + path
-	if ids := operationIDs(v); ids != "" && v.Reason != RuleUnmatched && v.Reason != ReasonOutOfScope {
-		what = "operation " + ids
+	if ids := operationIDs(v); ids != "" && v.Reason == "graphql" {
+		what += " operation " + ids
 	}
 	return route + "\x00" + method + "\x00" + what + "\x00" + v.GraphQL
 }

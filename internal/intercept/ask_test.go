@@ -92,10 +92,10 @@ func TestAPersonDecidesWhatTheScopeAsksAbout(t *testing.T) {
 			{Session: "sess-test", Workspace: "/work/test", Policy: "test-policy", Route: "api", Method: "PUT", Host: apiHost, Path: "/v1/things/a"},
 			{Session: "sess-test", Workspace: "/work/test", Policy: "test-policy", Route: "api", Method: "POST", Host: apiHost, Path: "/v2/other"},
 		}
-		// Each names its subject: the operation where a rule matched, the
-		// path where none did.
+		// Each names its subject: its exact path, whether or not a rule
+		// matched it.
 		for i, id := range []string{
-			recording.ID("sess-test", recording.KindHTTP, "api\x00DELETE\x00operation delete-thing\x00"),
+			recording.ID("sess-test", recording.KindHTTP, "api\x00DELETE\x00path /v1/things/a%3Ab\x00"),
 			recording.ID("sess-test", recording.KindHTTP, "api\x00PUT\x00path /v1/things/a\x00"),
 			recording.ID("sess-test", recording.KindHTTP, "api\x00POST\x00path /v2/other\x00"),
 		} {

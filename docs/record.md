@@ -184,8 +184,9 @@ the local network. The rest depends on `kind`:
 - `http`: `route`, `method`, `host`, `path` (escaped, as sent, without its
   query; 2 KiB at most), `operation` -- the matched rule's id, every one
   comma-joined for a request holding several -- and `graphql`, what a GraphQL
-  request was read as. The subject is the operation where a rule named one,
-  and the exact path where none did.
+  request was read as. The subject is the method and exact path, whatever
+  operation it is, so each object an operation names is written down; a
+  GraphQL request's, its operations and what it was read as beside it.
 - `ssh`: `route`, `user`, `address`, `command` (exactly as sent; 4 KiB at
   most), `operation` as for `http`, and `shell` on a shell route. The
   subject is the command.
