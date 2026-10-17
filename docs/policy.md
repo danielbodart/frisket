@@ -4,7 +4,8 @@ A project may hold its own policy file, beside its code: `chase.json`, say,
 with a section per component. It counts only when a stock SSHSIG beside it,
 `chase.json.sig`, verifies over its exact bytes, by a key in root's allowed
 signers, in a namespace that names the project's directory
-(`quoin-policy:~/Projects/foo`). [policy-plan.md](policy-plan.md) is the
+(`quoin-policy:~/Projects/foo`), a git worktree's being its repository's.
+[policy-plan.md](policy-plan.md) is the
 plan, and says what reads the file and how "Always" writes it.
 
 The file itself -- its signature and namespace, the canonical form, the

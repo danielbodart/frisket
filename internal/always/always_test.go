@@ -372,3 +372,45 @@ func TestAlwaysNotSavedStillAdmitsAndSaysSo(t *testing.T) {
 		t.Errorf("notices %+v", f.notices)
 	}
 }
+
+// In a git worktree, the file is its repository's: one signed as the
+// repository's is offered over, and the rule is signed as the repository's
+// into the worktree's own file.
+func TestAlwaysInAWorktreeSignsAsItsRepository(t *testing.T) {
+	f := newFixture(t)
+	repo := f.ws
+	wt := filepath.Join(repo, ".claude", "worktrees", "pi")
+	admin := filepath.Join(repo, ".git", "worktrees", "pi")
+	for _, d := range []string{wt, admin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// As git worktree add writes them: each names the other.
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+admin+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(admin, "gitdir"), []byte(filepath.Join(wt, ".git")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.ws = wt
+	f.file("{\n  \"version\": 2\n}\n", true) // signed in quoin-policy:~/Projects/foo
+
+	s := f.session(document(t))
+	rule := httpRule("api", "delete-thing", "DELETE", "/v1/things/7")
+	var q intercept.Question
+	save := s.Offer(&q, rule)
+	if save == nil || q.Diff == nil || q.Diff.Path != "~/Projects/foo/.claude/worktrees/pi/chase.json" || q.Diff.Old == "" {
+		t.Fatalf("offered %+v %+v\n%s", q, q.Diff, f.log.String())
+	}
+	save()
+	s.Wait()
+	got, sig := f.read()
+	signers, _ := projpolicy.ReadAllowedSigners(filepath.Join(f.home, "allowed_signers"))
+	if _, err := projpolicy.Verify([]byte(got), sig, "quoin-policy:~/Projects/foo", signers, "dan", time.Now()); err != nil {
+		t.Error(err)
+	}
+	if len(f.signed) != 1 || f.signed[0].Root != repo {
+		t.Errorf("signed %+v", f.signed)
+	}
+}

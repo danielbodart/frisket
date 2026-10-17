@@ -146,6 +146,7 @@ func (s *Session) Admits(rule intercept.AlwaysRule) bool {
 // offer is what an answer of always writes.
 type offer struct {
 	root, namespace, path string
+	project               string // root's project, a worktree's repository, which the file is signed as
 	old                   string // the file's digest, "" for none
 	cur, new              []byte
 }
@@ -179,12 +180,13 @@ func (s *Session) prepare(rule intercept.AlwaysRule) (*offer, string) {
 		return nil, err.Error()
 	}
 	root := s.workspace
-	ns, err := projpolicy.Namespace(root, cfg.Home)
+	project := projpolicy.ProjectRoot(root, cfg.Home)
+	ns, err := projpolicy.Namespace(project, cfg.Home)
 	if err != nil {
 		return nil, err.Error()
 	}
 	name, _ := projpolicy.RootName(root, cfg.Home)
-	o := &offer{root: root, namespace: ns, path: strings.TrimSuffix(name, "/") + "/" + cfg.FileName}
+	o := &offer{root: root, namespace: ns, project: project, path: strings.TrimSuffix(name, "/") + "/" + cfg.FileName}
 	var doc any = map[string]any{"version": json.Number("2")}
 	p, err := projpolicy.Load(root, cfg.Home, cfg.FileName, signers)
 	switch {
@@ -305,7 +307,7 @@ func (s *Session) write(rule intercept.AlwaysRule, o *offer) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	sig, err := w.sign(ctx, policysign.Request{
-		Root: o.root, Name: w.cfg.FileName, New: o.new, Approved: true,
+		Root: o.project, Name: w.cfg.FileName, New: o.new, Approved: true,
 	})
 	if err == nil {
 		err = s.verify(o, sig)

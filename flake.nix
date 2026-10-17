@@ -19,7 +19,7 @@
   # input, so a consumer never fetches it. It is the release go.mod requires,
   # which the quoin-pin check holds it to and scripts/pin.sh sets in both.
   inputs.quoin = {
-    url = "github:danielbodart/quoin/v0.81.13";
+    url = "github:danielbodart/quoin/v0.85.17";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -52,7 +52,7 @@
         # activation code frisket shares with it, and galley's wire, for the
         # most a diff Always shows may hold. vendorHash = null is a nice
         # property and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-bz2Q1w2PBMQudfaLvZx/7F7uSFxaC4to3TtCSMQ4iMA=";
+        vendorHash = "sha256-OswVQjJyYYiI1nckDv3ZCqKDuLaYipKY7bb01NN/yrg=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has
