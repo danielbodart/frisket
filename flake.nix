@@ -415,8 +415,8 @@
                     fail "the relay is not marked after DNS ($dns) and before the service address ($svc): $r4, $r6"
                   # The inbound DNAT to loopback is the `service` set's, whose
                   # sandbox has a network for pasta to forward in by.
-                  inbound=$(line 'iifname != "lo" meta nfproto ipv4 tcp dport != 15001 ct state new dnat ip to 127.0.0.1' || true)
-                  spliced=$(line 'meta mark != 1 meta nfproto ipv4 ip daddr != 127.0.0.0/8 fib daddr type local tcp dport != 15001 ct state new dnat ip to 127.0.0.1' || true)
+                  inbound=$(line 'iifname != "lo" meta nfproto ipv4 tcp dport != 230 ct state new dnat ip to 127.0.0.1' || true)
+                  spliced=$(line 'meta mark != 1 meta nfproto ipv4 ip daddr != 127.0.0.0/8 fib daddr type local tcp dport != 230 ct state new dnat ip to 127.0.0.1' || true)
                   if [ "$set" = service ]; then [ -n "$inbound" ] && [ -n "$spliced" ] || fail "no inbound DNAT to loopback"
                   else [ -z "$inbound$spliced" ] || fail "an inbound DNAT in a set with no network"; fi
                   if [ "$set" = all ]; then

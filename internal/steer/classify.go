@@ -49,7 +49,7 @@ func (v Verdict) Steered() bool { return v.Decision == Steered }
 // Under TPROXY the accepted socket's local address is where the client was
 // going, so a steered connection has some other address -- 140.82.121.3:443,
 // or 1.1.1.1:53 for TCP DNS -- and a connection that was never steered has the
-// listener's own, because the client dialled 127.0.0.1:15001 itself. A
+// listener's own, because the client dialled 127.0.0.1:230 itself. A
 // workload inside the sandbox can reach the listener -- it is a socket in its
 // own namespace, on an address it can route to -- and if it does, it is trying
 // to talk to frisket rather than through it. There is nothing to say to such a

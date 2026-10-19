@@ -46,8 +46,12 @@
   # "service": a sandbox with its own network (pasta); only DNS and the
   #        service address are steered, and everything else goes direct.
   set ? "all"
-, # The TCP listener's port inside the sandbox: `{ tcp = 15001; }`. High, and
-  # never one the ruleset steers -- see steering.Plan. There is no DNS port to
+, # The TCP listener's port inside the sandbox: `{ tcp = 230; }`. Below the
+  # host's unprivileged floor, so pasta's `auto` never republishes it at the
+  # project's address and each session of a project has its own; not 53,
+  # which the ruleset steers; and below 512, where bindresvport and
+  # rresvport take a privileged SOURCE port. IANA leaves 225-241
+  # unassigned. See steering.Plan. There is no DNS port to
   # choose: a UDP listener answers FROM its own port, so it is bound on 53.
   ports ? { }
 , # frisket's service address, one per family. Overrides merge.
@@ -78,14 +82,14 @@
 }:
 
 let
-  p = { tcp = 15001; } // ports;
+  p = { tcp = 230; } // ports;
   svc = { v4 = "192.0.2.2"; v6 = "2001:db8::2"; } // service;
   dm = { interface = "frisket0"; v4 = "192.0.2.1"; v6 = "2001:db8::1"; } // dummy;
   tcp = toString p.tcp;
   m = toString mark;
 
   # FOUR SOCKETS: one TCP and one DNS listener, per family, on loopback. The
-  # TCP listener takes every steered connection on its high port; each DNS
+  # TCP listener takes every steered connection on its one port; each DNS
   # listener is on 53, because PKTINFO sets a reply's source ADDRESS and not
   # its port -- measured, a listener on :15353 answering a query to :5353 sent
   # without error and the client timed out.

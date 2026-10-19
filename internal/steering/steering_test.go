@@ -20,7 +20,7 @@ func allFile() File {
 	return File{
 		Set:        "all",
 		Table:      "frisket",
-		Listeners:  []string{"tcp4:127.0.0.1:15001", "tcp6:[::1]:15001", "udp4:127.0.0.1:53", "udp6:[::1]:53"},
+		Listeners:  []string{"tcp4:127.0.0.1:230", "tcp6:[::1]:230", "udp4:127.0.0.1:53", "udp6:[::1]:53"},
 		Ruleset:    ruleset,
 		Service:    []string{"192.0.2.2", "2001:db8::2"},
 		Mark:       1,
@@ -43,10 +43,14 @@ func TestPlanRefusesAFileThatWouldSteerBadly(t *testing.T) {
 		"a ruleset without its table": func(f *File) { f.Ruleset = "table inet other {\n}\n" },
 		"a missing family's listener": func(f *File) { f.Listeners = f.Listeners[:3] },
 		"two TCP listeners in one family": func(f *File) {
-			f.Listeners = append(f.Listeners, "tcp4:127.0.0.1:15002")
+			f.Listeners = append(f.Listeners, "tcp4:127.0.0.1:231")
 		},
 		"a listener off loopback, where tproxy never sends": func(f *File) {
-			f.Listeners[0] = "tcp4:192.0.2.1:15001"
+			f.Listeners[0] = "tcp4:192.0.2.1:230"
+		},
+		// pasta's `auto` would hold it on the host, at the project's address.
+		"a TCP listener pasta would publish": func(f *File) {
+			f.Listeners[1] = "tcp6:[::1]:15001"
 		},
 		// PKTINFO sets a reply's source address and not its port.
 		"a UDP listener off the port it answers from": func(f *File) { f.Listeners[2] = "udp4:127.0.0.1:15353" },
@@ -199,7 +203,7 @@ func (f *fakeRoot) steerer() *Steerer {
 				f.steps = append(f.steps, "NOT-ISOLATED")
 			}
 			if f.fail == "listeners" {
-				return nil, nil, errors.New("bind 127.0.0.1:15001: address already in use")
+				return nil, nil, errors.New("bind 127.0.0.1:230: address already in use")
 			}
 			return &nsnet.Set{Netns: "net:[1]"}, f, nil
 		},

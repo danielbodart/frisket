@@ -83,7 +83,7 @@ func RunHelper(argv []string, stderr io.Writer, serve Serve) error {
 	fs := flag.NewFlagSet("helper", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	netns := fs.String("net", "", "path to the network namespace to enter; empty stays in this one")
-	specs := fs.String("spec", "", "comma-separated listeners, e.g. tcp4:127.0.0.1:15001,udp6:[::1]:53")
+	specs := fs.String("spec", "", "comma-separated listeners, e.g. tcp4:127.0.0.1:230,udp6:[::1]:53")
 	loTimeout := fs.Duration("lo-timeout", DefaultLoopbackTimeout, "how long to wait for lo to come up")
 	isolated := fs.Bool("isolated", false, "refuse a namespace with any interface besides lo")
 	if err := fs.Parse(argv); err != nil {

@@ -1047,8 +1047,8 @@ in
           assert len(lines_of("tls", name)) == before + 1
 
       with subtest("a direct connection to a listener is refused, and logged"):
-          machine.execute(as_workload(leader, "nc -w 2 127.0.0.1 15001 </dev/null; nc -w 2 ::1 15001 </dev/null"))
-          for listener in ["127.0.0.1:15001", "[::1]:15001"]:
+          machine.execute(as_workload(leader, "nc -w 2 127.0.0.1 230 </dev/null; nc -w 2 ::1 230 </dev/null"))
+          for listener in ["127.0.0.1:230", "[::1]:230"]:
               [c] = wait_log("connection", name, lambda m: m["listener"] == listener, listener)
               assert c["decision"] == "unsteered" and c["action"] == "refused", c
               assert c["reason"] == "listener's own address", c
@@ -1455,28 +1455,12 @@ in
           assert machine.succeed("ss -Htln 'sport = :64320'").strip() == "", machine.succeed("ss -Htlnp")
           # What Docker's publish would do, and could not with *:64320 held.
           listen("echo-project", address, 64320, "project")
-          # DNS on 53 is under the host's unprivileged port floor, which
-          # `auto` never publishes.
-          assert "passt" not in machine.succeed("ss -Htlnp 'sport = :53'"), machine.succeed("ss -Htlnp")
-          # frisket's TCP listener is a real socket above that floor, and
-          # this test's `auto` excludes no port, so the host gets it
-          # on every address: an accepted residual,
-          # which pasta's exclusions are to remove. What pins it harmless is
-          # that anything through it arrives, by the host's loopback,
-          # dialling the listener itself, and is refused as unsteered:
-          # nothing back, nothing relayed.
-          held = machine.succeed("ss -Htlnp 'sport = :15001'")
-          assert "passt" in held, held
-          before = len(lines_of("connection", name))
-          relays = len(lines_of("relay", name))
-          for host in ["127.0.0.1", "::1"]:
-              out = machine.execute(f"printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -N -w 3 {host} 15001 2>&1")[1]
-              assert out == "", (host, out)
-          for listener in ["127.0.0.1:15001", "[::1]:15001"]:
-              [c] = wait_log("connection", name, lambda m: m["listener"] == listener and m["decision"] == "unsteered", listener)[-1:]
-              assert c["action"] == "refused" and c["reason"] == "listener's own address", c
-          assert len(lines_of("connection", name)) >= before + 2, lines_of("connection", name)[before:]
-          assert len(lines_of("relay", name)) == relays, lines_of("relay", name)[relays:]
+          # DNS on 53 and frisket's TCP listener on 230 are under the host's
+          # unprivileged port floor, which `auto` never publishes: the
+          # project's address holds neither, so a second session of the same
+          # project -- another worktree -- has its own.
+          for port in [53, 230]:
+              assert "passt" not in machine.succeed(f"ss -Htlnp 'sport = :{port}'"), machine.succeed("ss -Htlnp")
 
       with subtest("a Docker route admits what its rules do, lists only the project's, and refuses the rest before the Engine"):
           def get(path):

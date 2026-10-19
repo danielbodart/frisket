@@ -378,7 +378,7 @@ header or credential file, because its hop is plain HTTP.
 A session reaches its project's containers by that address, not by a
 listener of its own. Its ruleset steers `127.0.0.1:P`, `[::1]:P` and the
 project's address `:P`, for each port P the project names, to frisket's
-existing steering listener on 15001, as it steers DNS. frisket relays each
+existing steering listener on 230, as it steers DNS. frisket relays each
 connection only to the project's address on a port the project names, and
 only while one of the project's own running containers publishes it there;
 anything else is reset. The session never chooses the address it is relayed
@@ -1082,7 +1082,7 @@ is shaped so is below.
   exist only in the trusted tier and which you approve each change of; that
   is the whole gate, with no inventory of hosts in Nix beside it.
 - **frisket terminates SSH.** The session's ruleset steers each route's
-  address and port to frisket's existing listener on 15001, in the relay
+  address and port to frisket's existing listener on 230, in the relay
   sets Docker's ports use, with no change to the ruleset. frisket completes
   the handshake as the route, with a host certificate signed by the
   session's SSH CA, and asks the sandbox for no key. Only session channels

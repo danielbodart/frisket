@@ -17,7 +17,7 @@ so the daemon reads the body frisket wrote. In the response it caps
 
 A session reaches its project's containers at `127.0.0.1:P`, `[::1]:P` and
 the project's address `:P`, for each port P the project names. Its ruleset
-steers those to frisket's existing listener on 15001, and frisket relays each
+steers those to frisket's existing listener on 230, and frisket relays each
 connection only to the project's address on that port, and only while one of
 the project's own running containers publishes it there. The project's
 address and its name, `<repo>.<owner>.internal`, are the

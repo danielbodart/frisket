@@ -20,7 +20,7 @@ import (
 )
 
 // Spec names one listener to create: a network and the address to bind it to,
-// spelled the way a flag or a manifest carries it -- "tcp4:127.0.0.1:15001",
+// spelled the way a flag or a manifest carries it -- "tcp4:127.0.0.1:230",
 // "udp6:[::1]:53".
 //
 // The address is always explicit. See Validate for why a wildcard is refused.

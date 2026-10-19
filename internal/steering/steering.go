@@ -146,14 +146,21 @@ func (f File) Plan() (*Plan, error) {
 		// sent without error and the client timed out.
 		case !s.Stream() && port != DNSPort:
 			return nil, fmt.Errorf("%s: a UDP listener must be on %d, the port it answers from", s, DNSPort)
-		// A TCP LISTENER IS ON A HIGH PORT, never one the ruleset steers. A
-		// connection is refused as unsteered when its destination is the
-		// listener's own address, and every set steers TCP to 127.0.0.1:53
-		// (DNS first), so a TCP listener there would refuse TCP DNS to
-		// glibc's default resolver. The steered well-known ports are all below
-		// 1024; nothing up here is one.
-		case s.Stream() && port < 1024:
-			return nil, fmt.Errorf("%s: a TCP listener must be on an unprivileged port, which the ruleset never steers", s)
+		// A TCP LISTENER IS NEVER ON 53, the one port the ruleset steers on
+		// loopback. A connection is refused as unsteered when its destination
+		// is the listener's own address, and every set steers TCP to
+		// 127.0.0.1:53 (DNS first), so a TCP listener there would refuse TCP
+		// DNS to glibc's default resolver.
+		case s.Stream() && port == DNSPort:
+			return nil, fmt.Errorf("%s: a TCP listener must not be on %d, which the ruleset steers", s, DNSPort)
+		// AND IT IS BELOW THE HOST'S UNPRIVILEGED PORT FLOOR. pasta's `auto`
+		// republishes every port bound in the sandbox at the project's
+		// address on the host, and cannot exclude one; it can bind nothing
+		// under 1024. A listener above that would be held on the host for as
+		// long as the session runs, and a second session of the same project
+		// -- another worktree -- could not have its own.
+		case s.Stream() && port >= 1024:
+			return nil, fmt.Errorf("%s: a TCP listener must be below 1024, which pasta never publishes on the host", s)
 		}
 		p.Listeners = append(p.Listeners, s)
 	}
