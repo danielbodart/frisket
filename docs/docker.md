@@ -9,11 +9,29 @@ network's name or ID prefix in the path with the full ID it verified; adds
 `frisket.project=<project>` to the labels of what it lets be created and
 merges it into the label filter of what it lets be listed; and binds a
 published address that is empty, absent, `0.0.0.0` or `127.0.0.1` to the
-project's own loopback address, refusing any other; and, for a request with
+project's own loopback address, refusing any other; puts a container
+created on the daemon's shared default network (`NetworkMode: default`, and
+`default` as the key of `EndpointsConfig`, as `docker run` asks with no
+`--network`) on the project's own, `frisket_<owner>_<repo>`, which it makes
+as the project's, a bridge with no options, the first time one asks for it;
+and, for a request with
 a body, sets `Content-Type: application/json` and removes `Content-Encoding`,
 so the daemon reads the body frisket wrote. In the response it caps
 `Api-Version` at the route's highest version. Each change is logged in
 `docker`.
+
+What a container may run is the route's `images`, each exactly, and its
+`builds`: repositories, or namespaces ending in `/`, of the images the
+project builds, whose every tag a container may run and an inspect may name.
+A pull is of `images` alone, since a built image is on the daemon already.
+An image's name in a path may hold `/`, as moby's router reads
+`/images/{name}/json`: everything from after `/images/` to the last segment
+is the name, judged whole.
+
+BuildKit's `/grpc` and `/session` are the connections the CLI hijacks to
+`h2c`, each with an empty `Host`, which on a Docker route is the name its
+handshake gave; a rule may switch to `tcp` or `h2c`, and frisket carries
+either both ways as bytes.
 
 A session reaches its project's containers at `127.0.0.1:P`, `[::1]:P` and
 the project's address `:P`, for each port P the project names. Its ruleset

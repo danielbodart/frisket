@@ -239,6 +239,9 @@ type DockerRoute struct {
 	Project     string      `json:"project"`
 	APIVersions APIVersions `json:"apiVersions"`
 	Images      []string    `json:"images"`
+	// Builds are the repositories, and namespaces ending in '/', of the
+	// images the project builds, which a container may run by any tag.
+	Builds []string `json:"builds,omitempty"`
 	// Address and Names must be frisket's own derivation from Project.
 	Address string   `json:"address"`
 	Ports   []int    `json:"ports"`

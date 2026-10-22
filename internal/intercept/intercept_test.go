@@ -1150,6 +1150,31 @@ func TestMisdirectedRequestIsRefused(t *testing.T) {
 			t.Fatal("a misdirected request reached the upstream")
 		}
 	})
+
+	// An empty Host names no route, and only a Docker route, whose hop
+	// carries no credential, takes it for the handshake's.
+	j := &journal{}
+	up := newUpstream(t, nil)
+	cred, _ := tokenFile(t, j, realToken)
+	f := newFixture(t, j, apiRoute(up, cred))
+	conn, err := tls.Dial("tcp", f.addr, &tls.Config{RootCAs: f.roots(), ServerName: apiHost, NextProtos: []string{"http/1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "GET /v1/messages HTTP/1.1\r\nHost: \r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("an empty Host: got %d, want 421", res.StatusCode)
+	}
+	if len(up.requests()) != 0 {
+		t.Fatal("a request with an empty Host reached the upstream")
+	}
 }
 
 // An upstream that cannot be verified is a failed request, not a request

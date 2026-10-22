@@ -34,8 +34,9 @@ func withoutHops(h http.Header) {
 	}
 }
 
-// stream carries a Docker request that switches to tcp: an exec's or an
-// attach's stdin one way and its output the other.
+// stream carries a Docker request that switches to proto, the rule's: an
+// exec's or an attach's stdin one way and its output the other for tcp, and
+// BuildKit's HTTP/2 for h2c, which frisket carries as bytes, as it does tcp.
 //
 // frisket makes the round trip itself rather than through ReverseProxy,
 // which copies from the hijacked connection and not from the reader the
@@ -47,7 +48,7 @@ func withoutHops(h http.Header) {
 // close_notify -- so a client that has sent all its stdin still receives
 // the output to come. The stream is over when both have ended, or when the
 // session has.
-func (i *Interceptor) stream(lw *logWriter, r *http.Request, ic *interceptedConn) {
+func (i *Interceptor) stream(lw *logWriter, r *http.Request, ic *interceptedConn, proto string) {
 	rec, _ := r.Context().Value(recordKey{}).(*record)
 	d := ic.route.docker
 	ctx := r.Context()
@@ -88,7 +89,7 @@ func (i *Interceptor) stream(lw *logWriter, r *http.Request, ic *interceptedConn
 		out.Header.Del(k)
 	}
 	out.Header.Set("Connection", "Upgrade")
-	out.Header.Set("Upgrade", "tcp")
+	out.Header.Set("Upgrade", proto)
 	if rec != nil {
 		rec.dockerHeaders(out.Header)
 	}
@@ -133,8 +134,8 @@ func (i *Interceptor) stream(lw *logWriter, r *http.Request, ic *interceptedConn
 		}
 		return
 	}
-	if !asciiEqualFold(strings.TrimSpace(res.Header.Get("Upgrade")), "tcp") {
-		upstreamFailed(lw, r, errors.New("the daemon switched to a protocol other than tcp"))
+	if !asciiEqualFold(strings.TrimSpace(res.Header.Get("Upgrade")), proto) {
+		upstreamFailed(lw, r, errors.New("the daemon switched to a protocol other than "+proto))
 		return
 	}
 

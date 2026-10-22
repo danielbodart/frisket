@@ -706,10 +706,14 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if normaliseHost(r.Host) != ic.sni {
+	if normaliseHost(r.Host) != ic.sni && !(rt.docker != nil && r.Host == "") {
 		// One connection, one name: the handshake chose the route and its
 		// credential. A request for another name on it -- HTTP/2 connection
 		// reuse, or a deliberate mismatch -- is sent back to be asked again.
+		// An empty Host names nothing else, and is what Docker's client
+		// sends on the connections it hijacks for BuildKit, /grpc and
+		// /session, so on a Docker route, whose hop carries no credential,
+		// it is the name the handshake gave.
 		rec.refuse(ReasonMisdirected)
 		rt.refuse(lw, http.StatusMisdirectedRequest, ReasonMisdirected, nil)
 		return
@@ -756,7 +760,7 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rec.api = api
-		decided = &url.URL{Path: stripped, RawQuery: r.URL.RawQuery}
+		decided = &url.URL{Path: d.scoped(stripped), RawQuery: r.URL.RawQuery}
 	}
 	v := rt.scope.decide(r.Method, decided)
 	if v.deferred != nil {
@@ -839,10 +843,10 @@ func (i *Interceptor) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(rt.credentialHeader()) == "" {
 			rec.credential = CredentialNone
 		}
-		if v.upgrade {
+		if v.upgrade != "" {
 			// Not through the proxy, which would end both directions as
 			// soon as either finished sending.
-			i.stream(lw, r.WithContext(context.WithValue(r.Context(), recordKey{}, rec)), ic)
+			i.stream(lw, r.WithContext(context.WithValue(r.Context(), recordKey{}, rec)), ic, v.upgrade)
 			return
 		}
 		rt.proxy.ServeHTTP(lw, r.WithContext(context.WithValue(r.Context(), recordKey{}, rec)))

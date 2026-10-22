@@ -12,6 +12,8 @@ var (
 	digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// hex64RE is an image's ID without its algorithm, in any case.
 	hex64RE = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	// shortHexRE is what the daemon may read as a prefix of an image's ID.
+	shortHexRE = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 )
 
 // registries are the only registries a route may name an image from, by
@@ -126,4 +128,67 @@ func dnsLabel(s string) bool {
 func Tagged(ref string) bool {
 	last := ref[strings.LastIndex(ref, "/")+1:]
 	return strings.ContainsAny(last, ":@")
+}
+
+// ValidBuild is whether a route may list what a project builds: a
+// repository, every tag and digest of which is the project's, or a
+// namespace, ending in '/', every repository under which is. It names no
+// tag, digest or ID, and no registry is refused, since a build is pulled
+// from none: an image a project built is on the daemon already, and one
+// that is not is never pulled by its build's name.
+func ValidBuild(build string) error {
+	if build == "" {
+		return errors.New("an empty build")
+	}
+	if strings.ContainsFunc(build, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		return errors.New("a build with a space or a control character in it")
+	}
+	parts := strings.Split(strings.TrimSuffix(build, "/"), "/")
+	for i, p := range parts {
+		if p == "" {
+			return errors.New("a build with an empty component")
+		}
+		if strings.EqualFold(p, "sha256") || hex64RE.MatchString(p) {
+			return errors.New("a build named by an image's ID")
+		}
+		// A registry's port is the one ':' a repository may hold.
+		if strings.Contains(p, "@") || i > 0 && strings.Contains(p, ":") {
+			return errors.New("a build with a tag or digest: name its repository, or a namespace ending in /")
+		}
+	}
+	return nil
+}
+
+// Built is whether ref, an image as a client sends it, is in a repository
+// one of builds names, or under a namespace one of them is: its
+// repository, without its :tag or @digest, is a build exactly or begins
+// with a namespace. It is false for anything ValidImage refuses as an ID.
+func Built(ref string, builds []string) bool {
+	if ref == "" || len(builds) == 0 {
+		return false
+	}
+	repo := ref
+	last := strings.LastIndex(repo, "/") + 1
+	if at := strings.IndexByte(repo[last:], '@'); at >= 0 {
+		repo = repo[:last+at]
+	}
+	if colon := strings.IndexByte(repo[last:], ':'); colon >= 0 {
+		repo = repo[:last+colon]
+	}
+	for _, p := range strings.Split(repo, "/") {
+		if p == "" || strings.EqualFold(p, "sha256") || hex64RE.MatchString(p) {
+			return false
+		}
+	}
+	// An untagged name of hex alone the daemon also tries as a prefix of
+	// any image's ID, when no image has that name.
+	if repo == ref && shortHexRE.MatchString(ref) {
+		return false
+	}
+	for _, b := range builds {
+		if repo == b || strings.HasSuffix(b, "/") && strings.HasPrefix(repo, b) {
+			return true
+		}
+	}
+	return false
 }

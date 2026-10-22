@@ -346,7 +346,10 @@ func TestWhatReachesTheHostIsRefused(t *testing.T) {
 		{"NetworkMode \"\"", func(b map[string]any) { set(b, "HostConfig.NetworkMode", "") }, ReasonBody},
 		{"NetworkMode absent", func(b map[string]any) { del(b, "HostConfig.NetworkMode") }, ReasonBody},
 		{"NetworkMode null", func(b map[string]any) { set(b, "HostConfig.NetworkMode", nil) }, ReasonBody},
-		{"NetworkMode default", func(b map[string]any) { set(b, "HostConfig.NetworkMode", "default") }, ReasonBody},
+		// "default" exactly is the project's own network
+		// (TestWhatDockerRunSendsIsAdmittedOnTheProjectsOwnNetwork); in any
+		// other case it is the daemon's shared one still.
+		{"NetworkMode Default", func(b map[string]any) { set(b, "HostConfig.NetworkMode", "Default") }, ReasonBody},
 		{"NetworkMode bridge", func(b map[string]any) { set(b, "HostConfig.NetworkMode", "bridge") }, ReasonBody},
 		{"NetworkMode host", func(b map[string]any) { set(b, "HostConfig.NetworkMode", "host") }, ReasonBody},
 		{"NetworkMode Host", func(b map[string]any) { set(b, "HostConfig.NetworkMode", "Host") }, ReasonBody},
@@ -1020,6 +1023,76 @@ func TestAttachedKeepsNoneAndRefusesANetworkWithNoID(t *testing.T) {
 		var r *Refusal
 		if _, err := got.Attached(ids); !errors.As(err, &r) {
 			t.Errorf("%v: %v", ids, err)
+		}
+	}
+}
+
+// What the CLI's own `docker run` sends is admitted: MemorySwappiness -1,
+// the daemon's "unset", sent as the null Compose sends, and the shared
+// default network, which goes
+// upstream as the project's own, in NetworkMode and as EndpointsConfig's
+// key, to be looked up -- and made, by the route, if it is not there yet.
+func TestWhatDockerRunSendsIsAdmittedOnTheProjectsOwnNetwork(t *testing.T) {
+	var c capture
+	load(t, "testdata/docker-run-29.8.2.json", &c)
+	own := DefaultNetwork(project)
+	if own != "frisket_example_shop" {
+		t.Fatalf("the default network is %q", own)
+	}
+	rt := route
+	rt.Builds = []string{"shop/"}
+	for _, b := range c.Bodies {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(b.Body), &raw); err != nil {
+			t.Fatal(err)
+		}
+		// The capture's second run gave -p a HostIp of 127.0.0.1, which is
+		// the project's address here, as decision 12 has it.
+		got, err := tables(t)["ContainerCreate"].Check([]byte(b.Body), rt)
+		if err != nil {
+			t.Fatalf("docker run %d: %v", b.Seq, err)
+		}
+		if !slices.Contains(got.Lookups, Lookup{Kind: "network", Name: own, Use: Attach}) {
+			t.Errorf("docker run %d: %s is not looked up: %+v", b.Seq, own, got.Lookups)
+		}
+		if !slices.Contains(got.Account, "networkmode default->"+own) || !slices.Contains(got.Account, "endpoint default->"+own) {
+			t.Errorf("docker run %d: the rewrite is not said: %q", b.Seq, got.Account)
+		}
+		const id = "372e029d9dd22674f10f3dfb1ba4aa9f9fa8a8de46589f67eab8fa3425d7915c"
+		out, err := got.Attached(map[string]string{own: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sent, _ := Read(out)
+		hc := sent["HostConfig"].(map[string]any)
+		eps := sent["NetworkingConfig"].(map[string]any)["EndpointsConfig"].(map[string]any)
+		if hc["NetworkMode"] != id || len(eps) != 1 || eps[id] == nil {
+			t.Errorf("docker run %d: sent on %v and %v", b.Seq, hc["NetworkMode"], slices.Sorted(maps.Keys(eps)))
+		}
+		if v, ok := hc["MemorySwappiness"]; !ok || v != nil || !slices.Contains(got.Account, "memoryswappiness -1->null") {
+			t.Errorf("docker run %d: MemorySwappiness sent as %v, said %q", b.Seq, v, got.Account)
+		}
+	}
+
+	// Without the build, the image is not the project's, and so refused.
+	if _, err := tables(t)["ContainerCreate"].Check([]byte(c.Bodies[0].Body), route); err == nil {
+		t.Error("an image the project neither lists nor builds was admitted")
+	}
+	// Any other swappiness is refused still, as before.
+	var raw map[string]any
+	_ = json.Unmarshal([]byte(c.Bodies[0].Body), &raw)
+	raw["HostConfig"].(map[string]any)["MemorySwappiness"] = 60
+	if _, err := tables(t)["ContainerCreate"].Check(encode(t, raw), rt); err == nil {
+		t.Error("a MemorySwappiness of 60 was admitted")
+	}
+}
+
+// Another project's default network is never made by this one; its own is.
+func TestOnlyTheProjectsOwnDefaultNetworkIsMadeByName(t *testing.T) {
+	for name, ok := range map[string]bool{"frisket_example_shop": true, "frisket_other_repo": false, "FRISKET_x": false, "shop_net": true} {
+		_, err := tables(t)["NetworkCreate"].Check([]byte(`{"Name":"`+name+`","Driver":"bridge"}`), route)
+		if (err == nil) != ok {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }

@@ -503,12 +503,41 @@ func TestAnInspectedImageIsListedExactly(t *testing.T) {
 		res, body := f.do(t, dockerRequest(t, "GET", target, nil))
 		refusedFor(t, res, body, ReasonImage)
 	}
-	// Several segments are not one "*": moby would read them as one name.
+	// Several segments are one name, as moby's router reads them, and held
+	// to the list as one: a listed spelling goes, and another does not.
 	res, body = f.do(t, dockerRequest(t, "GET", "/v1.55/images/docker.io/library/postgres:18/json", nil))
-	refusedFor(t, res, body, ReasonOutOfScope)
-	if n := len(d.requests()); n != 1 {
-		t.Fatalf("%d requests reached the daemon, want 1", n)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("docker.io/library/postgres:18: status %d: %s", res.StatusCode, body)
 	}
+	for _, target := range []string{"/v1.55/images/docker.io/library/alpine:3/json", "/v1.55/images/a/b/c/json"} {
+		res, body := f.do(t, dockerRequest(t, "GET", target, nil))
+		refusedFor(t, res, body, ReasonImage)
+	}
+	seen := d.requests()
+	if len(seen) != 2 || seen[1].path != "/v1.55/images/docker.io/library/postgres:18/json" {
+		t.Fatalf("the daemon saw %+v", seen)
+	}
+}
+
+// An image the project builds is inspected and run by any tag, by its
+// repository or a namespace it is under, and never pulled.
+func TestABuiltImageRunsByAnyTagAndIsNeverPulled(t *testing.T) {
+	d := newDaemon(t)
+	r := newUnixUpstream(t, d.socket)
+	r.Docker.Builds = []string{"shop/", "tool"}
+	f, _ := dockerFixtureOn(t, r)
+	for _, image := range []string{"shop/api:5f2a", "shop/a/b:1", "tool:local"} {
+		res, body := f.do(t, dockerRequest(t, "GET", "/v1.55/images/"+image+"/json", nil))
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("inspect %s: status %d: %s", image, res.StatusCode, body)
+		}
+	}
+	for _, image := range []string{"shopper/api:1", "tools:1", "other/tool:1"} {
+		res, body := f.do(t, dockerRequest(t, "GET", "/v1.55/images/"+image+"/json", nil))
+		refusedFor(t, res, body, ReasonImage)
+	}
+	res, body := f.do(t, dockerRequest(t, "POST", "/v1.55/images/create?fromImage=shop/api&tag=5f2a", nil))
+	refusedFor(t, res, body, ReasonImage)
 }
 
 // The daemon's Api-Version is capped at the route's highest, so a client
@@ -912,4 +941,69 @@ type staticSecret string
 
 func (s staticSecret) Get() (credential.Secret, error) {
 	return credential.Secret{Value: string(s)}, nil
+}
+
+// dockerRunBody is the CLI's own `docker run --rm shop/tool:1 cat /built`.
+func dockerRunBody(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("../dockerapi/testdata/docker-run-29.8.2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct{ Bodies []struct{ Body string } }
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatal(err)
+	}
+	return c.Bodies[0].Body
+}
+
+// A `docker run` that asks for the daemon's default network goes on the
+// project's own, made as the project's the first time and found after; one
+// of that name the project does not own is refused, not joined.
+func TestDockerRunGoesOnTheProjectsOwnNetworkMadeOnFirstUse(t *testing.T) {
+	d := newDaemon(t)
+	r := newUnixUpstream(t, d.socket)
+	r.Docker.Builds = []string{"shop/"}
+	f, _ := dockerFixtureOn(t, r)
+	create := func() (*http.Response, string) {
+		req := dockerRequest(t, "POST", "/v1.56/containers/create", strings.NewReader(dockerRunBody(t)))
+		req.Header.Set("Content-Type", "application/json")
+		return f.do(t, req)
+	}
+	for i := range 2 {
+		res, body := create()
+		if res.StatusCode != http.StatusCreated {
+			t.Fatalf("run %d: status %d: %s", i, res.StatusCode, body)
+		}
+	}
+	var made []seenRequest
+	for _, s := range d.all() {
+		if s.method == "POST" && strings.HasSuffix(s.path, "/networks/create") {
+			made = append(made, s)
+		}
+	}
+	if len(made) != 1 || !made[0].lookup || !strings.Contains(made[0].body, `"Name":"frisket_example_shop"`) ||
+		!strings.Contains(made[0].body, `"frisket.project":"example/shop"`) {
+		t.Fatalf("the network was not made once, as the project's: %+v", made)
+	}
+	own := find(d.networks, "frisket_example_shop")
+	for _, c := range d.containers {
+		if !slices.Equal(c.networks, []string{own.id}) {
+			t.Errorf("a container is on %q, not the project's own network %s", c.networks, own.id)
+		}
+	}
+
+	// Someone else's network of that name is never joined.
+	d2 := newDaemon(t)
+	d2.network("abababababababababababababababababababababababababababababababab", "frisket_example_shop", "")
+	r2 := newUnixUpstream(t, d2.socket)
+	r2.Docker.Builds = []string{"shop/"}
+	f2, _ := dockerFixtureOn(t, r2)
+	req := dockerRequest(t, "POST", "/v1.56/containers/create", strings.NewReader(dockerRunBody(t)))
+	req.Header.Set("Content-Type", "application/json")
+	res, body := f2.do(t, req)
+	refusedFor(t, res, body, ReasonNotOwned)
+	if len(d2.containers) != 0 {
+		t.Error("a container was made on a network that is not the project's")
+	}
 }

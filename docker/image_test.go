@@ -58,3 +58,52 @@ func TestAnImageIsFromDockerHubOrAKnownPublicRegistryOnly(t *testing.T) {
 		}
 	}
 }
+
+// A build names a repository or a namespace, and never a tag, a digest or
+// an ID; any registry is one, since nothing is pulled by a build's name.
+func TestABuildIsARepositoryOrANamespace(t *testing.T) {
+	for _, ok := range []string{
+		"shop/", "shop/tool", "tool", "localhost:5000/shop/",
+		"europe-west2-docker.pkg.dev/p/data-lab-artifacts/",
+	} {
+		if err := ValidBuild(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"", "/", "shop//tool", "shop/tool:1", "shop/tool@sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"sha256/", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "shop tool",
+	} {
+		if err := ValidBuild(bad); err == nil {
+			t.Errorf("%q: accepted", bad)
+		}
+	}
+}
+
+// An image is built when its repository is a build, or under a namespace
+// that is: any tag or digest of it, and never by an ID.
+func TestAnImageIsBuiltByItsRepository(t *testing.T) {
+	builds := []string{"shop/", "tool", "europe-west2-docker.pkg.dev/p/artifacts/"}
+	for _, ok := range []string{
+		"shop/a:1", "shop/a/b:latest", "shop/a", "tool:local", "tool",
+		"europe-west2-docker.pkg.dev/p/artifacts/core-data:5f2a",
+		"shop/a@sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	} {
+		if !Built(ok, builds) {
+			t.Errorf("%s: not built", ok)
+		}
+	}
+	for _, bad := range []string{
+		"", "shopper/a:1", "shop:1", "tools:1", "other/tool:1", "tool/x:1",
+		"europe-west2-docker.pkg.dev/p/other/core-data:1",
+		"sha256:0123456789ab", "shop/sha256:0123",
+		"shop/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	} {
+		if Built(bad, builds) {
+			t.Errorf("%s: built", bad)
+		}
+	}
+	if Built("cafe", []string{"cafe"}) || !Built("cafe:1", []string{"cafe"}) {
+		t.Error("an untagged hex name was built, or a tagged one was not")
+	}
+}

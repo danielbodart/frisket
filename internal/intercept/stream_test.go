@@ -331,3 +331,76 @@ func isTimeout(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
 }
+
+// buildkitRoute is shop's Docker route with BuildKit's /grpc admitted, as
+// chase writes it for a project that builds: unversioned, switching to h2c.
+func buildkitRoute(t *testing.T, socket string) Route {
+	t.Helper()
+	r := newUnixUpstream(t, socket)
+	r.Docker.APIVersions.Unversioned = append(r.Docker.APIVersions.Unversioned, "/grpc")
+	r.Scope.Paths = append(r.Scope.Paths, PathRule{Methods: []string{"POST"}, Path: "/grpc",
+		Operation: &Operation{ID: "Grpc", Summary: "BuildKit's control API", Class: "write", Category: "Session"},
+		Docker:    &DockerRule{Owned: "none", Upgrade: "h2c"}})
+	return r
+}
+
+// BuildKit's /grpc, as Docker's client hijacks it -- an empty Host, Upgrade:
+// h2c -- is carried to the daemon asking for h2c, and what follows the
+// switch goes both ways as it was sent.
+func TestABuildKitConnectionSwitchesToH2c(t *testing.T) {
+	d := newDaemon(t)
+	f, j := dockerFixtureOn(t, buildkitRoute(t, d.socket))
+	d.answer(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Header.Get("Upgrade") == "" {
+			return false
+		}
+		conn, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return true
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n")
+		if brw.Flush() != nil {
+			return true
+		}
+		preface, _ := io.ReadAll(brw.Reader)
+		_, _ = conn.Write(bytes.ToUpper(preface))
+		return true
+	})
+	request := "POST /grpc HTTP/1.1\r\nHost: \r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 0\r\n" +
+		"Connection: Upgrade\r\nUpgrade: h2c\r\n\r\n"
+	conn, br, res := switched(t, f.addr, f, []string{"http/1.1"}, request)
+	if res.StatusCode != http.StatusSwitchingProtocols || res.Header.Get("Upgrade") != "h2c" {
+		t.Fatalf("status %d, headers %v", res.StatusCode, res.Header)
+	}
+	if _, err := io.WriteString(conn, "pri * http/2.0\r\n\r\nsm\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.CloseWrite()
+	out, err := io.ReadAll(br)
+	if err != nil || string(out) != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
+		t.Fatalf("output %q, %v", out, err)
+	}
+	seen := d.requests()
+	if len(seen) != 1 || seen[0].path != "/grpc" || seen[0].header.Get("Upgrade") != "h2c" || seen[0].host != "docker" {
+		t.Fatalf("the daemon saw %+v", seen)
+	}
+	if line := j.waitLines(t, "request", 1)[0]; line["status"] != float64(http.StatusSwitchingProtocols) || line["operation"] != "Grpc" {
+		t.Fatalf("logged %v", line)
+	}
+}
+
+// On a Docker route an empty Host is the name the handshake gave, as it is
+// on the connections Docker's client hijacks for BuildKit; anywhere else it
+// is misdirected (TestMisdirectedRequestIsRefused).
+func TestAnEmptyHostOnADockerRouteIsTheHandshakesName(t *testing.T) {
+	f, d, _ := dockerFixture(t)
+	ping := "HEAD /_ping HTTP/1.1\r\nHost: \r\n\r\n"
+	_, _, res := switched(t, f.addr, f, []string{"http/1.1"}, ping)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("an empty Host on the Docker route: status %d", res.StatusCode)
+	}
+	if seen := d.requests(); len(seen) != 1 || seen[0].host != "docker" {
+		t.Fatalf("the daemon saw %+v", seen)
+	}
+}

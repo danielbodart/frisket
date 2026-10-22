@@ -36,6 +36,11 @@ type DockerRoute struct {
 	// Images are the references a container may run and a pull may fetch,
 	// each by its exact string.
 	Images []string
+	// Builds are the repositories, and namespaces ending in '/', of the
+	// images the project builds: any tag or digest of one a container may
+	// run and an inspect may name (docker.Built), and none a pull may fetch,
+	// since what was built is on the daemon already.
+	Builds []string
 	// Address is the project's loopback address, and must be
 	// project.Address(Project).
 	Address netip.Addr
@@ -73,8 +78,8 @@ type DockerRule struct {
 	Query map[string]QueryCheck
 	// Body is the table the body is judged by. Empty: there must be no body.
 	Body string
-	// Upgrade is the one protocol the request may switch to, "tcp". Empty:
-	// none.
+	// Upgrade is the one protocol the request may switch to: "tcp", an
+	// exec's or attach's raw stream, or "h2c", BuildKit's gRPC. Empty: none.
 	Upgrade string
 }
 
@@ -114,6 +119,9 @@ var creates = map[string]string{
 	"createVolume":    "VolumeCreate",
 	"createNetwork":   "NetworkCreate",
 }
+
+// upgrades are the protocols a rule may switch to, none among them.
+var upgrades = []string{"", "tcp", "h2c"}
 
 var queryChecks = []string{"any", "bool", "int", "containerName", "filters", "imageName", "imageTag", "enum"}
 
@@ -184,6 +192,11 @@ func (r *Route) validateDocker(u *url.URL, wild bool) error {
 			return fmt.Errorf("route %s: image %q: %w", r.Name, img, err)
 		}
 	}
+	for _, b := range d.Builds {
+		if err := docker.ValidBuild(b); err != nil {
+			return fmt.Errorf("route %s: build %q: %w", r.Name, b, err)
+		}
+	}
 	if want := project.Address(d.Project); d.Address != want {
 		return fmt.Errorf("route %s: address %s is not %s, the project's own", r.Name, d.Address, want)
 	}
@@ -243,11 +256,15 @@ func (d *DockerRoute) validateRule(p PathRule) error {
 		if rule.Param < 0 || rule.Param >= len(segs) || segs[rule.Param] != wildcard {
 			return fmt.Errorf("path rule %q: param %d is not a * of it", written, rule.Param)
 		}
+		// An image's name runs to the path's last segment, '/' and all.
+		if rule.Owned == "image" && (segs[0] != "images" || rule.Param != len(segs)-2) {
+			return fmt.Errorf("path rule %q: an image is the * before an /images/ path's last segment", written)
+		}
 	} else if rule.Param != 0 {
 		return fmt.Errorf("path rule %q: owned %s names no object by its path, so no param", written, rule.Owned)
 	}
-	if rule.Upgrade != "" && rule.Upgrade != "tcp" {
-		return fmt.Errorf("path rule %q: upgrade %q: tcp or none", written, rule.Upgrade)
+	if !slices.Contains(upgrades, rule.Upgrade) {
+		return fmt.Errorf("path rule %q: upgrade %q: tcp, h2c or none", written, rule.Upgrade)
 	}
 	if rule.Body != "" {
 		if _, ok := d.Bodies[rule.Body]; !ok {
@@ -428,6 +445,22 @@ func (d *dockerRoute) version(escaped string) (stripped, api string, offset int,
 	return stripped, s0[1:], 1, "", ""
 }
 
+// scoped is the path the scope decides a request on: the version stripped,
+// and an image's name, which may hold '/' as moby's router reads it
+// (/images/{name:.*}/...), one segment, so that /images/shop/tool:1/json is
+// the rule /images/*/json's. The rule reads the whole name back from the
+// request (dockerRule.decide).
+func (d *dockerRoute) scoped(stripped string) string {
+	segs := strings.Split(stripped[1:], "/")
+	if len(segs) <= 3 || segs[0] != "images" {
+		return stripped
+	}
+	return "/images/" + imageSegment + "/" + segs[len(segs)-1]
+}
+
+// imageSegment stands for a name of several segments, to the scope alone.
+const imageSegment = "_"
+
 // modify caps the version the daemon says it speaks at the route's highest:
 // a client negotiates down to it from _ping, so a daemon newer than the
 // route's rules is spoken to as though it were no newer.
@@ -506,7 +539,13 @@ func (d *dockerRule) decide(r *http.Request) Verdict {
 		if at >= len(raw) {
 			return d.refuse(ReasonParam, "")
 		}
-		if reason, acct := d.param(raw[at]); reason != "" {
+		seg := raw[at]
+		if d.Owned == "image" {
+			// Everything up to the last segment, which the rule's * is just
+			// before (validateRule), as rt.scoped matched it.
+			seg = strings.Join(raw[at:len(raw)-1], "/")
+		}
+		if reason, acct := d.param(seg); reason != "" {
 			return d.refuse(reason, acct)
 		}
 	}
@@ -570,8 +609,10 @@ func (d *dockerRule) decide(r *http.Request) Verdict {
 		setBody(r, out)
 	}
 	r.URL.RawQuery, r.URL.ForceQuery = query, false
-	v := Verdict{Outcome: Admit, Reason: "path", Operation: d.operation, Docker: strings.Join(account, "; "), jsonBody: bodied,
-		upgrade: d.Upgrade != "" && len(r.Header.Values("Upgrade")) > 0}
+	v := Verdict{Outcome: Admit, Reason: "path", Operation: d.operation, Docker: strings.Join(account, "; "), jsonBody: bodied}
+	if d.Upgrade != "" && len(r.Header.Values("Upgrade")) > 0 {
+		v.upgrade = d.Upgrade
+	}
 	if len(c.held) > 0 {
 		v.release = c.release
 	}
@@ -595,7 +636,7 @@ func (d *dockerRule) objectRefused(err error, account []string) Verdict {
 }
 
 // upgrade is why a request's protocol switch is refused: only the rule's
-// own, named once, and never h2c or websocket.
+// own, named once, and never a websocket.
 func (d *dockerRule) upgrade(h http.Header) (reason, account string) {
 	ups := h.Values("Upgrade")
 	connUpgrade := false
@@ -713,7 +754,7 @@ func (d *dockerRule) pulled(vals url.Values) (string, error) {
 func (d *dockerRule) param(seg string) (reason, account string) {
 	switch d.Owned {
 	case "image":
-		if !slices.Contains(d.route.Images, seg) {
+		if !slices.Contains(d.route.Images, seg) && !docker.Built(seg, d.route.Builds) {
 			return ReasonImage, "image=" + quoted(seg) + " not listed"
 		}
 	case "exec":
@@ -779,6 +820,7 @@ func (d *dockerRule) body(r *http.Request) (dockerapi.Checked, error) {
 		Address: d.route.Address,
 		Ports:   d.route.Ports,
 		Images:  d.route.Images,
+		Builds:  d.route.Builds,
 	})
 	if err != nil {
 		return dockerapi.Checked{}, err

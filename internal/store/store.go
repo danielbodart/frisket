@@ -975,6 +975,7 @@ func dockerRoute(r policy.Route, out intercept.Route) (intercept.Route, func() e
 		Project:     d.Project,
 		APIVersions: intercept.APIVersions{Min: d.APIVersions.Min, Max: d.APIVersions.Max, Unversioned: d.APIVersions.Unversioned},
 		Images:      d.Images,
+		Builds:      d.Builds,
 		Address:     addr,
 		Ports:       ports,
 		Names:       d.Names,

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/danielbodart/frisket/docker"
 )
 
 // LabelKey is the label frisket stamps on everything it lets be created, and
@@ -22,6 +24,9 @@ type Route struct {
 	Address netip.Addr
 	Ports   []uint16
 	Images  []string
+	// Builds are what the project builds (docker.Built): an image in one may
+	// run, as a listed image may.
+	Builds []string
 }
 
 // Use is what the daemon must say of a name a body holds before the body may
@@ -132,6 +137,57 @@ func (c Checked) Attached(ids map[string]string) ([]byte, error) {
 	return Encode(c.tree)
 }
 
+// DefaultNetwork is the project's own network, which a container goes on
+// where its create asks for the daemon's shared default: frisket_ and the
+// project with its '/' as '_', which no owner holds, so two projects never
+// share one.
+func DefaultNetwork(project string) string {
+	return "frisket_" + strings.Replace(project, "/", "_", 1)
+}
+
+// ownDefault puts a container the CLI's `docker run` would put on the
+// daemon's shared bridge -- NetworkMode default, and default as the one
+// key of EndpointsConfig -- on the project's own network instead, before
+// the table judges it, and says so. Compose names its own network, and is
+// left as it is.
+func ownDefault(tree map[string]any, project string) []string {
+	own := DefaultNetwork(project)
+	var account []string
+	if hc, ok := tree["HostConfig"].(map[string]any); ok {
+		if mode, ok := hc["NetworkMode"].(string); ok && mode == "default" {
+			hc["NetworkMode"] = own
+			account = append(account, "networkmode default->"+own)
+		}
+	}
+	if nc, ok := tree["NetworkingConfig"].(map[string]any); ok {
+		if eps, ok := nc["EndpointsConfig"].(map[string]any); ok {
+			if ep, ok := eps["default"]; ok {
+				if _, taken := eps[own]; !taken {
+					delete(eps, "default")
+					eps[own] = ep
+					account = append(account, "endpoint default->"+own)
+				}
+			}
+		}
+	}
+	return account
+}
+
+// unsetSwappiness makes the CLI's MemorySwappiness of -1, which moby reads
+// as unset, the null Compose sends for the same, so that the table judges
+// one spelling of it, and says so.
+func unsetSwappiness(tree map[string]any) []string {
+	hc, ok := tree["HostConfig"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	if n, ok := hc["MemorySwappiness"].(json.Number); ok && n.String() == "-1" {
+		hc["MemorySwappiness"] = nil
+		return []string{"memoryswappiness -1->null"}
+	}
+	return nil
+}
+
 // stamps are the operations whose objects frisket labels.
 var stamps = map[string]bool{"ContainerCreate": true, "VolumeCreate": true, "NetworkCreate": true}
 
@@ -143,6 +199,10 @@ func (t *Table) Check(body []byte, rt Route) (Checked, error) {
 		return Checked{}, err
 	}
 	w := &walker{table: t, route: rt}
+	if t.name == "ContainerCreate" {
+		w.account = append(w.account, ownDefault(tree, rt.Project)...)
+		w.account = append(w.account, unsetSwappiness(tree)...)
+	}
 	if err := w.value(t.root, tree, true, ""); err != nil {
 		return Checked{}, err
 	}
@@ -336,7 +396,7 @@ func (w *walker) leaf(n *node, v any, at string) error {
 		}
 	case kImage:
 		s, ok := v.(string)
-		if !ok || !slices.Contains(w.route.Images, s) {
+		if !ok || !slices.Contains(w.route.Images, s) && !docker.Built(s, w.route.Builds) {
 			r := w.refuse(n, at, "not a listed image")
 			if ok {
 				r.Log = "image=" + quote(s) + " not listed"
@@ -349,6 +409,11 @@ func (w *walker) leaf(n *node, v any, at string) error {
 		s, ok := v.(string)
 		if !ok || s != "" && !objectName(s) {
 			return w.refuse(n, at, "not a name")
+		}
+		// Another project's default network is never made by this one,
+		// which would leave the other's `docker run` refused.
+		if w.table.name == "NetworkCreate" && n.path == "Name" && strings.HasPrefix(strings.ToLower(s), "frisket_") && s != DefaultNetwork(w.route.Project) {
+			return w.refuse(n, at, "is another project's default network")
 		}
 		if s != "" && n.path == "Name" && (w.table.name == "VolumeCreate" || w.table.name == "NetworkCreate") {
 			w.lookup(Lookup{Kind: kindOf(w.table.name), Name: s, Use: Create})

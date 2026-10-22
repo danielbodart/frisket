@@ -1,6 +1,7 @@
 package intercept
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -331,6 +332,16 @@ func (c *claim) named(l dockerapi.Lookup) (account, id string, err error) {
 	case l.Kind == "network" && l.Use == dockerapi.Attach:
 		name := "network " + l.Name
 		f, a, err := c.ask("/networks/"+url.PathEscape(l.Name), name)
+		if err == nil && a != nil && l.Name == dockerapi.DefaultNetwork(c.route.Project) {
+			// The project's own default, made the first time a container
+			// asks for it, under the name's lock, as the project's.
+			if err := c.createDefault(l.Name, name); err != nil {
+				return "", "", err
+			}
+			delete(c.seen, "/networks/"+url.PathEscape(l.Name))
+			f, a, err = c.ask("/networks/"+url.PathEscape(l.Name), name)
+			name += " made"
+		}
 		switch {
 		case err != nil:
 			return "", "", err
@@ -347,6 +358,38 @@ func (c *claim) named(l dockerapi.Lookup) (account, id string, err error) {
 	}
 	account, err = c.volume(l)
 	return account, "", err
+}
+
+// createDefault makes the project's own default network, a bridge with no
+// options, labelled as the project's, as a NetworkCreate frisket admits
+// would make it.
+func (c *claim) createDefault(network, account string) error {
+	ctx, cancel := context.WithTimeout(c.ctx, lookupTimeout)
+	defer cancel()
+	body, err := json.Marshal(map[string]any{"Name": network, "Driver": "bridge", "Labels": map[string]string{dockerapi.LabelKey: c.route.Project}})
+	if err != nil {
+		return lookupFailed(account, "no body")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/v"+c.route.APIVersions.Max+"/networks/create", bytes.NewReader(body))
+	if err != nil {
+		return lookupFailed(account, "no request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", lookupAgent)
+	res, err := c.route.lookups.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return lookupFailed(account, err.Error())
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, maxAbsent))
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		return lookupFailed(account, fmt.Sprintf("create: status %d", res.StatusCode))
+	}
+	return nil
 }
 
 // volume answers for a volume a body names.
