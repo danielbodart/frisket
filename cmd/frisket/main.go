@@ -682,6 +682,12 @@ func runSteering(argv []string) error {
 	} else {
 		fmt.Println("no relay sets: a session with a Docker route or an SSH route is refused; rebuild the file with this frisket")
 	}
+	switch p.LAN {
+	case steering.LANDirect:
+		fmt.Println("local network direct: TCP and UDP to private, link-local and the rest go out through the launcher's network, unsteered")
+	case steering.LANFrisket:
+		fmt.Printf("local network steered: TCP to the structural table's ranges, sets inet %s lan4, lan6, to frisket, which admits only a document's lan names; UDP to them rejected\n", p.Table)
+	}
 	for _, part := range []struct {
 		name  string
 		steps []steering.Step

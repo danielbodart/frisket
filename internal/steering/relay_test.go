@@ -42,7 +42,9 @@ func TestARelayedPortReachesTheSessionsListenerWithItsDestination(t *testing.T) 
 	if _, err := exec.LookPath("nft"); err != nil {
 		t.Skip("no nft here to load the ruleset with")
 	}
-	for _, set := range []string{"all", "service"} {
+	// And `service` steering the local network too, whose sets come after
+	// the relay's: a relayed port at a private address is still the relay's.
+	for _, set := range []string{"all", "service", "service-lan"} {
 		t.Run(set, func(t *testing.T) { runInside(t, roleRelay, set) })
 	}
 }

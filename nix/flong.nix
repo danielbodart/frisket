@@ -141,7 +141,8 @@ in
             What is steered. `all`: everything, for a sandbox with no network;
             frisket is its only way out. `service`: DNS and frisket's service
             address, for a sandbox with a network of its own (flong's
-            `network`), where everything else goes direct.
+            `network`), where everything else goes direct -- the local
+            network too, unless `steering.lan` is "frisket".
           '';
         };
         params = mkOption {
@@ -155,8 +156,15 @@ in
         steering = mkOption {
           type = types.attrs;
           default = { };
-          example = { service = { v4 = "192.0.2.53"; }; };
-          description = "Further arguments to `lib.steering`: ports, service, dummy, table.";
+          example = { lan = "frisket"; };
+          description = ''
+            Further arguments to `lib.steering`: lan, ports, service, dummy,
+            table. `lan = "frisket"` steers a `service` session's TCP to
+            private and other local-network addresses to frisket, which
+            refuses it but for the document's `lan` names, and rejects its
+            UDP to them; the default, "direct", leaves them to pasta.
+            Ignored in `all`, which steers them already.
+          '';
         };
       };
     });

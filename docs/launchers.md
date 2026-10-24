@@ -32,7 +32,8 @@ The adapter names frisket, nsenter and nft by store path and puts nothing on
 its hooks' PATH, so a rules hook of your own names its tools the same way.
 
 `$file` is `(frisket.lib.steering { set = "all"; }).json`: the ruleset and the
-listener specification from one attrset. `frisket steering $file` prints what
+listener specification from one attrset. A `service` file takes
+`lan = "frisket"` to steer the local network too (README, Modes). `frisket steering $file` prints what
 it will do. `steer` creates the listeners inside the namespace, installs the
 routing and the ruleset, and mounts the session's CA at `/etc/frisket`;
 `connect` gives the namespace its egress. Each refuses to run out of turn.

@@ -16,6 +16,10 @@ import (
 
 const ruleset = "table inet frisket {\n}\n"
 
+// lanRuleset declares the `service` set's lan sets, as lib.steering's does
+// for lan = "frisket".
+const lanRuleset = "table inet frisket {\n  set lan4 { type ipv4_addr; flags interval; }\n  set lan6 { type ipv6_addr; flags interval; }\n}\n"
+
 func allFile() File {
 	return File{
 		Set:        "all",
@@ -37,6 +41,28 @@ func TestPlanRefusesAFileThatWouldSteerBadly(t *testing.T) {
 	svc.Set, svc.Dummy = "service", nil
 	if _, err := svc.Plan(); err != nil {
 		t.Fatalf("the default `service` file was refused: %v", err)
+	}
+	lan := svc
+	lan.LAN, lan.Ruleset = LANFrisket, lanRuleset
+	if p, err := lan.Plan(); err != nil || p.LAN != LANFrisket {
+		t.Fatalf("a `service` file steering the local network: %v, %+v", err, p)
+	}
+	if p, _ := svc.Plan(); p.LAN != LANDirect {
+		t.Fatalf("a `service` file saying nothing of the local network is lan %q, want %q, as every file was before", p.LAN, LANDirect)
+	}
+	for name, mutate := range map[string]func(*File){
+		"an unknown lan": func(f *File) { f.LAN = "nearby" },
+		// It would be printed as steering what goes direct.
+		"lan frisket, and a ruleset with no lan sets": func(f *File) { f.Ruleset = ruleset },
+		"`all` saying it leaves the local network direct": func(f *File) {
+			f.Set, f.Dummy, f.LAN = "all", allFile().Dummy, LANDirect
+		},
+	} {
+		f := lan
+		mutate(&f)
+		if _, err := f.Plan(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 	for name, mutate := range map[string]func(*File){
 		"an unknown set":              func(f *File) { f.Set = "most" },

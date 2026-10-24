@@ -600,7 +600,17 @@ built; nothing needs it until a tool's route does.
   dropped, so a QUIC client fails over to TCP at once instead of hanging
   (measured).
 - **`service`** — for a sandbox with its own network. DNS and frisket's service
-  address are steered; everything else goes direct.
+  address are steered; everything else goes direct. Including, by default
+  (`lan = "direct"`), the host's local network: measured, a session reached
+  `10.0.0.4:22`, the router's `10.0.0.1:22` and `:53`, and a ULA address at
+  `:22`. With `lan = "frisket"`, TCP to every range of the structural table
+  is steered too, after a local exemption of its own (pasta gives the
+  sandbox the host's address, and the `spliced` chain needs it local), and
+  only in conntrack's original direction, because a connection pasta
+  forwards in from a LAN machine is answered to a private address; and
+  UDP to the same ranges is rejected. egress then decides those as in
+  `all`. The ranges are written out in `lib.steering`, and a Go test holds
+  them to `egress.DefaultRanges`.
 
 Both are TPROXY. The output hook marks what is to be steered; a policy-routing
 rule per family (`fwmark 1 lookup 100`, and `local default dev lo` in table 100)

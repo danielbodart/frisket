@@ -389,10 +389,16 @@
           # one with
           #   nix eval --raw .#lib.steering --apply 's: (s { set = "all"; }).json' | jq . \
           #     > internal/steering/testdata/steering-all.json
+          # and service-lan's with { set = "service"; lan = "frisket"; }.
+          #
+          # `service` with lan = "frisket" marks the local network after
+          # everything the chain marked before it, the relay above all, and
+          # after a local exemption of its own; `direct`, the default, marks
+          # none of it, and its ruleset is the one there was before the choice.
           steering =
             let
-              file = set: pkgs.writeText "steering-${set}.json"
-                (self.lib.steering { inherit set; }).json;
+              file = set: args: pkgs.writeText "steering-${set}.json"
+                (self.lib.steering args).json;
             in
             pkgs.runCommand "steering"
               { nativeBuildInputs = [ pkg pkgs.nftables pkgs.util-linux pkgs.jq ]; }
@@ -417,11 +423,27 @@
                   # sandbox has a network for pasta to forward in by.
                   inbound=$(line 'iifname != "lo" meta nfproto ipv4 tcp dport != 230 ct state new dnat ip to 127.0.0.1' || true)
                   spliced=$(line 'meta mark != 1 meta nfproto ipv4 ip daddr != 127.0.0.0/8 fib daddr type local tcp dport != 230 ct state new dnat ip to 127.0.0.1' || true)
-                  if [ "$set" = service ]; then [ -n "$inbound" ] && [ -n "$spliced" ] || fail "no inbound DNAT to loopback"
+                  if [ "$set" != all ]; then [ -n "$inbound" ] && [ -n "$spliced" ] || fail "no inbound DNAT to loopback"
                   else [ -z "$inbound$spliced" ] || fail "an inbound DNAT in a set with no network"; fi
                   if [ "$set" = all ]; then
                     local=$(line 'fib daddr type local return')
                     [ -n "$local" ] && [ "$r6" -lt "$local" ] || fail "the relay is not marked before the local exemption ($local)"
+                  fi
+                  lan4=$(line '@lan4 meta l4proto tcp meta mark set' || true)
+                  lan6=$(line '@lan6 meta l4proto tcp meta mark set' || true)
+                  if [ "$set" = service-lan ]; then
+                    grep -q '^local network steered' "$set.out" || fail "frisket steering does not say the local network is steered"
+                    local=$(line 'fib daddr type local return')
+                    svc6=$(line 'ip6 daddr 2001:db8::2 ')
+                    [ -n "$local" ] && [ -n "$lan4" ] && [ -n "$lan6" ] || fail "the local network is not marked, or not after a local exemption"
+                    [ "$svc6" -lt "$local" ] && [ "$local" -lt "$lan4" ] && [ "$local" -lt "$lan6" ] ||
+                      fail "the local network is not marked after the service address ($svc6) and the local exemption ($local): $lan4, $lan6"
+                    grep -q 'ct direction original ip daddr @lan4 meta l4proto udp reject with icmpx admin-prohibited' "$set.nft" || fail "UDP to the local network is not rejected"
+                  else
+                    [ -z "$lan4$lan6" ] && ! grep -q '@lan[46]' "$set.nft" || fail "the local network is steered in a set that did not ask"
+                  fi
+                  if [ "$set" = service ]; then
+                    grep -q '^local network direct' "$set.out" || fail "frisket steering does not say the local network goes direct"
                   fi
                   cmp <(jq -S . "$2") <(jq -S . "$3") || fail "$3 is not what lib.steering writes"
                   if unshare -rn true 2>/dev/null; then
@@ -430,8 +452,9 @@
                     echo "no user namespace in this build sandbox: nft -c skipped for $set" >&2
                   fi
                 }
-                check all ${file "all"} ${./internal/steering/testdata/steering-all.json}
-                check service ${file "service"} ${./internal/steering/testdata/steering-service.json}
+                check all ${file "all" { set = "all"; }} ${./internal/steering/testdata/steering-all.json}
+                check service ${file "service" { set = "service"; }} ${./internal/steering/testdata/steering-service.json}
+                check service-lan ${file "service-lan" { set = "service"; lan = "frisket"; }} ${./internal/steering/testdata/steering-service-lan.json}
                 touch $out
               '';
 

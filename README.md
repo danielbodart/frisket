@@ -111,7 +111,9 @@ In the `agent` container:
   rebinding can't get round it. frisket reaches a private address only for
   an SSH route, which it terminates; for a name the document lists as on
   the local network ([below](#the-local-network)); or for a recording
-  session, by a name, as its default or the person recording says.
+  session, by a name, as its default or the person recording says. In
+  `service` mode only what is steered is frisket's to refuse
+  ([Modes](#modes)).
 - **Interception.** Each session gets its own CA, name-constrained to its
   routes' hosts, mounted read-only at `/etc/frisket` (`ca.crt`, and
   `ca-bundle.crt`, the system bundle plus the CA). The key never leaves the
@@ -139,6 +141,21 @@ In the `agent` container:
   dev server listening on `localhost` alone is reached at whatever host
   address flong's `forwardAddress` binds (IPv4 only; see
   [nix/steering.nix](nix/steering.nix)).
+
+  The local network goes direct too, by default: a `service` session reaches
+  every machine on the host's LAN, and the router pasta names its gateway,
+  at any port. With `steering.lan = "frisket"` its TCP to private,
+  unique-local, link-local, CGNAT and the rest of the structural table's
+  ranges is steered to frisket, which decides it exactly as in `all`:
+  refused, logged `structural: private` and the like, but for a
+  [`lan`](#the-local-network) name at its ports. UDP to them is rejected.
+  DNS, SSH routes and Docker ports are steered first, as ever, and the
+  sandbox's own addresses -- pasta gives it the host's -- and loopback
+  stay its own.
+
+  ```nix
+  services.frisket.flong.dev = { policy = "trusted"; set = "service"; steering.lan = "frisket"; };
+  ```
 
 ## The local network
 
@@ -169,6 +186,11 @@ private (RFC 1918), unique-local or link-local address their DNS gives:
   session's, checked again at the dial.
 
 The connection's `egress` line has `reason` `lan`.
+
+In `all` mode that is the only way to the local network. In `service` mode
+it is only with `steering.lan = "frisket"` ([Modes](#modes)); without it the
+list admits nothing that was not reachable already, since the local network
+goes direct.
 
 ## Project addresses
 

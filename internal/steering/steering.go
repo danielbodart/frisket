@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/danielbodart/frisket/internal/control"
@@ -46,7 +47,22 @@ type File struct {
 	Mark       uint32 `json:"mark"`
 	RouteTable int    `json:"routeTable"`
 	Dummy      *Dummy `json:"dummy,omitempty"`
+	// LAN is the `service` set's local network: LANDirect or LANFrisket.
+	// Absent is direct, as every file was before it was a choice; the `all`
+	// set has none, since it steers the local network with everything else.
+	LAN string `json:"lan,omitempty"`
 }
+
+// What the `service` set does with the local network: lib.steering's `lan`.
+const (
+	// LANDirect: it goes direct, through pasta, as everything but DNS and
+	// the service address does.
+	LANDirect = "direct"
+	// LANFrisket: TCP to the structural table's ranges is steered to
+	// frisket, whose egress decides it as in `all`, and UDP to them is
+	// rejected.
+	LANFrisket = "frisket"
+)
 
 // Dummy is the `all` set's egress: an interface with a default route per
 // family, whose only purpose is to give the kernel somewhere to route to so the
@@ -68,6 +84,8 @@ type Plan struct {
 	RouteTable int
 	Interface  string       // `all` only
 	Addresses  []netip.Addr // `all` only: the dummy's, one per family
+	// LAN is LANDirect or LANFrisket in `service`, and empty in `all`.
+	LAN string
 }
 
 // DNSPort is the one port every set steers to frisket whatever its address,
@@ -203,6 +221,12 @@ func (f File) Plan() (*Plan, error) {
 			}
 		}
 		p.Interface, p.Addresses = f.Dummy.Interface, addrs
+		if f.LAN != "" {
+			// Not refused for being meaningless alone: a file that says it
+			// steers the local network one way, when its set steers all of
+			// it regardless, says something untrue about what it does.
+			return nil, fmt.Errorf("the %q set has a lan of %q; it steers the local network with everything else", control.SetAll, f.LAN)
+		}
 	case control.SetService:
 		if f.Dummy != nil {
 			// Egress for this set is someone else's -- pasta, attached by the
@@ -210,9 +234,30 @@ func (f File) Plan() (*Plan, error) {
 			// fight it.
 			return nil, fmt.Errorf("the %q set has a dummy interface; its egress is the launcher's", control.SetService)
 		}
+		switch f.LAN {
+		case "", LANDirect:
+			p.LAN = LANDirect
+		case LANFrisket:
+			// A file that says so and whose ruleset does not would be
+			// printed by `frisket steering` as steering what goes direct:
+			// the one thing a checker must not get wrong.
+			if !lan4Set.MatchString(f.Ruleset) || !lan6Set.MatchString(f.Ruleset) {
+				return nil, fmt.Errorf("lan %q, and the ruleset declares no lan4 and lan6 sets to steer it by", LANFrisket)
+			}
+			p.LAN = LANFrisket
+		default:
+			return nil, fmt.Errorf("lan %q is neither %q nor %q", f.LAN, LANDirect, LANFrisket)
+		}
 	}
 	return p, nil
 }
+
+// The `service` set's local network, as lib.steering declares it for
+// LANFrisket: the structural table, one set per family.
+var (
+	lan4Set = regexp.MustCompile(`(?m)^\s*set lan4 \{\s*type ipv4_addr;`)
+	lan6Set = regexp.MustCompile(`(?m)^\s*set lan6 \{\s*type ipv6_addr;`)
+)
 
 // onePerFamily parses exactly one v4 and one v6 unicast address.
 func onePerFamily(what string, ss []string) ([]netip.Addr, error) {

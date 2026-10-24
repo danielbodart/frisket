@@ -39,6 +39,20 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) > 2 && os.Args[1] == roleLAN {
+		if err := loUp(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, syscall.EPERM) {
+				os.Exit(exitUnprivileged)
+			}
+			os.Exit(1)
+		}
+		if err := lanInside(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == roleInside {
 		if err := loUp(); err != nil {
 			fmt.Fprintln(os.Stderr, err)

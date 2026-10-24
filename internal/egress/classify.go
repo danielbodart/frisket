@@ -95,6 +95,12 @@ type Range struct {
 // test network by passing a filtered copy to NewClassifier. It is NOT a
 // per-session setting and no allowlist consults it: the table decides once, at
 // construction, what is structurally unreachable.
+//
+// lib.steering writes the same rows out as nft sets, for a `service` session
+// whose local network is steered to frisket (lan = "frisket"): a row added
+// here and not there would be refused in `all` and reached directly in
+// `service`, and internal/steering's TestTheLANSetsAreTheStructuralTable
+// fails until both agree.
 func DefaultRanges() []Range {
 	r := func(p, reason string) Range { return Range{netip.MustParsePrefix(p), reason} }
 	return []Range{

@@ -319,6 +319,9 @@ in
 
     networking.interfaces.eth1.ipv4.addresses = [{ address = "203.0.113.10"; prefixLength = 24; }];
     networking.interfaces.eth1.ipv6.addresses = [{ address = "2001:db8:113::10"; prefixLength = 64; }];
+    # Where pasta republishes the `lanned` session's server, for the
+    # upstream, a machine on the LAN, to reach it by.
+    networking.firewall.allowedTCPPorts = [ 3002 ];
 
     # Run by the driver, as root and as the session's uid inside its
     # namespaces, to look at and poke at a session from outside it.
@@ -636,6 +639,26 @@ in
     };
     services.frisket.flong.trusted = { policy = "trusted"; set = "service"; };
 
+    # The `service` set with its local network steered to frisket, under a
+    # document of the test's with a lan name and an SSH route, both at the
+    # upstream's private address. Its listeners pasta republishes on every
+    # host address, so a machine on the LAN can reach a server of its own:
+    # what shows the sandbox's answer to a private address is not steered.
+    flong.lanned = {
+      container = "strict";
+      user = "alice";
+      inherit workspace;
+      command = [ "bash" "-c" ];
+      network.forwardPorts = "auto";
+      postStart = mark;
+    };
+    services.frisket.flong.lanned = {
+      policy = "test";
+      set = "service";
+      policyFile = "/srv/policies/lan-service.json";
+      steering.lan = "frisket";
+    };
+
     # A session under a document written for it, as a launcher writes one
     # holding the public half of a key made for the session: at a path of
     # the session's own, which the adapter names by template and frisket
@@ -755,6 +778,8 @@ in
       badpolicy = lib.getExe nodes.machine.flong.badpolicy.launcher;
       networked = lib.getExe nodes.machine.flong.networked.launcher;
       trusted = lib.getExe nodes.machine.flong.trusted.launcher;
+      lanned = lib.getExe nodes.machine.flong.lanned.launcher;
+      machineLAN = nodes.machine.networking.primaryIPAddress;
       gapi = lib.getExe nodes.machine.flong.gapi.launcher;
       docker = lib.getExe nodes.machine.flong.docker.launcher;
       forwarded = lib.getExe nodes.machine.flong.forwarded.launcher;
@@ -1288,6 +1313,11 @@ in
           name, leader = hold("${networked}", "ip route show default | grep -q .")
           out = machine.succeed(as_workload(leader, "curl -sS -m 5 ${url4}"))
           assert "upstream-body" in out, out
+          # The local network too, under lan = "direct", the default: the
+          # upstream's private address, at a port no route or lan name
+          # names, by raw TCP: its sshd's banner. (Not `nc -z`: frisket's
+          # listener completes a handshake before frisket refuses it.)
+          machine.succeed(as_workload(leader, "nc -w 3 ${upstreamLAN} 2222 </dev/null | grep -q ^SSH-"))
           assert lines_of("egress", name) == [], lines_of("egress", name)
           out = machine.succeed(as_workload(leader, "dig +short +time=2 +tries=1 allowed.test @${upstream4}"))
           assert out.strip() == "${upstream4}", out
@@ -1831,6 +1861,62 @@ in
               ("192.168.1.3:80", "refused", "structural: private", None),
               ("${upstreamLAN}:8080", "refused", "structural: private", "nas.lan"),
           ], lines
+
+      with subtest("`service` with lan = \"frisket\": the local network is egress's to decide, as in `all`, and the sandbox's own is its own"):
+          doc = {"name": "lanservice", "allow": ["allowed.test", "nas.lan"],
+                 "lan": [{"name": "nas.lan", "ports": [80]}], "ssh": ssh_doc["ssh"][:1]}
+          machine.succeed(f"printf '%s' {shlex.quote(json.dumps(doc))} > /srv/policies/lan-service.json && chmod 0644 /srv/policies/lan-service.json")
+          py = "${pkgs.python3}/bin/python3"
+          # A server of the sandbox's on every address, which pasta
+          # republishes and a LAN machine reaches; one on its loopback alone.
+          name, leader = hold("${lanned}", "ip route show default | grep -q .",
+                              f"{{ {py} -m http.server --bind 0.0.0.0 3002 >inbound.log 2>&1 & "
+                              f"{py} -m http.server --bind 127.0.0.1 3003 >/dev/null 2>&1 & }}")
+          rules = machine.succeed(as_root(leader, "nft list chain inet frisket steer"))
+          assert "@lan4" in rules and "@lan6" in rules, rules
+          # Raw TCP to a LAN machine, at a port nothing names, and to
+          # another that no lan name gave: refused, where `direct` reached
+          # the first (above).
+          machine.fail(as_workload(leader, "nc -w 3 ${upstreamLAN} 2222 </dev/null | grep -q ^SSH-"))
+          machine.fail(as_workload(leader, "curl -sS -m 5 http://192.168.1.3/"))
+          # The lan name at its port, by the address the session's DNS gave.
+          out = machine.succeed(as_workload(leader, "curl -sS -m 10 http://nas.lan/"))
+          assert "upstream-body" in out, out
+          # The SSH route at that same private address is still the route's:
+          # the relay's sets come before the local network's.
+          before = logins()
+          code, out = run_ssh("server greet 4")
+          assert (code, out) == (4, "greetings from upstream as ops: 4\n"), (code, out)
+          assert logins() == before + 1
+          # UDP to the LAN is refused at once, not sent and left to time out.
+          udp = (f"{py} -c 'import socket,time; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5); "
+                 f"s.connect((\"${upstreamLAN}\", 5353)); t=time.monotonic()\n"
+                 f"try:\n s.send(b\"x\"); s.recv(1)\nexcept socket.timeout: print(\"timeout\")\n"
+                 f"except OSError as e: print(type(e).__name__, round(time.monotonic()-t, 1))'")
+          out = machine.succeed(as_workload(leader, udp)).split()
+          assert out[0] != "timeout" and float(out[1]) < 2, out
+          # The sandbox's own: loopback, and its own address (the host's,
+          # pasta's copy), which the `spliced` chain sends to 127.0.0.1.
+          machine.wait_until_succeeds(as_workload(leader, "curl -sSf -m 5 -o /dev/null http://127.0.0.1:3003/"))
+          # Not lo's: frisket's service address is there, and global too.
+          own = machine.succeed(as_root(leader, "ip -4 -o addr show scope global | awk '$2 != \"lo\" { print $4 }'")).split()[0].split("/")[0]
+          machine.succeed(as_workload(leader, f"curl -sSf -m 5 -o /dev/null http://{own}:3002/"))
+          # And a LAN machine reaches the sandbox's server through pasta: the
+          # answer to its private address goes back to it, not to frisket.
+          machine.wait_until_succeeds("ss -Htlnp 'sport = :3002' | grep -q passt")
+          upstream.succeed("curl -sSf -m 10 -o /dev/null http://${machineLAN}:3002/")
+          inbound = machine.succeed("cat /srv/work/inbound.log")
+          release(name)
+          lines = lines_of("egress", name)
+          assert [(l["dst"], l["decision"], l.get("reason"), l.get("name")) for l in lines] == [
+              ("${upstreamLAN}:2222", "refused", "structural: private", None),
+              ("192.168.1.3:80", "refused", "structural: private", None),
+              ("${upstreamLAN}:80", "accepted", "lan", "nas.lan"),
+          ], lines
+          # From the peer's own address, as the sandbox saw it: pasta passes
+          # it in (measured), so the answer was to a private address, and
+          # `ct direction original` is what kept it from frisket's listener.
+          assert re.search(r"^${upstreamLAN} .*\"GET / HTTP/1.1\" 200", inbound, re.M), inbound
 
       with subtest("a session with a policy the daemon does not have never runs"):
           err = machine.succeed(as_user("${badpolicy} 'echo ran' 2>&1; echo rc=$?"))
