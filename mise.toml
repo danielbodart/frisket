@@ -5,17 +5,30 @@
 
 [tools]
 go = "1.27.3"
+shellcheck = "0.11.0"
 
 [env]
 # Static, as the flake builds it.
 CGO_ENABLED = "0"
+# What a release tag gives those who pin it: frisket ships only through Nix,
+# so its tag is the distro channel's release, and the flake and its modules
+# (flake.nix, nix/) are part of it, as is the Go module (cmd, internal and
+# the packages chase imports: docker, policy, project).
+# A change to any of these since the last release tag is released (see
+# release-due); flake.lock (a consumer follows its own nixpkgs), mise.toml
+# (the dev loop's toolchain), the tests, docs and workflows are not.
+RELEASE_PATHS = "cmd docker internal policy project go.mod go.sum flake.nix nix VERSION"
 
 [tasks.check]
-description = "Lint and unit tests: the dev loop and CI's fast job"
-depends = ["lint", "test"]
+description = "Lint, unit tests and shellcheck: the dev loop and CI's fast job"
+depends = ["lint", "test", "shellcheck"]
 
+# lint and shellcheck are skipped while their sources stand still; test is
+# not, since Go's own test cache knows better than a glob what a test read.
 [tasks.lint]
 description = "gofmt and go vet"
+sources = ["**/*.go", "go.mod", "go.sum"]
+outputs = { auto = true }
 run = [
   'test -z "$(gofmt -l .)" || { gofmt -l . >&2; echo "not gofmt-ed" >&2; exit 1; }',
   "go vet ./...",
@@ -25,6 +38,22 @@ run = [
 description = "go test, every package"
 run = "go test ./..."
 
+[tasks.shellcheck]
+description = "shellcheck the scripts"
+sources = ["scripts/*.sh"]
+outputs = { auto = true }
+run = "shellcheck scripts/*.sh"
+
+# frisket ships only as a Nix package: building it is building that, as a
+# host installs it.
 [tasks.build]
-description = "The binaries, for this host, into bin/"
-run = "go build -trimpath -ldflags='-s -w' -o bin/ ./cmd/..."
+description = "frisket's package, as a host installs it, by nix build"
+run = "nix build --print-out-paths .#frisket"
+
+[tasks.release-due]
+description = "Exit 0, printing true, if anything in RELEASE_PATHS changed since the last release tag; else print false and exit 1"
+run = '''
+set -f
+last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null) || { echo true; exit 0; }
+if [ -n "$(git diff --name-only "$last" HEAD -- $RELEASE_PATHS)" ]; then echo true; else echo false; exit 1; fi
+'''

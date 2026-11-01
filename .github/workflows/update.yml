@@ -6,18 +6,20 @@
 # What moves, in order: every flake input (nix flake update); my own repos
 # frisket takes, flong and quoin (flake inputs, test-only) and quoin and
 # galley (Go modules), to their latest release tags (scripts/pin.sh), a tag
-# only existing for a commit its CI passed; each
-# mise.toml tool to the latest patch of its pinned minor (a new minor moves
-# by hand, with the nixpkgs attribute flake.nix builds with); and every Go
-# dependency (go get -u), with flake.nix's vendorHash worked out again.
+# only existing for a commit its CI passed; each mise.toml tool to the
+# latest patch of its pinned minor (a new minor moves by hand, with the
+# nixpkgs attribute flake.nix builds with); and every Go dependency (go get
+# -u), with flake.nix's vendorHash worked out again.
 #
-# The gate is everything CI runs, mise's check and nix flake check. Only if it passes is anything
-# committed, straight to trunk, never as a pull request.
+# The gate is everything CI runs, mise's check and nix flake check. Only if
+# it passes is anything committed, straight to trunk, never as a pull
+# request.
 #
 # A push made with GITHUB_TOKEN starts no workflow, so the last step
-# dispatches CI on trunk: it checks the commit and releases it only if
-# RELEASE_PATHS changed (ci.yml), so a week in which only flake.lock moved
-# releases nothing -- a consumer follows its own nixpkgs, and the release
+# dispatches CI on trunk with `release`, which checks the commit and releases
+# it -- but only if mise run release-due says something in RELEASE_PATHS
+# (mise.toml) changed since the last tag. A week in which only flake.lock
+# moved releases nothing: a consumer follows its own nixpkgs, and the release
 # would be the same code under a new version.
 name: Weekly update
 
@@ -34,6 +36,11 @@ permissions:
 concurrency:
   group: update
 
+# A run shell is bash -eo pipefail: a failure inside a pipe fails the step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -41,7 +48,10 @@ jobs:
       # The Go mise.toml pins, never one go.mod's toolchain line downloads.
       GOTOOLCHAIN: local
     steps:
+      # The whole history and its tags, for mise run release-due.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: cachix/install-nix-action@v31
         with:
@@ -81,9 +91,10 @@ jobs:
             if [ "$was" != "$now" ]; then moved+=("$name $was -> $now"); fi
           done
 
-          # 2. mise's tools, each to the latest patch of its minor.
+          # 2. mise's tools, each to the latest patch of its pinned
+          # major.minor (go 1.27.3 asks for 1.27, coreutils 9.12 for 9.12).
           while read -r tool was; do
-            now=$(mise latest "$tool@${was%.*}")
+            now=$(mise latest "$tool@$(cut -d. -f1-2 <<<"$was")")
             if [ -n "$now" ] && [ "$now" != "$was" ]; then
               sed -i -E "s|^(\"?$tool\"? = )\"$was\"|\1\"$now\"|" mise.toml
               moved+=("$tool $was -> $now")
@@ -103,7 +114,7 @@ jobs:
             echo "Nothing moved."
             exit 0
           fi
-          list=$(printf '%s\n' "${moved[@]}" | grep . | paste -sd, - | sed 's/,/, /g')
+          list=$(printf '%s\n' "${moved[@]}" | { grep . || true; } | paste -sd, - | sed 's/,/, /g')
           echo "moved=${list:-dependencies}" >> "$GITHUB_OUTPUT"
 
       # 5. The gate: what CI runs, mise's check and every Nix check.
@@ -139,9 +150,11 @@ jobs:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: nix build --no-link --print-out-paths .#frisket | cachix push danielbodart
 
-      # 8. CI checks the pushed commit, and releases it if RELEASE_PATHS moved.
-      - name: Dispatch CI on trunk
+      # 8. A release, if a release path moved: CI checks the pushed commit
+      # and releases it. A week that moved only flake.lock releases nothing.
+      - name: Release, if a release path moved
         if: steps.update.outputs.moved
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ci.yml --ref trunk
+        run: |
+          if mise run release-due; then gh workflow run ci.yml --ref trunk -f release=true; fi

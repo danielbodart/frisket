@@ -374,16 +374,23 @@ written in the launcher's declaration or named by a hook as it starts.
 
 ## Channels
 
-frisket ships through one channel, the distro one: the Nix package and the
-NixOS modules of this flake, built by nixpkgs (nixos-26.05, Go 1.27) and
-pushed to the `danielbodart` Cachix cache. There is no Docker image or
-tarball: frisket is only of use wired into a host by its modules. Every push
-to trunk that passes CI and changes what a consumer builds is released as a
-tag, `vMAJOR.COUNT.RUN`; the Go packages are consumed as the module at that
-tag. Every dependency, flake inputs, flong's, quoin's and galley's releases,
-mise's Go and the Go modules, moves once a week, Sunday 21:23 UTC, gated on
-everything CI runs and committed straight to trunk
-(`.github/workflows/update.yml`).
+- **Nix**: a flake input (with `inputs.nixpkgs.follows = "nixpkgs"`) at a
+  release tag, `vMAJOR.COUNT.RUN`: package `frisket` (default), built by
+  nixpkgs (nixos-26.05, Go 1.27) and in the `danielbodart` Cachix cache;
+  `nixosModules.default`, and `nixosModules.flong`, the adapter that maps a
+  frisket session onto flong's hooks.
+- **Go module**: `github.com/danielbodart/frisket` at the same tag, which
+  chase compiles against.
+- Not shipped: Docker — frisket is only of use wired into a host by its
+  modules.
+- Not shipped: Tarball + systemd — likewise; the units are the modules'.
+
+Updated weekly (Sunday 21:23 UTC): the flake's inputs, flong's, quoin's and
+galley's releases, mise's tools (by patch) and the Go modules
+(`.github/workflows/update.yml`), committed to trunk only once everything CI
+runs passes. A release is cut when the Go module, the flake and its modules
+(`flake.nix`, `nix/`) or `VERSION` changed (`RELEASE_PATHS` in `mise.toml`):
+the tag is what consumers pin.
 
 ```nix
 inputs.frisket = {
@@ -399,8 +406,8 @@ mise pins the toolchain (`mise.toml`); `mise run check` is the dev loop and
 CI's fast job, the flake's checks the rest.
 
 ```console
-$ mise run check       # gofmt, go vet, go test ./...
-$ mise run build       # the binary, into bin/
+$ mise run check       # gofmt, go vet, go test ./..., shellcheck
+$ mise run build       # nix build of frisket's package, as a host installs it
 $ nix develop          # go, gopls, golangci-lint, nft
 $ nix flake check      # build, tests with and without -race, lint, both
                        # rulesets through nft, and the flong VM test

@@ -5,22 +5,19 @@ on:
     branches: [trunk]
   pull_request:
   # A dispatch is checked as a push is, and released as a push is, if
-  # RELEASE_PATHS changed since the last release; `release` releases
-  # regardless. The weekly update dispatches it, its push having started
-  # nothing.
+  # RELEASE_PATHS (mise.toml) changed since the last release; `release`
+  # releases regardless. The weekly update dispatches it with `release` when
+  # mise run release-due says so, its push having started nothing.
   workflow_dispatch:
     inputs:
       release:
         type: boolean
         default: false
 
-# What a release ships: the Go module, which consumers compile, and the flake
-# and its modules, which consumers import from the tag. Not flake.lock (a
-# consumer follows its own nixpkgs), mise.toml (the toolchain, not the code),
-# the tests, the docs or the workflows: a change only to those is checked and
-# not released.
-env:
-  RELEASE_PATHS: cmd docker internal policy project go.mod go.sum flake.nix nix VERSION
+# A run shell is bash -eo pipefail: a failure inside a pipe fails the step.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   # Lint and unit tests through mise, the dev loop's toolchain: minutes
@@ -95,33 +92,54 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # To start CI on trunk's head, where this commit cannot be tagged.
+      actions: write
     steps:
-      # fetch-depth: 0 because the minor is the commit count and the script
-      # REFUSES a shallow clone; fetch-tags so the previous tag resolves when
-      # the notes are generated below.
+      # fetch-depth: 0 because the minor is the commit count, which
+      # scripts/version.sh REFUSES to count in a shallow clone; fetch-tags so
+      # the previous tag resolves, for release-due and the notes below.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
 
+      # For release-due, which reads RELEASE_PATHS from mise.toml.
+      - uses: jdx/mise-action@v5
+
       # Notes from the COMMITS since the last release. Trunk-based means direct
       # pushes and no pull requests, so GitHub's PR-based --generate-notes
       # would come out empty. On the first release there is no prior tag, so
       # fall back to the head commit rather than dumping the whole history.
+      #
+      # GitHub refuses GITHUB_TOKEN, which can never hold the workflows
+      # permission, a new ref whose .github/workflows differ from trunk's
+      # head ("HTTP 403: Resource not accessible by integration"): a tag of
+      # this commit, once trunk has moved on to a commit that changed a
+      # workflow, would be one. Then the release is trunk head's to make, its
+      # commits including this one's: its own run makes it, or, where it has
+      # none (a [skip ci] push, a push made with GITHUB_TOKEN), one started
+      # here.
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          FORCE: ${{ inputs.release }}
+          FORCE: ${{ inputs.release || false }}
         run: |
-          PREV="$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
-          # shellcheck disable=SC2086 # RELEASE_PATHS is a list
-          if [ "$FORCE" != true ] && [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null \
-            && [ -z "$(git diff --name-only "$PREV..HEAD" -- $RELEASE_PATHS)" ]; then
-            echo "Nothing in RELEASE_PATHS changed since $PREV: no release."
+          if [ "$FORCE" != true ] && ! mise run release-due; then
+            echo "Nothing in RELEASE_PATHS changed since the last release: no release."
+            exit 0
+          fi
+          git fetch -q origin trunk
+          head=$(git rev-parse FETCH_HEAD)
+          if [ "$head" != "$GITHUB_SHA" ] && ! git diff --quiet "$GITHUB_SHA" "$head" -- .github/workflows; then
+            echo "::warning::trunk is at ${head:0:7}, which changed a workflow since ${GITHUB_SHA:0:7}: GITHUB_TOKEN cannot tag ${GITHUB_SHA:0:7}, so the release is ${head:0:7}'s"
+            if [ "$(gh run list --workflow ci.yml --commit "$head" --json databaseId --jq length)" = 0 ]; then
+              gh workflow run ci.yml --ref trunk -f release="$FORCE"
+            fi
             exit 0
           fi
           V="$(./scripts/version.sh)"
-          if [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null; then
+          PREV="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          if [ -n "$PREV" ]; then
             git log "$PREV..HEAD" --pretty='- %s (%h)' > notes.md
           else
             { echo 'First automated release.'; echo; git log -1 --pretty='- %s (%h)'; } > notes.md
