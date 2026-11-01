@@ -98,6 +98,10 @@ func (c *channel) logStart(l *execLine) {
 }
 
 // log writes a command's one line, or the last of an interactive shell's.
+//
+// Every line is written before the client hears what it records -- the
+// answer to its request, the exit status's channel closing, a channel's
+// refusal -- so whoever was answered finds the line there when it looks.
 func (c *channel) log(l *execLine, start time.Time) {
 	s := c.s
 	s.lines.Add(1)

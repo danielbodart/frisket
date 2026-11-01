@@ -232,9 +232,9 @@ func (c *channel) exec(r *ssh.Request) {
 	line := &execLine{}
 	var p struct{ Command string }
 	if err := ssh.Unmarshal(r.Payload, &p); err != nil {
-		_ = r.Reply(false, nil)
 		line.decision, line.reason, line.err = intercept.DecisionRefused, ReasonMalformed, err
 		c.log(line, start)
+		_ = r.Reply(false, nil)
 		return
 	}
 	line.command = p.Command
@@ -336,9 +336,9 @@ func (c *channel) exec(r *ssh.Request) {
 	ok, err := up.SendRequest("exec", true, r.Payload)
 	if err != nil || !ok {
 		_ = up.Close()
-		_ = r.Reply(false, nil)
 		line.decision, line.reason, line.err = intercept.DecisionFailed, ReasonExecFailed, err
 		c.log(line, start)
+		_ = r.Reply(false, nil)
 		return
 	}
 	_ = r.Reply(true, nil)
@@ -413,10 +413,10 @@ func (c *channel) interactive(r *ssh.Request) {
 			return
 		}
 	}
-	_ = r.Reply(true, nil)
 	line.decision = intercept.DecisionAllowed
 	c.up, c.ptyUp = up, c.pty != nil
 	c.logStart(line)
+	_ = r.Reply(true, nil)
 	c.done = make(chan struct{})
 	go c.proxy(client, up, upReqs, c.ch, line, start)
 }

@@ -203,8 +203,10 @@ func (h *Handler) ServeConn(ctx context.Context, c *steer.Conn) {
 		if nc.ChannelType() != "session" {
 			// direct-tcpip, streamlocal, x11, auth-agent, tun: everything
 			// but a session is a way through frisket to somewhere else.
-			_ = nc.Reject(ssh.Prohibited, "frisket: only commands, on a session channel")
+			// The line first: whoever was refused may look for it as soon
+			// as it hears.
 			s.logChannelRefused(n, nc.ChannelType())
+			_ = nc.Reject(ssh.Prohibited, "frisket: only commands, on a session channel")
 			continue
 		}
 		wg.Add(1)
