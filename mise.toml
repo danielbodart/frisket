@@ -1,0 +1,30 @@
+# The toolchain and the tasks CI and people call. Go's major.minor is the one
+# nixpkgs' go_1_27 has on nixos-26.05, which flake.nix builds with, so both
+# channels compile with the same language version; the weekly update moves
+# the patch, a new minor moves by hand with the nixpkgs attribute.
+
+[tools]
+go = "1.27.3"
+
+[env]
+# Static, as the flake builds it.
+CGO_ENABLED = "0"
+
+[tasks.check]
+description = "Lint and unit tests: the dev loop and CI's fast job"
+depends = ["lint", "test"]
+
+[tasks.lint]
+description = "gofmt and go vet"
+run = [
+  'test -z "$(gofmt -l .)" || { gofmt -l . >&2; echo "not gofmt-ed" >&2; exit 1; }',
+  "go vet ./...",
+]
+
+[tasks.test]
+description = "go test, every package"
+run = "go test ./..."
+
+[tasks.build]
+description = "The binaries, for this host, into bin/"
+run = "go build -trimpath -ldflags='-s -w' -o bin/ ./cmd/..."

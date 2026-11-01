@@ -374,9 +374,13 @@ written in the launcher's declaration or named by a hook as it starts.
 
 ## Development
 
+mise pins the toolchain (`mise.toml`); `mise run check` is the dev loop and
+CI's fast job, the flake's checks the rest.
+
 ```console
-$ nix develop          # go, gopls, golangci-lint
-$ go test ./...
+$ mise run check       # gofmt, go vet, go test ./...
+$ mise run build       # the binary, into bin/
+$ nix develop          # go, gopls, golangci-lint, nft
 $ nix flake check      # build, tests with and without -race, lint, both
                        # rulesets through nft, and the flong VM test
 ```

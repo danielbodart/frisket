@@ -4,16 +4,38 @@ on:
   push:
     branches: [trunk]
   pull_request:
-  # release: publish once the check passes, as a push to trunk does. The
-  # weekly flake.lock bump sets it, its push having started nothing.
+  # A dispatch is checked as a push is, and released as a push is, if
+  # RELEASE_PATHS changed since the last release; `release` releases
+  # regardless. The weekly update dispatches it, its push having started
+  # nothing.
   workflow_dispatch:
     inputs:
       release:
         type: boolean
         default: false
 
+# What a release ships: the Go module, which consumers compile, and the flake
+# and its modules, which consumers import from the tag. Not flake.lock (a
+# consumer follows its own nixpkgs), mise.toml (the toolchain, not the code),
+# the tests, the docs or the workflows: a change only to those is checked and
+# not released.
+env:
+  RELEASE_PATHS: cmd docker internal policy project go.mod go.sum flake.nix nix VERSION
+
 jobs:
+  # Lint and unit tests through mise, the dev loop's toolchain: minutes
+  # before the Nix job below, which builds the same tests again and more.
   check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      # As the Nix job's, so the namespace tests run rather than skip.
+      - name: Let unprivileged user namespaces hold capabilities
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: mise run check
+
+  nix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -24,14 +46,17 @@ jobs:
             experimental-features = nix-command flakes
             system-features = nixos-test benchmark big-parallel kvm
 
-      # No binary cache. The free tier of the Magic Nix Cache was shut down in
-      # February 2025, when GitHub retired the cache API it was built on, and
-      # it now answers 400. Nothing replaces it here while the check is short;
-      # FlakeHub Cache or Cachix are the options once the NixOS tests land.
-      #
-      # nixos-test and kvm are declared ahead of those tests. KVM is not
-      # available on the standard runner, so a VM test falls back to software
-      # emulation: slower, but it does run.
+      # The danielbodart cache, read-only here: the free tier is 5 GB, so
+      # only frisket's own package is pushed, by the last step, never a VM
+      # test's closure.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: danielbodart
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      # nixos-test and kvm are declared for the VM tests; install-nix-action
+      # gives the runner's /dev/kvm to the build user.
       #
       # The Go tests create a user+network namespace to hold sockets in. The
       # Nix build sandbox is itself a user namespace and nesting works inside
@@ -47,17 +72,26 @@ jobs:
       - name: nix flake check
         run: nix flake check --print-build-logs
 
-  # CONTINUOUS RELEASE. Trunk-based: every push to trunk that passes the check
-  # above is published, with no manual step and no tag to cut by hand. Gated on
-  # a push to trunk, or a dispatch on trunk with `release` (never a pull
-  # request), and on the check having succeeded, so a red commit never ships.
+      # The package a host installs.
+      - name: Push frisket's package to Cachix
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/trunk'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: nix build --no-link --print-out-paths .#frisket | cachix push danielbodart
+
+  # CONTINUOUS RELEASE. Trunk-based: every push to trunk that passes the
+  # checks above and changed RELEASE_PATHS since the last release is
+  # published, with no manual step and no tag to cut by hand. Gated on a push
+  # or a dispatch on trunk (never a pull request), and on every check having
+  # succeeded, so a red commit never ships. A release is a tag and its notes:
+  # consumers take the flake and the Go module from it.
   #
   # The derived version (major.commit-count.run-number, scripts/version.sh)
   # makes every build a unique, monotonic release, so two pushes cannot collide
   # on a tag and a re-run of the same commit does not either.
   release:
-    needs: [check]
-    if: (github.event_name == 'push' || inputs.release) && github.ref == 'refs/heads/trunk' && needs.check.result == 'success'
+    needs: [check, nix]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/trunk'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -77,9 +111,16 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.release }}
         run: |
-          V="$(./scripts/version.sh)"
           PREV="$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+          # shellcheck disable=SC2086 # RELEASE_PATHS is a list
+          if [ "$FORCE" != true ] && [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null \
+            && [ -z "$(git diff --name-only "$PREV..HEAD" -- $RELEASE_PATHS)" ]; then
+            echo "Nothing in RELEASE_PATHS changed since $PREV: no release."
+            exit 0
+          fi
+          V="$(./scripts/version.sh)"
           if [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null; then
             git log "$PREV..HEAD" --pretty='- %s (%h)' > notes.md
           else
