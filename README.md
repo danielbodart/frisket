@@ -372,6 +372,27 @@ services.frisket.protect = [
 A bind that is, holds or lies inside one fails the launch, whether it is
 written in the launcher's declaration or named by a hook as it starts.
 
+## Channels
+
+frisket ships through one channel, the distro one: the Nix package and the
+NixOS modules of this flake, built by nixpkgs (nixos-26.05, Go 1.27) and
+pushed to the `danielbodart` Cachix cache. There is no Docker image or
+tarball: frisket is only of use wired into a host by its modules. Every push
+to trunk that passes CI and changes what a consumer builds is released as a
+tag, `vMAJOR.COUNT.RUN`; the Go packages are consumed as the module at that
+tag. Every dependency, flake inputs, flong's, quoin's and galley's releases,
+mise's Go and the Go modules, moves once a week, Sunday 21:23 UTC, gated on
+everything CI runs and committed straight to trunk
+(`.github/workflows/update.yml`).
+
+```nix
+inputs.frisket = {
+  url = "github:danielbodart/frisket/vX.Y.Z"; # a release tag
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+# imports = [ inputs.frisket.nixosModules.default ];
+```
+
 ## Development
 
 mise pins the toolchain (`mise.toml`); `mise run check` is the dev loop and

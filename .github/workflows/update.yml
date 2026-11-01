@@ -1,0 +1,147 @@
+# The weekly update: every dependency of every kind moves, in one window
+# every danielbodart repo shares, Sunday 21:23 UTC. nix-config takes its own
+# at 23:23 on the same nixos-26.05, so every tool's Nix build here is the
+# derivation nix-config then builds, already in the danielbodart cache.
+#
+# What moves, in order: every flake input (nix flake update); my own repos
+# frisket takes, flong and quoin (flake inputs, test-only) and quoin and
+# galley (Go modules), to their latest release tags (scripts/pin.sh), a tag
+# only existing for a commit its CI passed; each
+# mise.toml tool to the latest patch of its pinned minor (a new minor moves
+# by hand, with the nixpkgs attribute flake.nix builds with); and every Go
+# dependency (go get -u), with flake.nix's vendorHash worked out again.
+#
+# The gate is everything CI runs, mise's check and nix flake check. Only if it passes is anything
+# committed, straight to trunk, never as a pull request.
+#
+# A push made with GITHUB_TOKEN starts no workflow, so the last step
+# dispatches CI on trunk: it checks the commit and releases it only if
+# RELEASE_PATHS changed (ci.yml), so a week in which only flake.lock moved
+# releases nothing -- a consumer follows its own nixpkgs, and the release
+# would be the same code under a new version.
+name: Weekly update
+
+on:
+  schedule:
+    - cron: "23 21 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+# Shared with anything else that commits to trunk.
+concurrency:
+  group: update
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      # The Go mise.toml pins, never one go.mod's toolchain line downloads.
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      # Read-only: only frisket's own package is pushed, by the last step.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: danielbodart
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - uses: jdx/mise-action@v5
+
+      - name: Move everything
+        id: update
+        run: |
+          moved=()
+          gomods() { go mod edit -json | jq -r '.Require[] | "\(.Path) \(.Version)"' | sort; }
+          # The tag go.mod requires, or else the one flake.nix's url names.
+          ownver() {
+            go mod edit -json | jq -r --arg m "github.com/danielbodart/$1" '.Require[] | select(.Path == $m) | .Version' | grep . ||
+              sed -n "s|.*url = \"github:danielbodart/$1/\(v[^\"]*\)\";.*|\1|p" flake.nix
+          }
+
+          # 1. The flake's inputs, then my own repos to their latest tags.
+          nix flake update 2>&1 | tee update.log
+          mapfile -t inputs < <(grep -oE "Updated input '[^']+'" update.log | cut -d"'" -f2)
+          moved+=("${inputs[@]}")
+          before=$(gomods)
+          for name in flong quoin galley; do
+            was=$(ownver "$name")
+            scripts/pin.sh "$name"
+            now=$(ownver "$name")
+            if [ "$was" != "$now" ]; then moved+=("$name $was -> $now"); fi
+          done
+
+          # 2. mise's tools, each to the latest patch of its minor.
+          while read -r tool was; do
+            now=$(mise latest "$tool@${was%.*}")
+            if [ -n "$now" ] && [ "$now" != "$was" ]; then
+              sed -i "s|^$tool = \"$was\"|$tool = \"$now\"|" mise.toml
+              moved+=("$tool $was -> $now")
+            fi
+          done < <(sed -n '/^\[tools\]/,/^\[/s/^\([a-z0-9_-]*\) = "\([0-9.]*\)"$/\1 \2/p' mise.toml)
+          mise install
+
+          # 3. Every Go dependency, and the vendorHash they make.
+          go get -u ./...
+          go mod tidy
+          if ! git diff --quiet go.sum; then scripts/vendor-hash.sh; fi
+          mapfile -t mods < <(comm -13 <(echo "$before") <(gomods) | cut -d' ' -f1 | grep -v '^github.com/danielbodart/' || true)
+          moved+=("${mods[@]}")
+
+          # 4.
+          if git diff --quiet; then
+            echo "Nothing moved."
+            exit 0
+          fi
+          list=$(printf '%s\n' "${moved[@]}" | grep . | paste -sd, - | sed 's/,/, /g')
+          echo "moved=${list:-dependencies}" >> "$GITHUB_OUTPUT"
+
+      # 5. The gate: what CI runs, mise's check and every Nix check.
+      # As CI's, so the namespace tests run rather than skip.
+      - name: Let unprivileged user namespaces hold capabilities
+        if: steps.update.outputs.moved
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: mise run check
+        if: steps.update.outputs.moved
+        run: mise run check
+
+      - name: nix flake check
+        if: steps.update.outputs.moved
+        run: nix flake check --print-build-logs
+
+      # 6.
+      - name: Commit and push
+        if: steps.update.outputs.moved
+        env:
+          MOVED: ${{ steps.update.outputs.moved }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qam "Weekly update: $MOVED"
+          git pull -q --rebase origin trunk
+          git push -q origin HEAD:trunk
+
+      # 7.
+      - name: Push frisket's package to Cachix
+        if: steps.update.outputs.moved
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: nix build --no-link --print-out-paths .#frisket | cachix push danielbodart
+
+      # 8. CI checks the pushed commit, and releases it if RELEASE_PATHS moved.
+      - name: Dispatch CI on trunk
+        if: steps.update.outputs.moved
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref trunk
