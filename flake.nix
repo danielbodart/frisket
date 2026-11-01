@@ -59,7 +59,7 @@
         # activation code frisket shares with it, and galley's wire, for the
         # most a diff Always shows may hold. vendorHash = null is a nice
         # property and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-GT6EWqE2J0Iq7VAHEV3Yf8hElsTmeQY3sX9zcXzbrOY=";
+        vendorHash = "sha256-IoT63LfX5jouC1yCIdNnORZWZanBmAF0gfUqG3r9C9M=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has

@@ -7,13 +7,13 @@ module github.com/danielbodart/frisket
 go 1.26.0
 
 require (
-	github.com/danielbodart/galley v0.35.27
+	github.com/danielbodart/galley v0.38.28
 	github.com/danielbodart/quoin v0.91.21
-	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/vishvananda/netlink v1.3.1
-	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/crypto v0.58.0
+	golang.org/x/net v0.62.0
+	golang.org/x/sys v0.49.0
 	pgregory.net/rapid v1.3.0
 )
 
