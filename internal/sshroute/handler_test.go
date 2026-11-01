@@ -403,6 +403,8 @@ func TestForwardingAndEveryChannelButASessionIsRefused(t *testing.T) {
 	if f.sshd.dials() != 0 {
 		t.Error("frisket logged in upstream for a forward")
 	}
+	// The client has each refusal before the line saying so is written.
+	waitFor(t, "both refusals logged", func() bool { return len(f.sshLines()) >= 2 })
 	lines := f.sshLines()
 	if len(lines) != 2 || lines[0]["channel_type"] != "direct-tcpip" || lines[1]["channel_type"] != "auth-agent@openssh.com" || lines[0]["reason"] != ReasonChannelType {
 		t.Errorf("lines %v", lines)
