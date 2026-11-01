@@ -1,0 +1,86 @@
+# The lock takes the newest of each input once a week, in the window every
+# one of my flakes shares: Sunday 21:23 UTC, two hours before nix-config
+# takes its own. So a kernel or library fix reaches every repository within
+# the week, and they all land on the same nixos-unstable revision -- one
+# nixpkgs closure rather than several, already in the danielbodart cache
+# when nix-config asks for it.
+#
+# The new lock is checked as CI checks it, `nix flake check`, before
+# anything is committed: a bump that breaks the build fails here and trunk
+# keeps the lock it had. flong is unpinned, so it moves to its trunk's head;
+# quoin is pinned to a release tag, which scripts/pin.sh moves, not this.
+# Only flake.lock is committed, named by the inputs that moved.
+#
+# A push made with GITHUB_TOKEN starts no workflow, so CI would neither
+# check nor release the bumped commit. The last step dispatches CI on trunk
+# with `release`, which publishes once its check passes, as a push does.
+name: Bump flake.lock
+
+on:
+  schedule:
+    - cron: "23 21 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+# This is the only workflow that writes flake.lock.
+concurrency:
+  group: flake-lock
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      # Pushes what it builds only once CACHIX_AUTH_TOKEN is set; without
+      # it the cache is read-only.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: danielbodart
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Update every input
+        id: update
+        run: |
+          nix flake update 2>&1 | tee update.log
+          if git diff --quiet flake.lock; then
+            echo "Nothing moved."
+          else
+            moved=$(grep -oE "Updated input '[^']+'" update.log | cut -d"'" -f2 | paste -sd, - | sed 's/,/, /g')
+            echo "moved=${moved:-flake.lock}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # As CI's, so the namespace tests run rather than skip.
+      - name: Let unprivileged user namespaces hold capabilities
+        if: steps.update.outputs.moved
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: nix flake check, with the new lock
+        if: steps.update.outputs.moved
+        run: nix flake check --print-build-logs
+
+      - name: Commit and push the lock
+        if: steps.update.outputs.moved
+        env:
+          MOVED: ${{ steps.update.outputs.moved }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qm "Bump flake.lock: $MOVED" flake.lock
+          git pull -q --rebase origin trunk
+          git push -q origin HEAD:trunk
+
+      - name: Check and release the bumped trunk
+        if: steps.update.outputs.moved
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref trunk -f release=true

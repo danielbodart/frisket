@@ -4,7 +4,13 @@ on:
   push:
     branches: [trunk]
   pull_request:
+  # release: publish once the check passes, as a push to trunk does. The
+  # weekly flake.lock bump sets it, its push having started nothing.
   workflow_dispatch:
+    inputs:
+      release:
+        type: boolean
+        default: false
 
 jobs:
   check:
@@ -43,15 +49,15 @@ jobs:
 
   # CONTINUOUS RELEASE. Trunk-based: every push to trunk that passes the check
   # above is published, with no manual step and no tag to cut by hand. Gated on
-  # a direct push to trunk (never a pull request) and on the check having
-  # succeeded, so a red commit never ships.
+  # a push to trunk, or a dispatch on trunk with `release` (never a pull
+  # request), and on the check having succeeded, so a red commit never ships.
   #
   # The derived version (major.commit-count.run-number, scripts/version.sh)
   # makes every build a unique, monotonic release, so two pushes cannot collide
   # on a tag and a re-run of the same commit does not either.
   release:
     needs: [check]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/trunk' && needs.check.result == 'success'
+    if: (github.event_name == 'push' || inputs.release) && github.ref == 'refs/heads/trunk' && needs.check.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
