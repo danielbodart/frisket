@@ -85,10 +85,10 @@ jobs:
           while read -r tool was; do
             now=$(mise latest "$tool@${was%.*}")
             if [ -n "$now" ] && [ "$now" != "$was" ]; then
-              sed -i "s|^$tool = \"$was\"|$tool = \"$now\"|" mise.toml
+              sed -i -E "s|^(\"?$tool\"? = )\"$was\"|\1\"$now\"|" mise.toml
               moved+=("$tool $was -> $now")
             fi
-          done < <(sed -n '/^\[tools\]/,/^\[/s/^\([a-z0-9_-]*\) = "\([0-9.]*\)"$/\1 \2/p' mise.toml)
+          done < <(sed -n -E '/^\[tools\]/,/^\[/s/^"?([a-z0-9_:-]+)"? = "([0-9.]+)"$/\1 \2/p' mise.toml)
           mise install
 
           # 3. Every Go dependency, and the vendorHash they make.
