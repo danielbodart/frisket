@@ -11,9 +11,10 @@
 # quoin is pinned to a release tag, which scripts/pin.sh moves, not this.
 # Only flake.lock is committed, named by the inputs that moved.
 #
-# A push made with GITHUB_TOKEN starts no workflow, so CI would neither
-# check nor release the bumped commit. The last step dispatches CI on trunk
-# with `release`, which publishes once its check passes, as a push does.
+# A push made with GITHUB_TOKEN starts no workflow, so CI would not
+# check the bumped commit. The last step dispatches CI on trunk without
+# `release`: it checks it, but a release would be the same code under a new
+# version, so the lock goes out with the next release a real change makes.
 name: Bump flake.lock
 
 on:
@@ -79,8 +80,8 @@ jobs:
           git pull -q --rebase origin trunk
           git push -q origin HEAD:trunk
 
-      - name: Check and release the bumped trunk
+      - name: Check the bumped trunk
         if: steps.update.outputs.moved
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ci.yml --ref trunk -f release=true
+        run: gh workflow run ci.yml --ref trunk
