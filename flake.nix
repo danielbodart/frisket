@@ -1,14 +1,17 @@
 {
   description = "Credentials on the wire, never in the sandbox";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # nixos-26.05, the release nix-config builds every host from, so what this
+  # flake builds and pushes to the cache is the derivation a host builds.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   # TEST-ONLY. frisket knows nothing about flong (PLAN.md decision 7); the
   # adapter is tested against a pinned flong because it is the layer where the
   # security properties meet and nothing else tests it. Nothing outside
-  # `checks` reads this input, so a consumer never fetches it.
+  # `checks` reads this input, so a consumer never fetches it. Pinned to a
+  # release tag, a commit flong's CI passed, which scripts/pin.sh moves.
   inputs.flong = {
-    url = "github:danielbodart/flong";
+    url = "github:danielbodart/flong/v0.157.126";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -19,7 +22,7 @@
   # input, so a consumer never fetches it. It is the release go.mod requires,
   # which the quoin-pin check holds it to and scripts/pin.sh sets in both.
   inputs.quoin = {
-    url = "github:danielbodart/quoin/v0.85.17";
+    url = "github:danielbodart/quoin/v0.91.21";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -28,15 +31,19 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
-      # The MAJOR only, which is the one part of the version that is a decision
-      # rather than a count -- 0 says the interfaces are still moving.
-      # scripts/version.sh derives the release name (major.commit-count.run-
-      # number) from the repository, and a build from a store path has no
-      # repository to count, so the two are deliberately different things: this
-      # names the package, that names the artefact CI publishes.
-      version = nixpkgs.lib.fileContents ./VERSION;
+      # nixpkgs' name for a build from a commit rather than a release:
+      # 0-unstable-YYYY-MM-DD, the date of the commit. A release is a tag
+      # named by scripts/version.sh, which needs the repository to count, and
+      # a build from a store path has none.
+      version =
+        let d = self.lastModifiedDate or "19700101"; in
+        "0-unstable-${builtins.substring 0 4 d}-${builtins.substring 4 2 d}-${builtins.substring 6 2 d}";
 
-      mkFrisket = pkgs: pkgs.buildGoModule {
+      # Go's major.minor, the one mise.toml pins: both channels compile with
+      # the same language version.
+      go = pkgs: pkgs.go_1_27;
+
+      mkFrisket = pkgs: (pkgs.buildGoModule.override { go = go pkgs; }) {
         pname = "frisket";
         inherit version;
         src = ./.;
@@ -52,7 +59,7 @@
         # activation code frisket shares with it, and galley's wire, for the
         # most a diff Always shows may hold. vendorHash = null is a nice
         # property and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-OswVQjJyYYiI1nckDv3ZCqKDuLaYipKY7bb01NN/yrg=";
+        vendorHash = "sha256-GT6EWqE2J0Iq7VAHEV3Yf8hElsTmeQY3sX9zcXzbrOY=";
 
         # A STATIC BINARY. frisket runs as a systemd unit on the host with
         # ProtectSystem=strict, and the whole point of the design is that it has
@@ -121,7 +128,7 @@
           default = pkgs.mkShell {
             # nft, for the test that loads a session's ruleset in a namespace
             # of its own; it skips without one.
-            packages = [ pkgs.go pkgs.gopls pkgs.golangci-lint pkgs.nftables ];
+            packages = [ (go pkgs) pkgs.gopls pkgs.golangci-lint pkgs.nftables ];
             # The same setting the package builds with, so a `go build` in the
             # shell produces the same binary the flake does rather than a
             # dynamically linked one that works here and nowhere else.
@@ -340,7 +347,7 @@
           # Formatting as a gate rather than a habit: this is one repository
           # with one formatter and no argument to have about it.
           gofmt = pkgs.runCommand "gofmt"
-            { nativeBuildInputs = [ pkgs.go ]; }
+            { nativeBuildInputs = [ (go pkgs) ]; }
             ''
               cd ${./.}
               unformatted=$(gofmt -l .)
@@ -487,11 +494,12 @@
 
           # The version script decides what every release is called, so it is
           # gated by the same check that gates the release; pin.sh decides
-          # which quoin it is built and tested against.
+          # which quoin, flong and galley it is built and tested against, and
+          # vendor-hash.sh what the weekly update commits with them.
           shellcheck = pkgs.runCommand "shellcheck"
             { nativeBuildInputs = [ pkgs.shellcheck ]; }
             ''
-              shellcheck ${./scripts/version.sh} ${./scripts/pin.sh}
+              shellcheck ${./scripts/version.sh} ${./scripts/pin.sh} ${./scripts/vendor-hash.sh}
               touch $out
             '';
         });
