@@ -1,7 +1,7 @@
-github.com/danielbodart/galley v0.38.28 h1:wBgarrl52TjT51jS2fSTsgF3Cl4czd38jsmXdyInoEY=
-github.com/danielbodart/galley v0.38.28/go.mod h1:LG67o+3WXE7Kj9BQ0WclOtCq0Fbx46NP3pe6PqrLzs8=
-github.com/danielbodart/quoin v0.91.21 h1:XDOhCZcYqFwi4dGRhgBZZCPEFJ6050uzP9QVdWkvpDo=
-github.com/danielbodart/quoin v0.91.21/go.mod h1:pSunKSu4865dkEmK19LVDrDFChKDF6hXw5lsKsyDh8E=
+github.com/danielbodart/galley v0.39.29 h1:lGSedRVgD0d9mJj4uf6Ak8olOp5JGUv8Yic3kdwGRvU=
+github.com/danielbodart/galley v0.39.29/go.mod h1:LG67o+3WXE7Kj9BQ0WclOtCq0Fbx46NP3pe6PqrLzs8=
+github.com/danielbodart/quoin v0.100.28 h1:zpjGIMHAqqpVdWQLOYFet7WZwxqjOl4Qb/6ibNVzaAY=
+github.com/danielbodart/quoin v0.100.28/go.mod h1:4+USIYA/mqNNXUZe0MAYkdZQjKZnSMbr4/tDv3ceaQU=
 github.com/go-jose/go-jose/v4 v4.1.7 h1:Nac/98uT5LPkfbiFuYa8ktf62a2VxwQ4xbq1GK8pV5E=
 github.com/go-jose/go-jose/v4 v4.1.7/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/vishvananda/netlink v1.3.1 h1:3AEMt62VKqz90r0tmNhog0r/PpWKmrEShJU0wJW6bV0=
