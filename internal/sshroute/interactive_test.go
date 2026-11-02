@@ -302,6 +302,9 @@ func TestAnInteractiveShellAllowedIsRelayed(t *testing.T) {
 	if err := ss.s.WindowChange(50, 132); err != nil {
 		t.Fatal(err)
 	}
+	// The resize goes on by frisket's request loop and stdin by its proxy,
+	// so the shell can answer and exit before the resize reaches it.
+	waitFor(t, "the resize relayed", func() bool { _, r, _, _ := m.state(); return len(r) > 0 })
 	fmt.Fprintln(ss.stdin, "warn careful")
 	fmt.Fprintln(ss.stdin, "say topsecretword")
 	ss.expect(t, "topsecretword\n$ ")
