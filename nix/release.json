@@ -1,0 +1,13 @@
+{
+  "version": "0.201.128",
+  "assets": {
+    "x86_64-linux": {
+      "url": "https://github.com/danielbodart/frisket/releases/download/v0.201.128/frisket-0.201.128-linux-amd64",
+      "hash": "sha256-U6Wrj4gMW52SXhvZC/HcydxWN48b0nsyEbUNSPN3fsg="
+    },
+    "aarch64-linux": {
+      "url": "https://github.com/danielbodart/frisket/releases/download/v0.201.128/frisket-0.201.128-linux-arm64",
+      "hash": "sha256-Vw19Rwygqu7+H+sE54qgfPOSdjt6/+BZB96KAX29vrY="
+    }
+  }
+}
