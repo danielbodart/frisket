@@ -3,3 +3,4 @@ result-*
 .zig-cache
 zig-out
 /bin/
+/dist/

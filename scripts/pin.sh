@@ -49,6 +49,5 @@ if $in_gomod; then
 	# Straight to GitHub: the module proxy can be minutes behind a new tag.
 	GOPROXY=direct GOFLAGS=-mod=mod go get "github.com/danielbodart/$name@$tag"
 	go mod tidy
-	scripts/vendor-hash.sh
 fi
 echo "pinned $name $tag"

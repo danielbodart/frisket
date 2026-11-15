@@ -1,26 +1,27 @@
 # The weekly update: every dependency of every kind moves, in one window
 # every danielbodart repo shares, Sunday 21:23 UTC. nix-config takes its own
-# at 23:23 on the same nixos-26.05, so every tool's Nix build here is the
-# derivation nix-config then builds, already in the danielbodart cache.
+# at 23:23 on the same nixos-26.05. Its frisket is a release's binary, pinned
+# by tag (flake.nix), so nothing here is built for it.
 #
 # What moves, in order: every flake input (nix flake update); my own repos
 # frisket takes, flong and quoin (flake inputs, test-only) and quoin and
 # galley (Go modules), to their latest release tags (scripts/pin.sh), a tag
 # only existing for a commit its CI passed; each mise.toml tool to the
 # latest patch of its pinned minor (a new minor moves by hand, with the
-# nixpkgs attribute flake.nix builds with); and every Go dependency (go get
-# -u), with flake.nix's vendorHash worked out again.
+# nixpkgs attribute); and every Go dependency (go get -u).
 #
-# The gate is everything CI runs, mise's check and nix flake check. Only if
-# it passes is anything committed, straight to trunk, never as a pull
-# request.
+# The gate is everything CI runs: mise's check and race, and nix flake check
+# with the binaries it builds made the flake's release, as CI's nix job
+# does. Only if it passes is anything committed, straight to trunk, never as
+# a pull request.
 #
 # A push made with GITHUB_TOKEN starts no workflow, so the last step
 # dispatches CI on trunk with `release`, which checks the commit and releases
-# it -- but only if mise run release-due says something in RELEASE_PATHS
-# (mise.toml) changed since the last tag. A week in which only flake.lock
-# moved releases nothing: a consumer follows its own nixpkgs, and the release
-# would be the same code under a new version.
+# it -- but only if mise run release-due says something a release is built
+# from (RELEASE_PATHS in mise.toml, and Go's pin) changed since the last
+# release. A week in which only flake.lock moved releases nothing: a
+# consumer follows its own nixpkgs, and the flake's package is the
+# release's binary whatever nixpkgs is.
 name: Weekly update
 
 on:
@@ -59,13 +60,6 @@ jobs:
             experimental-features = nix-command flakes
             system-features = nixos-test benchmark big-parallel kvm
 
-      # Read-only: only frisket's own package is pushed, by the last step.
-      - uses: cachix/cachix-action@v17
-        with:
-          name: danielbodart
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skipPush: true
-
       - uses: jdx/mise-action@v5
 
       - name: Move everything
@@ -102,10 +96,9 @@ jobs:
           done < <(sed -n -E '/^\[tools\]/,/^\[/s/^"?([a-z0-9_:-]+)"? = "([0-9.]+)"$/\1 \2/p' mise.toml)
           mise install
 
-          # 3. Every Go dependency, and the vendorHash they make.
+          # 3. Every Go dependency.
           go get -u ./...
           go mod tidy
-          if ! git diff --quiet go.sum; then scripts/vendor-hash.sh; fi
           mapfile -t mods < <(comm -13 <(echo "$before") <(gomods) | cut -d' ' -f1 | grep -v '^github.com/danielbodart/' || true)
           moved+=("${mods[@]}")
 
@@ -117,19 +110,37 @@ jobs:
           list=$(printf '%s\n' "${moved[@]}" | { grep . || true; } | paste -sd, - | sed 's/,/, /g')
           echo "moved=${list:-dependencies}" >> "$GITHUB_OUTPUT"
 
-      # 5. The gate: what CI runs, mise's check and every Nix check.
-      # As CI's, so the namespace tests run rather than skip.
-      - name: Let unprivileged user namespaces hold capabilities
+      # 5. The gate: what CI runs. As CI's, so the namespace tests and the
+      # nft one run rather than skip.
+      - name: Let unprivileged user namespaces hold capabilities, and install nft
         if: steps.update.outputs.moved
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get install -y -q --no-install-recommends nftables
 
       - name: mise run check
         if: steps.update.outputs.moved
         run: mise run check
 
-      - name: nix flake check
+      - name: mise run race
         if: steps.update.outputs.moved
-        run: nix flake check --print-build-logs
+        run: mise run race
+
+      # As CI's nix job: the flake as trunk has it, then the binaries, built
+      # as the build job builds them, made the flake's release
+      # (scripts/nix-local-release.sh, which stages a nix/release.json that
+      # the commit below must not take), and every check again.
+      - name: nix flake check, as trunk and as a release
+        if: steps.update.outputs.moved
+        run: |
+          nix flake check --print-build-logs
+          mise run build
+          V="$(scripts/version.sh)"
+          scripts/release-assets.sh "$V" "$RUNNER_TEMP/release" dist
+          scripts/nix-local-release.sh "$V" "$RUNNER_TEMP/release"
+          nix flake check --print-build-logs
+          git rm -q --cached nix/release.json
+          rm -rf nix/release.json dist
 
       # 6.
       - name: Commit and push
@@ -143,14 +154,7 @@ jobs:
           git pull -q --rebase origin trunk
           git push -q origin HEAD:trunk
 
-      # 7.
-      - name: Push frisket's package to Cachix
-        if: steps.update.outputs.moved
-        env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-        run: nix build --no-link --print-out-paths .#frisket | cachix push danielbodart
-
-      # 8. A release, if a release path moved: CI checks the pushed commit
+      # 7. A release, if a release path moved: CI checks the pushed commit
       # and releases it. A week that moved only flake.lock releases nothing.
       - name: Release, if a release path moved
         if: steps.update.outputs.moved

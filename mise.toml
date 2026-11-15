@@ -1,27 +1,33 @@
-# The toolchain and the tasks CI and people call. Go's major.minor is the one
-# nixpkgs' go_1_27 has on nixos-26.05, which flake.nix builds with, so both
-# channels compile with the same language version; the weekly update moves
-# the patch, a new minor moves by hand with the nixpkgs attribute.
+# The toolchain and the tasks CI and people call. Go is pinned to the patch:
+# a release's binaries are built by CI with this Go (scripts/build.sh), and
+# the flake's package is that release binary, not a build of its own
+# (flake.nix). Its major.minor is the one nixpkgs' go_1_27 has on
+# nixos-26.05, which flake.nix's dev shell offers to anyone without mise.
+# The weekly update moves the patch; a new minor moves by hand, with the
+# nixpkgs attribute.
 
 [tools]
 go = "1.27.3"
 shellcheck = "0.11.0"
 
 [env]
-# Static, as the flake builds it.
+# Static, as every release is (scripts/build.sh).
 CGO_ENABLED = "0"
-# What a release tag gives those who pin it: frisket ships only through Nix,
-# so its tag is the distro channel's release, and the flake and its modules
-# (flake.nix, nix/) are part of it, as is the Go module (cmd, internal and
-# the packages chase imports: docker, policy, project).
-# A change to any of these since the last release tag is released (see
-# release-due); flake.lock (a consumer follows its own nixpkgs), mise.toml
-# (the dev loop's toolchain), the tests, docs and workflows are not.
-RELEASE_PATHS = "cmd docker internal policy project go.mod go.sum flake.nix nix VERSION"
+# What a release tag gives those who pin it: the binaries, which the flake's
+# package installs, so the source and how it is built and stamped
+# (scripts/build.sh, scripts/version.sh, VERSION); the flake and its modules
+# (flake.nix, nix/); and the Go module (cmd, internal and the packages chase
+# imports: docker, policy, project). A change to any of these since the
+# last release is released, as is a move of mise.toml's Go pin, which builds
+# the binaries (scripts/release-due.sh); flake.lock (a consumer follows its
+# own nixpkgs), the rest of mise.toml, the tests, docs and workflows are
+# not, nor is nix/release.json, which a release adds on its tag's own
+# commit.
+RELEASE_PATHS = "cmd docker internal policy project go.mod go.sum flake.nix nix VERSION scripts/build.sh scripts/version.sh"
 
 [tasks.check]
-description = "Lint, unit tests and shellcheck: the dev loop and CI's fast job"
-depends = ["lint", "test", "shellcheck"]
+description = "Lint, unit tests, shellcheck and the release scripts' tests: the dev loop and CI's fast job"
+depends = ["lint", "test", "shellcheck", "scripts-test"]
 
 # lint and shellcheck are skipped while their sources stand still; test is
 # not, since Go's own test cache knows better than a glob what a test read.
@@ -34,9 +40,20 @@ run = [
   "go vet ./...",
 ]
 
+# The namespace tests create a user+network namespace and skip cleanly
+# where the kernel refuses; the steering test loads lib.steering's ruleset
+# with nft, and skips without one (CI's check job installs nftables).
 [tasks.test]
 description = "go test, every package"
 run = "go test ./..."
+
+# The race detector's runtime is C, so this is the one task that turns cgo
+# on, for itself, and needs a C compiler (CI's race job has gcc; locally,
+# `nix shell nixpkgs#gcc -c mise run race`). Nothing it builds ships: every
+# release stays static.
+[tasks.race]
+description = "go test -race, every package (needs cgo and a C compiler: CI's race job)"
+run = "CGO_ENABLED=1 go test -race ./..."
 
 [tasks.shellcheck]
 description = "shellcheck the scripts"
@@ -44,16 +61,17 @@ sources = ["scripts/*.sh"]
 outputs = { auto = true }
 run = "shellcheck scripts/*.sh"
 
-# frisket ships only as a Nix package: building it is building that, as a
-# host installs it.
-[tasks.build]
-description = "frisket's package, as a host installs it, by nix build"
-run = "nix build --print-out-paths .#frisket"
+[tasks.scripts-test]
+description = "The release scripts' own tests, against a throwaway repository and a known SHA256SUMS"
+run = ["scripts/release-due-test.sh", "scripts/release-json-test.sh"]
 
+# The binaries a release carries, built as CI's build job builds them.
+[tasks.build]
+description = "The static frisket binary for linux on amd64 and arm64, in dist/"
+run = "scripts/build.sh"
+
+# The last release is its tag's parent (scripts/last-release.sh), since a
+# release's tag is a child commit holding nix/release.json.
 [tasks.release-due]
-description = "Exit 0, printing true, if anything in RELEASE_PATHS changed since the last release tag; else print false and exit 1"
-run = '''
-set -f
-last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null) || { echo true; exit 0; }
-if [ -n "$(git diff --name-only "$last" HEAD -- $RELEASE_PATHS)" ]; then echo true; else echo false; exit 1; fi
-'''
+description = "Exit 0, printing true, if anything a release is built from (RELEASE_PATHS, Go's pin) changed since the last release; else print false and exit 1"
+run = "scripts/release-due.sh"

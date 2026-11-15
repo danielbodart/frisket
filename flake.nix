@@ -1,8 +1,9 @@
 {
   description = "Credentials on the wire, never in the sandbox";
 
-  # nixos-26.05, the release nix-config builds every host from, so what this
-  # flake builds and pushes to the cache is the derivation a host builds.
+  # nixos-26.05, the release nix-config builds every host from. The package
+  # needs little from it (a derivation that installs one file); the modules,
+  # the dev shell and the checks need the rest.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   # TEST-ONLY. frisket knows nothing about flong (PLAN.md decision 7); the
@@ -31,68 +32,72 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
-      # nixpkgs' name for a build from a commit rather than a release:
-      # 0-unstable-YYYY-MM-DD, the date of the commit. A release is a tag
-      # named by scripts/version.sh, which needs the repository to count, and
-      # a build from a store path has none.
-      version =
-        let d = self.lastModifiedDate or "19700101"; in
-        "0-unstable-${builtins.substring 0 4 d}-${builtins.substring 4 2 d}-${builtins.substring 6 2 d}";
+      # THE PACKAGE IS THE RELEASE BINARY, not a build from source (Dan,
+      # 2026-11-15): CI's build job builds it once, with the Go mise.toml
+      # pins (scripts/build.sh), tests it and publishes it, and building it
+      # again here only made a second binary that was not the one released.
+      # So a release's tag is a commit of its own, a child of the released
+      # trunk commit, that adds nix/release.json: the version, and for each
+      # system the asset's URL and hash (scripts/release-json.sh writes it;
+      # ci.yml's release job commits and tags it). A flake fetched as
+      # github:danielbodart/frisket/v<V> cannot see its tag, only its
+      # commit, which is why the version is in the file.
+      #
+      # On trunk there is no such file and no package: pin a release tag.
+      # Absent rather than an error, so `nix flake check`, lib and the dev
+      # shell still work on trunk; nixosModules.default's package option
+      # defaults to this flake's package lazily, so it is asked for only by
+      # a host that enables the service.
+      releaseFile = ./nix/release.json;
+      release =
+        if builtins.pathExists releaseFile
+        then nixpkgs.lib.importJSON releaseFile
+        else null;
 
-      # Go's major.minor, the one mise.toml pins: both channels compile with
-      # the same language version.
-      go = pkgs: pkgs.go_1_27;
-
-      mkFrisket = pkgs: (pkgs.buildGoModule.override { go = go pkgs; }) {
+      # A STATIC BINARY (scripts/build.sh: CGO_ENABLED=0), installed as
+      # bin/frisket byte for byte the file `binary` names: no stripping or
+      # patching, which a static Go binary does not need on NixOS, and which
+      # would make it differ from the release's SHA256SUMS. frisket runs as
+      # a systemd unit with ProtectSystem=strict, and the whole point of the
+      # design is that it has no moving parts inside anything it protects:
+      # cgo would drag in glibc's NSS, which resolves names through whatever
+      # the host's nsswitch.conf says.
+      mkFrisket = pkgs: { version, binary }: pkgs.stdenvNoCC.mkDerivation {
         pname = "frisket";
         inherit version;
-        src = ./.;
-
-        # Pinned rather than null, because there are dependencies: x/sys for
-        # setns, x/net for dns/dnsmessage, the one parser frisket points at
-        # hostile DNS, vishvananda/netlink for the routing steer and connect
-        # make inside a sandbox, go-jose for the JWTs a session key signs,
-        # x/crypto for ssh, both ends of an SSH route's connection, which is
-        # hostile input from the sandbox and from the machine alike, quoin's
-        # public packages, for the project policy file, the command and host
-        # patterns, the signer's and courier's wires and the peer and socket
-        # activation code frisket shares with it, and galley's wire, for the
-        # most a diff Always shows may hold. vendorHash = null is a nice
-        # property and never a security one -- see PLAN.md, decision 1.
-        vendorHash = "sha256-cvdHjJ9V4xGvln9Zj0WfdxK31odHZBBSxq+9OU459Qc=";
-
-        # A STATIC BINARY. frisket runs as a systemd unit on the host with
-        # ProtectSystem=strict, and the whole point of the design is that it has
-        # no moving parts inside anything it is protecting. cgo would drag in
-        # glibc's NSS, which resolves names through whatever the host's
-        # nsswitch.conf says -- exactly the kind of implicit configuration this
-        # is trying to remove.
-        env.CGO_ENABLED = 0;
-
-        ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
-
-        # `go test ./...`, every package. The namespace tests create a
-        # user+network namespace with clone flags and skip cleanly where the
-        # kernel refuses, so this passes in the Nix sandbox and means something
-        # on a machine where it does not have to.
-        doCheck = true;
-        checkPhase = ''
-          runHook preCheck
-          go test ./...
-          runHook postCheck
+        src = binary;
+        dontUnpack = true;
+        dontConfigure = true;
+        dontBuild = true;
+        installPhase = ''
+          runHook preInstall
+          install -Dm0755 $src $out/bin/frisket
+          runHook postInstall
         '';
-        # The ruleset lib.steering writes is loaded by nft, in a namespace of
-        # the test's own, to see a relayed port reach the session's listener.
-        nativeCheckInputs = [ pkgs.nftables ];
-
+        dontFixup = true;
         meta = {
           description = "Keeps credentials out of sandboxes by adding them on the wire";
           homepage = "https://github.com/danielbodart/frisket";
           license = nixpkgs.lib.licenses.mit;
           mainProgram = "frisket";
-          platforms = nixpkgs.lib.platforms.linux;
+          platforms = if release == null then [ ] else builtins.attrNames release.assets;
+          sourceProvenance = [ nixpkgs.lib.sourceTypes.binaryNativeCode ];
         };
       };
+
+      # The release's package for each system it has an asset for.
+      releasePackages =
+        nixpkgs.lib.mapAttrs
+          (system: asset:
+            let
+              pkgs = nixpkgs.legacyPackages.${system};
+              frisket = mkFrisket pkgs {
+                inherit (release) version;
+                binary = pkgs.fetchurl { inherit (asset) url hash; };
+              };
+            in
+            { inherit frisket; default = frisket; })
+          release.assets;
     in
     {
       # The ruleset and the listener specification, as one attrset, for any
@@ -115,37 +120,37 @@
       };
       nixosModules.flong = import ./nix/flong.nix self;
 
-      packages = forAllSystems (system:
-        let pkgs = nixpkgs.legacyPackages.${system}; in
-        rec {
-          frisket = mkFrisket pkgs;
-          default = frisket;
-        });
+      packages = if release == null then { } else releasePackages;
 
       devShells = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
         {
           default = pkgs.mkShell {
-            # nft, for the test that loads a session's ruleset in a namespace
-            # of its own; it skips without one.
-            packages = [ (go pkgs) pkgs.gopls pkgs.golangci-lint pkgs.nftables ];
-            # The same setting the package builds with, so a `go build` in the
-            # shell produces the same binary the flake does rather than a
-            # dynamically linked one that works here and nowhere else.
+            # Go, as mise.toml pins its major.minor, for a shell without
+            # mise; nft, for the test that loads a session's ruleset in a
+            # namespace of its own (it skips without one); shellcheck for
+            # mise run check. mkShell's stdenv brings a C compiler, so
+            # `mise run race` works here.
+            packages = [ pkgs.go_1_27 pkgs.gopls pkgs.golangci-lint pkgs.nftables pkgs.shellcheck ];
+            # Static, as the releases are (scripts/build.sh), rather than a
+            # dynamically linked binary that works here and nowhere else.
             CGO_ENABLED = "0";
           };
         });
 
+      # Only what needs Nix to check: the modules, lib, the pins, and, with
+      # the package, the rulesets through frisket and nft and the VM tests.
+      # gofmt, go vet, the tests and the race detector are mise's (mise run
+      # check, mise run race), run by CI on the runner with the Go the
+      # release is built with. The package exists where nix/release.json
+      # does: on a release tag, and in CI's nix job, which writes one for the
+      # binaries its own run built (scripts/nix-local-release.sh), so what
+      # the VM tests run is the binary that run releases.
       checks = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          pkg = self.packages.${system}.frisket;
         in
         {
-          # The build, which is also the unit tests, the property tests and the
-          # fuzz corpora.
-          inherit (self.packages.${system}) frisket;
-
           # ONE QUOIN. The binary compiles quoin's packages from the release
           # go.mod requires and the always test deploys the signer and courier
           # from the one flake.lock pins; were they two, the test would pass
@@ -235,81 +240,6 @@
             assert nixpkgs.lib.assertMsg (got == want) "flong protect is ${builtins.toJSON got}, want ${builtins.toJSON want}";
             pkgs.writeText "frisket-flong-protect" "ok";
 
-          # Always is off unless asked for, and asked for needs every path it
-          # signs, writes and verifies through: this module reads no option
-          # of quoin's, so nothing else could supply them.
-          always-eval =
-            let
-              eval = always: nixpkgs.lib.nixosSystem {
-                inherit system;
-                modules = [
-                  self.nixosModules.default
-                  {
-                    boot.isContainer = true;
-                    system.stateVersion = "26.05";
-                    users.users.alice = { isNormalUser = true; group = "users"; home = "/home/alice"; };
-                    services.frisket = { enable = true; user = "alice"; inherit always; };
-                  }
-                ];
-              };
-              failed = c: map (a: a.message) (builtins.filter (a: ! a.assertion) c.config.assertions);
-              settings = c: builtins.fromJSON c.config.environment.etc."frisket/config.json".source.config;
-              paths = {
-                signer = "/run/quoin-signer/agent";
-                courier = "/run/quoin-courier/sock";
-                allowedSigners = "/etc/quoin/allowed_signers";
-                fileName = "chase.json";
-              };
-              on = eval ({ enable = true; } // paths);
-              off = eval { };
-              missing = eval { enable = true; inherit (paths) signer fileName; };
-              wrong = builtins.filter (x: ! x.ok) [
-                { case = "off by default"; ok = ! (settings off) ? always && failed off == [ ]; }
-                { case = "config"; ok = (settings on).always == paths // { home = "/home/alice"; }; }
-                { case = "assertions"; ok = failed on == [ ]; }
-                { case = "missing"; ok = builtins.any (nixpkgs.lib.hasInfix "always.{courier,allowedSigners}") (failed missing); }
-              ];
-            in
-            assert nixpkgs.lib.assertMsg (wrong == [ ]) "Always judged wrongly: ${builtins.toJSON (map (x: x.case) wrong)}";
-            pkgs.writeText "frisket-always-eval" "ok";
-
-          # A policy with gitSigning gets its socket under /run/frisket-sign,
-          # in a directory systemd keeps across a restart, and needs the agent.
-          git-signing =
-            let
-              eval = extra: nixpkgs.lib.nixosSystem {
-                inherit system;
-                modules = [
-                  self.nixosModules.default
-                  {
-                    boot.isContainer = true;
-                    system.stateVersion = "26.05";
-                    users.users.alice = { isNormalUser = true; group = "users"; };
-                    services.frisket = { enable = true; user = "alice"; policies.strict = { }; };
-                  }
-                  extra
-                ];
-              };
-              unit = c: c.config.systemd.services.frisket.serviceConfig;
-              failed = c: map (a: a.message) (builtins.filter (a: ! a.assertion) c.config.assertions);
-              on = eval {
-                services.frisket.policies.trusted.gitSigning = true;
-                services.frisket.gitSigning.agent = "/run/quoin-signer/agent";
-              };
-              off = eval { };
-              noAgent = eval { services.frisket.policies.trusted.gitSigning = true; };
-              settings = c: builtins.fromJSON c.config.environment.etc."frisket/config.json".source.config;
-              wrong = builtins.filter (x: ! x.ok) [
-                { case = "config"; ok = (settings on).gitSigning == { agent = "/run/quoin-signer/agent"; policies = [ "trusted" ]; }; }
-                { case = "runtime directory"; ok = (unit on).RuntimeDirectory == "frisket-sign" && (unit on).RuntimeDirectoryPreserve == "yes"; }
-                { case = "assertions"; ok = failed on == [ ]; }
-                { case = "off"; ok = ! (settings off) ? gitSigning && ! (unit off) ? RuntimeDirectory; }
-                { case = "no agent"; ok = builtins.any (nixpkgs.lib.hasInfix "gitSigning.agent") (failed noAgent); }
-              ];
-            in
-            assert nixpkgs.lib.assertMsg (wrong == [ ]) "git signing judged wrongly: ${builtins.toJSON (map (x: x.case) wrong)}";
-            pkgs.writeText "frisket-git-signing" "ok";
-
           # A launcher's policyFile is a path template, not a shell word: an
           # absolute path with at most one {machine} and no other brace. Each
           # is read on its own, in one evaluation, since the refusal is the
@@ -339,142 +269,10 @@
               };
               takes = name: (builtins.tryEval (builtins.deepSeq eval.config.services.frisket.flong.${name}.policyFile true)).success;
               wrong = builtins.filter (n: ! takes n) (builtins.attrNames good)
-                ++ builtins.filter takes (builtins.attrNames bad);
+              ++ builtins.filter takes (builtins.attrNames bad);
             in
             assert nixpkgs.lib.assertMsg (wrong == [ ]) "policyFile judged wrongly: ${toString wrong}";
             pkgs.writeText "frisket-launcher-policyfile" "ok";
-
-          # Formatting as a gate rather than a habit: this is one repository
-          # with one formatter and no argument to have about it.
-          gofmt = pkgs.runCommand "gofmt"
-            { nativeBuildInputs = [ (go pkgs) ]; }
-            ''
-              cd ${./.}
-              unformatted=$(gofmt -l .)
-              if [ -n "$unformatted" ]; then
-                echo "not gofmt'd:" >&2
-                echo "$unformatted" >&2
-                exit 1
-              fi
-              touch $out
-            '';
-
-          # go vet from inside the package's own build, because vet needs the
-          # module's dependencies and this is where they already are.
-          govet = pkg.overrideAttrs (_: {
-            pname = "frisket-vet";
-            checkPhase = ''
-              runHook preCheck
-              go vet ./...
-              runHook postCheck
-            '';
-          });
-
-          # The tests again, under the race detector. It needs cgo -- the race
-          # runtime is C -- so this check turns it on for itself; the package
-          # is still built static, with CGO_ENABLED=0, and never ships this.
-          race = pkg.overrideAttrs (old: {
-            pname = "frisket-race";
-            env = (old.env or { }) // { CGO_ENABLED = 1; };
-            checkPhase = ''
-              runHook preCheck
-              go test -race ./...
-              runHook postCheck
-            '';
-          });
-
-          # Both steering sets, as lib.steering writes them: checked by
-          # frisket's own reader, which is what steer and connect run, and by
-          # nft itself, in a network namespace of the build's own so the check
-          # has the privilege to ask the kernel without touching anything.
-          #
-          # The relay's sets are declared, and marked after DNS and before the
-          # service address -- and in `all` before the local exemption, which
-          # would otherwise hand a relayed port to a loopback where nothing
-          # listens. And the copies the Go tests load in a namespace are
-          # lib.steering's own, so what they show is what ships; regenerate
-          # one with
-          #   nix eval --raw .#lib.steering --apply 's: (s { set = "all"; }).json' | jq . \
-          #     > internal/steering/testdata/steering-all.json
-          # and service-lan's with { set = "service"; lan = "frisket"; }.
-          #
-          # `service` with lan = "frisket" marks the local network after
-          # everything the chain marked before it, the relay above all, and
-          # after a local exemption of its own; `direct`, the default, marks
-          # none of it, and its ruleset is the one there was before the choice.
-          steering =
-            let
-              file = set: args: pkgs.writeText "steering-${set}.json"
-                (self.lib.steering args).json;
-            in
-            pkgs.runCommand "steering"
-              { nativeBuildInputs = [ pkg pkgs.nftables pkgs.util-linux pkgs.jq ]; }
-              ''
-                fail() { echo "steering $set: $*" >&2; exit 1; }
-                line() { grep -n -F -m1 -- "$1" "$set.nft" | cut -d: -f1; }
-                check() {
-                  set=$1
-                  frisket steering "$2" | tee "$set.out"
-                  grep -q '^relay sets inet frisket relay4, relay6' "$set.out" || fail "frisket steering does not print the relay sets"
-                  jq -r .ruleset "$2" > "$set.nft"
-                  grep -q '^  set relay4 { type ipv4_addr . inet_service; }$' "$set.nft" || fail "no relay4 set"
-                  grep -q '^  set relay6 { type ipv6_addr . inet_service; }$' "$set.nft" || fail "no relay6 set"
-                  dns=$(line 'th dport 53 meta mark set')
-                  r4=$(line 'ip daddr . tcp dport @relay4 meta mark set')
-                  r6=$(line 'ip6 daddr . tcp dport @relay6 meta mark set')
-                  svc=$(line 'ip daddr 192.0.2.2 ')
-                  [ -n "$dns" ] && [ -n "$r4" ] && [ -n "$r6" ] && [ -n "$svc" ] || fail "a mark is missing"
-                  [ "$dns" -lt "$r4" ] && [ "$r4" -lt "$r6" ] && [ "$r6" -lt "$svc" ] ||
-                    fail "the relay is not marked after DNS ($dns) and before the service address ($svc): $r4, $r6"
-                  # The inbound DNAT to loopback is the `service` set's, whose
-                  # sandbox has a network for pasta to forward in by.
-                  inbound=$(line 'iifname != "lo" meta nfproto ipv4 tcp dport != 230 ct state new dnat ip to 127.0.0.1' || true)
-                  spliced=$(line 'meta mark != 1 meta nfproto ipv4 ip daddr != 127.0.0.0/8 fib daddr type local tcp dport != 230 ct state new dnat ip to 127.0.0.1' || true)
-                  if [ "$set" != all ]; then [ -n "$inbound" ] && [ -n "$spliced" ] || fail "no inbound DNAT to loopback"
-                  else [ -z "$inbound$spliced" ] || fail "an inbound DNAT in a set with no network"; fi
-                  if [ "$set" = all ]; then
-                    local=$(line 'fib daddr type local return')
-                    [ -n "$local" ] && [ "$r6" -lt "$local" ] || fail "the relay is not marked before the local exemption ($local)"
-                  fi
-                  lan4=$(line '@lan4 meta l4proto tcp meta mark set' || true)
-                  lan6=$(line '@lan6 meta l4proto tcp meta mark set' || true)
-                  if [ "$set" = service-lan ]; then
-                    grep -q '^local network steered' "$set.out" || fail "frisket steering does not say the local network is steered"
-                    local=$(line 'fib daddr type local return')
-                    svc6=$(line 'ip6 daddr 2001:db8::2 ')
-                    [ -n "$local" ] && [ -n "$lan4" ] && [ -n "$lan6" ] || fail "the local network is not marked, or not after a local exemption"
-                    [ "$svc6" -lt "$local" ] && [ "$local" -lt "$lan4" ] && [ "$local" -lt "$lan6" ] ||
-                      fail "the local network is not marked after the service address ($svc6) and the local exemption ($local): $lan4, $lan6"
-                    grep -q 'ct direction original ip daddr @lan4 meta l4proto udp reject with icmpx admin-prohibited' "$set.nft" || fail "UDP to the local network is not rejected"
-                  else
-                    [ -z "$lan4$lan6" ] && ! grep -q '@lan[46]' "$set.nft" || fail "the local network is steered in a set that did not ask"
-                  fi
-                  if [ "$set" = service ]; then
-                    grep -q '^local network direct' "$set.out" || fail "frisket steering does not say the local network goes direct"
-                  fi
-                  cmp <(jq -S . "$2") <(jq -S . "$3") || fail "$3 is not what lib.steering writes"
-                  if unshare -rn true 2>/dev/null; then
-                    unshare -rn nft -c -f "$set.nft"
-                  else
-                    echo "no user namespace in this build sandbox: nft -c skipped for $set" >&2
-                  fi
-                }
-                check all ${file "all" { set = "all"; }} ${./internal/steering/testdata/steering-all.json}
-                check service ${file "service" { set = "service"; }} ${./internal/steering/testdata/steering-service.json}
-                check service-lan ${file "service-lan" { set = "service"; lan = "frisket"; }} ${./internal/steering/testdata/steering-service-lan.json}
-                touch $out
-              '';
-
-          # frisket in flong's real shape, end to end, in two VMs.
-          flong = pkgs.testers.runNixOSTest (import ./tests/flong.nix { inherit self flong; });
-
-          # Always on a session's question: answered, the session admits the
-          # rule at once and quoin's signer and courier write the workspace's
-          # chase.json, which the next launch takes; strict offers none.
-          always = pkgs.testers.runNixOSTest (import ./tests/always.nix { inherit self flong quoin; });
-
-          # `frisket dns` on a host, behind systemd-resolved, in a VM.
-          host-dns = pkgs.testers.runNixOSTest (import ./tests/host-dns.nix { inherit self; });
 
           # lib.project.reserved is exactly the list the Go test pins, so the
           # file cannot change under a consumer without a test failing here and
@@ -492,17 +290,182 @@
               touch $out
             '';
 
-          # The version script decides what every release is called, so it is
-          # gated by the same check that gates the release; pin.sh decides
-          # which quoin, flong and galley it is built and tested against, and
-          # vendor-hash.sh what the weekly update commits with them.
-          shellcheck = pkgs.runCommand "shellcheck"
-            { nativeBuildInputs = [ pkgs.shellcheck ]; }
-            ''
-              shellcheck ${./scripts/version.sh} ${./scripts/pin.sh} ${./scripts/vendor-hash.sh}
-              touch $out
-            '';
-        });
+        } // nixpkgs.lib.optionalAttrs (self.packages ? ${system}) (
+          let pkg = self.packages.${system}.frisket; in
+          {
+            # The daemon's config.json, which the next two read, is checked
+            # by running the package on it, so they need one too.
+            #
+            # Always is off unless asked for, and asked for needs every path it
+            # signs, writes and verifies through: this module reads no option
+            # of quoin's, so nothing else could supply them.
+            always-eval =
+              let
+                eval = always: nixpkgs.lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.default
+                    {
+                      boot.isContainer = true;
+                      system.stateVersion = "26.05";
+                      users.users.alice = { isNormalUser = true; group = "users"; home = "/home/alice"; };
+                      services.frisket = { enable = true; user = "alice"; inherit always; };
+                    }
+                  ];
+                };
+                failed = c: map (a: a.message) (builtins.filter (a: ! a.assertion) c.config.assertions);
+                settings = c: builtins.fromJSON c.config.environment.etc."frisket/config.json".source.config;
+                paths = {
+                  signer = "/run/quoin-signer/agent";
+                  courier = "/run/quoin-courier/sock";
+                  allowedSigners = "/etc/quoin/allowed_signers";
+                  fileName = "chase.json";
+                };
+                on = eval ({ enable = true; } // paths);
+                off = eval { };
+                missing = eval { enable = true; inherit (paths) signer fileName; };
+                wrong = builtins.filter (x: ! x.ok) [
+                  { case = "off by default"; ok = ! (settings off) ? always && failed off == [ ]; }
+                  { case = "config"; ok = (settings on).always == paths // { home = "/home/alice"; }; }
+                  { case = "assertions"; ok = failed on == [ ]; }
+                  { case = "missing"; ok = builtins.any (nixpkgs.lib.hasInfix "always.{courier,allowedSigners}") (failed missing); }
+                ];
+              in
+              assert nixpkgs.lib.assertMsg (wrong == [ ]) "Always judged wrongly: ${builtins.toJSON (map (x: x.case) wrong)}";
+              pkgs.writeText "frisket-always-eval" "ok";
+
+            # A policy with gitSigning gets its socket under /run/frisket-sign,
+            # in a directory systemd keeps across a restart, and needs the agent.
+            git-signing =
+              let
+                eval = extra: nixpkgs.lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.default
+                    {
+                      boot.isContainer = true;
+                      system.stateVersion = "26.05";
+                      users.users.alice = { isNormalUser = true; group = "users"; };
+                      services.frisket = { enable = true; user = "alice"; policies.strict = { }; };
+                    }
+                    extra
+                  ];
+                };
+                unit = c: c.config.systemd.services.frisket.serviceConfig;
+                failed = c: map (a: a.message) (builtins.filter (a: ! a.assertion) c.config.assertions);
+                on = eval {
+                  services.frisket.policies.trusted.gitSigning = true;
+                  services.frisket.gitSigning.agent = "/run/quoin-signer/agent";
+                };
+                off = eval { };
+                noAgent = eval { services.frisket.policies.trusted.gitSigning = true; };
+                settings = c: builtins.fromJSON c.config.environment.etc."frisket/config.json".source.config;
+                wrong = builtins.filter (x: ! x.ok) [
+                  { case = "config"; ok = (settings on).gitSigning == { agent = "/run/quoin-signer/agent"; policies = [ "trusted" ]; }; }
+                  { case = "runtime directory"; ok = (unit on).RuntimeDirectory == "frisket-sign" && (unit on).RuntimeDirectoryPreserve == "yes"; }
+                  { case = "assertions"; ok = failed on == [ ]; }
+                  { case = "off"; ok = ! (settings off) ? gitSigning && ! (unit off) ? RuntimeDirectory; }
+                  { case = "no agent"; ok = builtins.any (nixpkgs.lib.hasInfix "gitSigning.agent") (failed noAgent); }
+                ];
+              in
+              assert nixpkgs.lib.assertMsg (wrong == [ ]) "git signing judged wrongly: ${builtins.toJSON (map (x: x.case) wrong)}";
+              pkgs.writeText "frisket-git-signing" "ok";
+
+            # Both steering sets, as lib.steering writes them: checked by
+            # frisket's own reader, which is what steer and connect run, and by
+            # nft itself, in a network namespace of the build's own so the check
+            # has the privilege to ask the kernel without touching anything.
+            #
+            # The relay's sets are declared, and marked after DNS and before the
+            # service address -- and in `all` before the local exemption, which
+            # would otherwise hand a relayed port to a loopback where nothing
+            # listens. And the copies the Go tests load in a namespace are
+            # lib.steering's own, so what they show is what ships; regenerate
+            # one with
+            #   nix eval --raw .#lib.steering --apply 's: (s { set = "all"; }).json' | jq . \
+            #     > internal/steering/testdata/steering-all.json
+            # and service-lan's with { set = "service"; lan = "frisket"; }.
+            #
+            # `service` with lan = "frisket" marks the local network after
+            # everything the chain marked before it, the relay above all, and
+            # after a local exemption of its own; `direct`, the default, marks
+            # none of it, and its ruleset is the one there was before the choice.
+            steering =
+              let
+                file = set: args: pkgs.writeText "steering-${set}.json"
+                  (self.lib.steering args).json;
+              in
+              pkgs.runCommand "steering"
+                { nativeBuildInputs = [ pkg pkgs.nftables pkgs.util-linux pkgs.jq ]; }
+                ''
+                  fail() { echo "steering $set: $*" >&2; exit 1; }
+                  line() { grep -n -F -m1 -- "$1" "$set.nft" | cut -d: -f1; }
+                  check() {
+                    set=$1
+                    frisket steering "$2" | tee "$set.out"
+                    grep -q '^relay sets inet frisket relay4, relay6' "$set.out" || fail "frisket steering does not print the relay sets"
+                    jq -r .ruleset "$2" > "$set.nft"
+                    grep -q '^  set relay4 { type ipv4_addr . inet_service; }$' "$set.nft" || fail "no relay4 set"
+                    grep -q '^  set relay6 { type ipv6_addr . inet_service; }$' "$set.nft" || fail "no relay6 set"
+                    dns=$(line 'th dport 53 meta mark set')
+                    r4=$(line 'ip daddr . tcp dport @relay4 meta mark set')
+                    r6=$(line 'ip6 daddr . tcp dport @relay6 meta mark set')
+                    svc=$(line 'ip daddr 192.0.2.2 ')
+                    [ -n "$dns" ] && [ -n "$r4" ] && [ -n "$r6" ] && [ -n "$svc" ] || fail "a mark is missing"
+                    [ "$dns" -lt "$r4" ] && [ "$r4" -lt "$r6" ] && [ "$r6" -lt "$svc" ] ||
+                      fail "the relay is not marked after DNS ($dns) and before the service address ($svc): $r4, $r6"
+                    # The inbound DNAT to loopback is the `service` set's, whose
+                    # sandbox has a network for pasta to forward in by.
+                    inbound=$(line 'iifname != "lo" meta nfproto ipv4 tcp dport != 230 ct state new dnat ip to 127.0.0.1' || true)
+                    spliced=$(line 'meta mark != 1 meta nfproto ipv4 ip daddr != 127.0.0.0/8 fib daddr type local tcp dport != 230 ct state new dnat ip to 127.0.0.1' || true)
+                    if [ "$set" != all ]; then [ -n "$inbound" ] && [ -n "$spliced" ] || fail "no inbound DNAT to loopback"
+                    else [ -z "$inbound$spliced" ] || fail "an inbound DNAT in a set with no network"; fi
+                    if [ "$set" = all ]; then
+                      local=$(line 'fib daddr type local return')
+                      [ -n "$local" ] && [ "$r6" -lt "$local" ] || fail "the relay is not marked before the local exemption ($local)"
+                    fi
+                    lan4=$(line '@lan4 meta l4proto tcp meta mark set' || true)
+                    lan6=$(line '@lan6 meta l4proto tcp meta mark set' || true)
+                    if [ "$set" = service-lan ]; then
+                      grep -q '^local network steered' "$set.out" || fail "frisket steering does not say the local network is steered"
+                      local=$(line 'fib daddr type local return')
+                      svc6=$(line 'ip6 daddr 2001:db8::2 ')
+                      [ -n "$local" ] && [ -n "$lan4" ] && [ -n "$lan6" ] || fail "the local network is not marked, or not after a local exemption"
+                      [ "$svc6" -lt "$local" ] && [ "$local" -lt "$lan4" ] && [ "$local" -lt "$lan6" ] ||
+                        fail "the local network is not marked after the service address ($svc6) and the local exemption ($local): $lan4, $lan6"
+                      grep -q 'ct direction original ip daddr @lan4 meta l4proto udp reject with icmpx admin-prohibited' "$set.nft" || fail "UDP to the local network is not rejected"
+                    else
+                      [ -z "$lan4$lan6" ] && ! grep -q '@lan[46]' "$set.nft" || fail "the local network is steered in a set that did not ask"
+                    fi
+                    if [ "$set" = service ]; then
+                      grep -q '^local network direct' "$set.out" || fail "frisket steering does not say the local network goes direct"
+                    fi
+                    cmp <(jq -S . "$2") <(jq -S . "$3") || fail "$3 is not what lib.steering writes"
+                    if unshare -rn true 2>/dev/null; then
+                      unshare -rn nft -c -f "$set.nft"
+                    else
+                      echo "no user namespace in this build sandbox: nft -c skipped for $set" >&2
+                    fi
+                  }
+                  check all ${file "all" { set = "all"; }} ${./internal/steering/testdata/steering-all.json}
+                  check service ${file "service" { set = "service"; }} ${./internal/steering/testdata/steering-service.json}
+                  check service-lan ${file "service-lan" { set = "service"; lan = "frisket"; }} ${./internal/steering/testdata/steering-service-lan.json}
+                  touch $out
+                '';
+
+            # frisket in flong's real shape, end to end, in two VMs.
+            flong = pkgs.testers.runNixOSTest (import ./tests/flong.nix { inherit self flong; });
+
+            # Always on a session's question: answered, the session admits the
+            # rule at once and quoin's signer and courier write the workspace's
+            # chase.json, which the next launch takes; strict offers none.
+            always = pkgs.testers.runNixOSTest (import ./tests/always.nix { inherit self flong quoin; });
+
+            # `frisket dns` on a host, behind systemd-resolved, in a VM.
+            host-dns = pkgs.testers.runNixOSTest (import ./tests/host-dns.nix { inherit self; });
+
+          }
+        ));
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
     };

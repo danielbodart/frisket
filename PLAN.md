@@ -82,8 +82,10 @@ every Go SSH tool uses, and x/net already required it, so it was on the
 build list before its code was in the binary; behind it is x/sys, which
 frisket already has.
 
-`vendorHash` is therefore a pinned hash and not `null`. That is a cost, not a
-loss: `vendorHash = null` is a nice property, never a security one.
+`vendorHash` was therefore a pinned hash and not `null`. That is a cost, not a
+loss: `vendorHash = null` is a nice property, never a security one. (Since
+2026-11-15 the flake builds nothing from source, so there is no
+`vendorHash` at all: see Flake, below.)
 
 **2. frisket's listeners live inside each sandbox's network namespace, and
 frisket holds them from the host.** A socket belongs to the namespace it was
@@ -1441,17 +1443,21 @@ target state removes.
 
 ## Flake
 
-- `packages.default` — `buildGoModule`, a pinned `vendorHash`,
-  `env.CGO_ENABLED = 0`.
+- `packages.default` — the release's own static binary (`CGO_ENABLED=0`),
+  built once by CI with the Go `mise.toml` pins and fetched by hash from the
+  release, named by `nix/release.json` on the tag's own commit; absent on
+  trunk. (Until 2026-11-15, `buildGoModule` with a pinned `vendorHash`; Dan:
+  building it again from source "seems completely pointless".)
 - `nixosModules.default` — the daemon, with a `package` option defaulting to
   this flake's build, so importing the module is enough.
 - `nixosModules.flong` — the adapter.
 - `lib.steering` — the ruleset and the listener specification, as one attrset,
   for any launcher.
 - `devShells.default` — go, gopls, golangci-lint.
-- `checks` — the NixOS test, the package (`buildGoModule` runs `go test`), the
-  tests again under `-race` (with cgo, for that check alone), `gofmt`, `go vet`,
-  and both rulesets through `nft -c`. The Go version follows the oldest nixpkgs
+- `checks` — the NixOS tests and both rulesets through `nft -c`, with the
+  release's package; the module evaluations. `go test`, `-race` (with cgo,
+  for that task alone), `gofmt` and `go vet` are `mise run check` and
+  `mise run race`, which CI runs on the runner. The Go version follows the oldest nixpkgs
   a consumer is expected to use.
 - `formatter` — nixpkgs-fmt. `scripts/version.sh`, `VERSION` and the shellcheck
   gate follow flong.
