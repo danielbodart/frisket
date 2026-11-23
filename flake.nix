@@ -12,7 +12,7 @@
   # `checks` reads this input, so a consumer never fetches it. Pinned to a
   # release tag, a commit flong's CI passed, which scripts/pin.sh moves.
   inputs.flong = {
-    url = "github:danielbodart/flong/v0.162.128";
+    url = "github:danielbodart/flong/v0.168.134";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -23,7 +23,7 @@
   # input, so a consumer never fetches it. It is the release go.mod requires,
   # which the quoin-pin check holds it to and scripts/pin.sh sets in both.
   inputs.quoin = {
-    url = "github:danielbodart/quoin/v0.100.28";
+    url = "github:danielbodart/quoin/v0.120.34";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
