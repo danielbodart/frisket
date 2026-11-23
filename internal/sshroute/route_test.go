@@ -58,14 +58,14 @@ func TestARouteCompilesToItsAddressAtPort22ByDefault(t *testing.T) {
 // built, naming the field: a route frisket half-understood is a rule that
 // does not apply.
 func TestARouteIsRefusedNamingWhatIsWrong(t *testing.T) {
-	cert := func() string {
-		ca, host := newSigner(t), newSigner(t)
-		c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, ValidBefore: ssh.CertTimeInfinity}
-		if err := c.SignCert(rand.Reader, ca); err != nil {
-			t.Fatal(err)
-		}
-		return authorized(c)
+	// Built here, on the parent's t: a subtest must not FailNow its parent.
+	// A principal, since x/crypto v0.59.0 refuses to sign a certificate with none.
+	ca, host := newSigner(t), newSigner(t)
+	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, ValidPrincipals: []string{"server"}, ValidBefore: ssh.CertTimeInfinity}
+	if err := c.SignCert(rand.Reader, ca); err != nil {
+		t.Fatal(err)
 	}
+	cert := authorized(c)
 	reserved := Reserved{
 		Addrs: []netip.Addr{netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("127.77.1.9")},
 		Hosts: []string{"api.github.com", "*.internal"},
@@ -115,7 +115,7 @@ func TestARouteIsRefusedNamingWhatIsWrong(t *testing.T) {
 		{"two keys on one line", func(r *policy.SSHRoute) {
 			r.HostKeys = []string{authorized(newSigner(t).PublicKey()) + "\n" + authorized(newSigner(t).PublicKey())}
 		}, "one line"},
-		{"a certificate", func(r *policy.SSHRoute) { r.HostKeys = []string{cert()} }, "certificate"},
+		{"a certificate", func(r *policy.SSHRoute) { r.HostKeys = []string{cert} }, "certificate"},
 		{"a key listed twice", func(r *policy.SSHRoute) { r.HostKeys = append(r.HostKeys, r.HostKeys[0]) }, "twice"},
 		{"agent and key file", func(r *policy.SSHRoute) { r.KeyFile = "/home/dan/.ssh/id_ed25519" }, "more than one of agent, keyFile and passwordFile"},
 		{"agent and password file", func(r *policy.SSHRoute) { r.PasswordFile = "/run/secrets/p" }, "more than one of"},
