@@ -225,6 +225,9 @@ in
       launchers = builtins.toJSON (lib.genAttrs [ "trusted" "strict" "next" ] (name: lib.getExe nodes.machine.flong.${name}.launcher));
       frisket = lib.getExe nodes.machine.services.frisket.package;
       quoinBin = "${quoin.packages.${pkgs.stdenv.hostPlatform.system}.quoin}/bin/quoin";
+      # The signer's own user, as quoin's module names it (ssh-signer until
+      # v0.118, quoin-signer since), so its key file is the signer's to read.
+      signerUser = nodes.machine.systemd.services.quoin-signer.serviceConfig.User;
     in
     ''
       import json
@@ -287,7 +290,7 @@ in
           # Started once, so its state directory is there.
           machine.succeed("systemctl start quoin-signer.service")
           machine.succeed("SSH_ASKPASS_REQUIRE=never ssh-tpm-keygen -f /root/id_ecdsa -C dan@machine </dev/null")
-          machine.succeed("install -o ssh-signer -g ssh-signer -m 0600 /root/id_ecdsa.tpm /var/lib/quoin-signer/")
+          machine.succeed("install -o ${signerUser} -g ${signerUser} -m 0600 /root/id_ecdsa.tpm /var/lib/quoin-signer/")
           machine.succeed("systemctl restart quoin-signer.service")
           key = machine.succeed("cat /root/id_ecdsa.pub").strip()
           machine.succeed(f"echo 'dan namespaces=\"quoin-policy:*\" {key}' > /run/allowed_signers")
