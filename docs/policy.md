@@ -105,7 +105,7 @@ where JSON's decoders would keep the last.
 
 A field only the host may set has `"x-scope": "host"` in the schema: the
 document's `name`, `record`, `interactive` and `ceiling`; a route's `host`, `upstream`,
-`upstreamCA`, `credentialFile`, `credentialJSON`, `header`, `basicUser`,
+`upstreamCA`, `credentialFile`, `credentialJSON`, `header`, `bare`, `basicUser`,
 `placeholder`, `refusal`, `sessionKey` and `docker`, which say where a request
 goes and what it carries, `always`, and its `paths`, `graphql`, `git`, `encodedSlashes`
 and `ceiling`, which say what a request is and so which class answers it and

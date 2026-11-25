@@ -102,6 +102,7 @@ type RouteV2 struct {
 	CredentialFile string          `json:"credentialFile,omitempty" scope:"host"`
 	CredentialJSON *CredentialJSON `json:"credentialJSON,omitempty" scope:"host"`
 	Header         string          `json:"header,omitempty" scope:"host"`
+	Bare           bool            `json:"bare,omitempty" scope:"host"`
 	BasicUser      string          `json:"basicUser,omitempty" scope:"host"`
 	Placeholder    string          `json:"placeholder,omitempty" scope:"host"`
 	Refusal        *Refusal        `json:"refusal,omitempty" scope:"host"`

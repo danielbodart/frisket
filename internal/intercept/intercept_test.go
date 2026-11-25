@@ -373,6 +373,34 @@ func TestCredentialIsSwappedOnTheWire(t *testing.T) {
 	})
 }
 
+// A bare Authorization, as Linear takes a personal API key: the session
+// sends the placeholder there with no scheme, and the upstream gets the
+// token there with none.
+func TestABareAuthorizationIsSwapped(t *testing.T) {
+	j := &journal{}
+	up := newUpstream(t, nil)
+	cred, _ := tokenFile(t, j, realToken+"\n")
+	r := apiRoute(up, cred)
+	r.Inject = HeaderNamed("Authorization")
+	f := newFixture(t, j, r)
+	c := f.client(t, false)
+
+	req := newRequest(t, "POST", "https://"+apiHost+"/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", placeholder)
+	res, _ := get(t, c, req)
+	if res.StatusCode != 200 {
+		t.Fatalf("got %d", res.StatusCode)
+	}
+	seen := up.requests()
+	if len(seen) != 1 {
+		t.Fatalf("upstream saw %d requests", len(seen))
+	}
+	if a := seen[0].Header.Values("Authorization"); len(a) != 1 || a[0] != realToken {
+		t.Fatalf("upstream Authorization = %q, want the bare token", a)
+	}
+	assertNoSecretsLogged(t, f.journal)
+}
+
 func assertNoSecretsLogged(t *testing.T, j *journal) {
 	t.Helper()
 	all := j.String()

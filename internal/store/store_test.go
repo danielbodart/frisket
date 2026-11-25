@@ -117,7 +117,12 @@ func TestBuildRefusesAPolicyThatDoesNotHoldTogether(t *testing.T) {
 		"basicUser with no credential": func(p *policy.Policy) {
 			p.Routes[0].CredentialFile, p.Routes[0].Placeholder, p.Routes[0].BasicUser = "", "", "x-access-token"
 		},
-		"a header and basicUser":                       func(p *policy.Policy) { p.Routes[0].Header = "X-Api-Key"; p.Routes[0].BasicUser = "u" },
+		"a header and basicUser": func(p *policy.Policy) { p.Routes[0].Header = "X-Api-Key"; p.Routes[0].BasicUser = "u" },
+		"bare and a header":      func(p *policy.Policy) { p.Routes[0].Bare = true; p.Routes[0].Header = "X-Api-Key" },
+		"bare and basicUser":     func(p *policy.Policy) { p.Routes[0].Bare = true; p.Routes[0].BasicUser = "u" },
+		"bare with no credential": func(p *policy.Policy) {
+			p.Routes[0].CredentialFile, p.Routes[0].Placeholder, p.Routes[0].Bare = "", "", true
+		},
 		"a basicUser with a colon":                     func(p *policy.Policy) { p.Routes[0].BasicUser = "a:b" },
 		"git with no repositories":                     func(p *policy.Policy) { p.Routes[0].Git = &policy.GitRule{} },
 		"git with * among repositories":                func(p *policy.Policy) { p.Routes[0].Git = &policy.GitRule{Repos: []string{"*", "owner/repo"}} },

@@ -880,8 +880,8 @@ func route(r policy.Route, v2 *policy.ScopeV2, d Deps) (intercept.Route, func() 
 	if r.CredentialFile == "" {
 		// Scope only: what the client sends goes on as it came, if the scope
 		// admits it. Anything that would say otherwise is refused.
-		if r.Placeholder != "" || r.CredentialJSON != nil || r.Header != "" || r.BasicUser != "" || r.SessionKey != nil {
-			return intercept.Route{}, nil, errors.New("no credential file, so no placeholder, credentialJSON, header, basicUser or sessionKey")
+		if r.Placeholder != "" || r.CredentialJSON != nil || r.Header != "" || r.Bare || r.BasicUser != "" || r.SessionKey != nil {
+			return intercept.Route{}, nil, errors.New("no credential file, so no placeholder, credentialJSON, header, bare, basicUser or sessionKey")
 		}
 		return out, func() error { return nil }, nil
 	}
@@ -896,6 +896,10 @@ func route(r policy.Route, v2 *policy.ScopeV2, d Deps) (intercept.Route, func() 
 	switch {
 	case r.Header != "" && r.BasicUser != "":
 		return intercept.Route{}, nil, errors.New("header and basicUser: a token goes in one place")
+	case r.Bare && (r.Header != "" || r.BasicUser != ""):
+		return intercept.Route{}, nil, errors.New("bare, and header or basicUser: a token goes in one place")
+	case r.Bare:
+		out.Inject = intercept.HeaderNamed("Authorization")
 	case r.BasicUser != "":
 		if strings.ContainsAny(r.BasicUser, ":\r\n") {
 			return intercept.Route{}, nil, errors.New("basicUser holds a colon or a line break")
@@ -903,7 +907,7 @@ func route(r policy.Route, v2 *policy.ScopeV2, d Deps) (intercept.Route, func() 
 		out.Inject = intercept.BasicUser(r.BasicUser)
 	case r.Header != "":
 		if strings.EqualFold(r.Header, "Authorization") {
-			return intercept.Route{}, nil, errors.New(`header "Authorization" is the default, with Bearer; name another header for a bare token, or basicUser for Basic`)
+			return intercept.Route{}, nil, errors.New(`header "Authorization" is the default, with Bearer; bare for a bare token there, another header for one elsewhere, or basicUser for Basic`)
 		}
 		out.Inject = intercept.HeaderNamed(r.Header)
 	default:
@@ -939,9 +943,9 @@ func route(r policy.Route, v2 *policy.ScopeV2, d Deps) (intercept.Route, func() 
 // than the floor never loads. The rest is checked by
 // intercept, which builds it.
 func dockerRoute(r policy.Route, out intercept.Route) (intercept.Route, func() error, error) {
-	if r.CredentialFile != "" || r.Placeholder != "" || r.Header != "" || r.BasicUser != "" ||
+	if r.CredentialFile != "" || r.Placeholder != "" || r.Header != "" || r.Bare || r.BasicUser != "" ||
 		r.SessionKey != nil || r.CredentialJSON != nil || r.UpstreamCA != "" {
-		return intercept.Route{}, nil, errors.New("a Docker route's hop is plain HTTP over the daemon's socket: no credentialFile, placeholder, header, basicUser, sessionKey, credentialJSON or upstreamCA")
+		return intercept.Route{}, nil, errors.New("a Docker route's hop is plain HTTP over the daemon's socket: no credentialFile, placeholder, header, bare, basicUser, sessionKey, credentialJSON or upstreamCA")
 	}
 	d := r.Docker
 	if d == nil {

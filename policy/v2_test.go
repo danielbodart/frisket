@@ -308,7 +308,7 @@ func TestTheSchemaMarksTheHostsFields(t *testing.T) {
 	slices.Sort(host)
 	want := []string{
 		"ceiling", "ceiling.interactive", "interactive", "name", "record",
-		"routes.*.always", "routes.*.basicUser", "routes.*.ceiling", "routes.*.credentialFile", "routes.*.credentialJSON",
+		"routes.*.always", "routes.*.bare", "routes.*.basicUser", "routes.*.ceiling", "routes.*.credentialFile", "routes.*.credentialJSON",
 		"routes.*.docker", "routes.*.encodedSlashes", "routes.*.git", "routes.*.graphql", "routes.*.header",
 		"routes.*.host", "routes.*.paths", "routes.*.placeholder", "routes.*.refusal", "routes.*.sessionKey",
 		"routes.*.upstream", "routes.*.upstreamCA",

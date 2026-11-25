@@ -204,6 +204,9 @@ type Route struct {
 	// Header is the header the token goes in, bare. Empty means
 	// `Authorization: Bearer <token>`.
 	Header string `json:"header,omitempty"`
+	// Bare puts the token in Authorization with no scheme: Linear's
+	// personal API keys. Not with Header or BasicUser.
+	Bare bool `json:"bare,omitempty"`
 	// BasicUser puts the token in `Authorization: Basic` as the password,
 	// under this user: git over HTTPS. Not with Header.
 	BasicUser string `json:"basicUser,omitempty"`

@@ -76,6 +76,7 @@ let
       // lib.optionalAttrs (r.credentialFile != null) { inherit (r) credentialFile; }
       // lib.optionalAttrs (r.placeholder != null) { inherit (r) placeholder; }
       // lib.optionalAttrs (r.header != null) { inherit (r) header; }
+      // lib.optionalAttrs r.bare { bare = true; }
       // lib.optionalAttrs (r.basicUser != null) { inherit (r) basicUser; }
       // lib.optionalAttrs (r.git != null) { git = { inherit (r.git) repos push; }; }
       // lib.optionalAttrs (r.sessionKey != null) { sessionKey = { inherit (r.sessionKey) publicKey issuer grants; }; }
@@ -386,6 +387,14 @@ let
         default = null;
         example = "X-Api-Key";
         description = "The header the token goes in, bare. Null is `Authorization: Bearer <token>`.";
+      };
+      bare = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Put the token in `Authorization` with no scheme, as Linear takes a
+          personal API key. Not with `header` or `basicUser`.
+        '';
       };
       basicUser = mkOption {
         type = types.nullOr (types.strMatching "[^:[:space:]]+");

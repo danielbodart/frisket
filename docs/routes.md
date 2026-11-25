@@ -33,6 +33,11 @@ credentialJSON = {
 };
 ```
 
+A token goes in `Authorization: Bearer` unless the route says otherwise.
+`header = "X-Api-Key"` puts it bare in another header. `bare = true` puts it
+bare in `Authorization`, with no scheme, as Linear takes a personal API key.
+`basicUser` puts it in Basic auth, as the password (see git, below).
+
 Clients retry a 503 quietly, so a credential that stays expired is logged once,
 at error, when requests first find it so, and once more when it is fresh again.
 

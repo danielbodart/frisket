@@ -353,7 +353,7 @@ func lowerRoute(name string, r RouteV2, d DocumentV2) (Route, *ScopeV2, error) {
 	}
 	out := Route{
 		Name: name, Host: host, Upstream: lowerUpstream(r.Upstream), UpstreamCA: r.UpstreamCA,
-		CredentialFile: r.CredentialFile, CredentialJSON: r.CredentialJSON, Header: r.Header,
+		CredentialFile: r.CredentialFile, CredentialJSON: r.CredentialJSON, Header: r.Header, Bare: r.Bare,
 		BasicUser: r.BasicUser, Placeholder: r.Placeholder, Refusal: r.Refusal,
 		SessionKey: r.SessionKey, Docker: r.Docker,
 	}

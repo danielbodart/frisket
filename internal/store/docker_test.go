@@ -115,6 +115,7 @@ func TestBuildRefusesABadDockerRoute(t *testing.T) {
 		"a credential file": func(p *policy.Policy) { p.Routes[0].CredentialFile = token },
 		"a placeholder":     func(p *policy.Policy) { p.Routes[0].Placeholder = "x" },
 		"a header":          func(p *policy.Policy) { p.Routes[0].Header = "X-Registry-Auth" },
+		"bare":              func(p *policy.Policy) { p.Routes[0].Bare = true },
 		"a basic user":      func(p *policy.Policy) { p.Routes[0].BasicUser = "u" },
 		"a JSON credential": func(p *policy.Policy) { p.Routes[0].CredentialJSON = &policy.CredentialJSON{Token: "t"} },
 		"a session key": func(p *policy.Policy) {
